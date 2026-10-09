@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en-AU" data-theme="dark" data-layout="side">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aicleaner</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/web/css/app.css">
+<link rel="stylesheet" href="/web/css/editor.css">
+<script src="/web/js/prefs.js"></script>
+<script type="module" src="/web/js/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#page">Skip to content</a>
+<aside id="shell">
+  <div class="brand"><a class="title" href="#/overview">aicleaner</a></div>
+  <!-- Through the tunnel: whether what crosses it is end-to-end encrypted (the user, 2026-10-08). -->
+  <a id="tunnel-state" class="tunnel-state" href="#/settings/tunnel" hidden></a>
+  <div id="status-stack" aria-live="polite"></div>
+  <!-- Collapsed, this is an icon rail rather than nothing: the nav stays usable while narrow and
+       the filter status keeps somewhere to live (feature 55). Each mark is aria-hidden and the
+       link keeps its text, so the accessible name never becomes a picture - and the text is what
+       the rail shows as a tooltip. -->
+  <button id="nav-toggle" type="button" aria-label="Collapse the menu" title="Collapse the menu"></button>
+  <nav id="nav" aria-label="Main">
+    <a data-route="overview" href="#/overview"><span class="nav-mark" aria-hidden="true">&#x1F4CA;</span><span class="nav-text">Overview</span></a>
+    <a data-route="review" href="#/review"><span class="nav-mark" aria-hidden="true">&#x1F50E;</span><span class="nav-text">Review</span> <span class="count" hidden></span></a>
+    <div class="group">
+      <a data-route="clients" href="#/clients"><span class="nav-mark" aria-hidden="true">&#x1F3E2;</span><span class="nav-text">Client Filters</span></a>
+      <button id="clients-toggle" class="caret" type="button" aria-expanded="false" aria-controls="nav-clients" aria-label="Show clients"></button>
+    </div>
+    <!-- Global is built into this list as its first entry, so folding the clients away folds it
+         away too. It used to sit outside and stay behind. -->
+    <div id="nav-clients" hidden></div>
+    <a data-route="session" href="#/session"><span class="nav-mark" aria-hidden="true">&#x1F4AC;</span><span class="nav-text">Project Sessions</span></a>
+    <!-- The running sessions, each a link straight to its chat (the user, 2026-10-06). -->
+    <div id="nav-sessions"></div>
+    <a data-route="log" href="#/log"><span class="nav-mark" aria-hidden="true">&#x1F4DC;</span><span class="nav-text">Log</span></a>
+    <a data-route="secrets" href="#/secrets"><span class="nav-mark" aria-hidden="true">&#x1F511;</span><span class="nav-text">Secrets</span></a>
+    <a data-route="wiki" href="#/wiki"><span class="nav-mark" aria-hidden="true">&#x1F4D6;</span><span class="nav-text">Wiki</span></a>
+    <a data-route="settings" href="#/settings"><span class="nav-mark" aria-hidden="true">&#x2699;&#xFE0F;</span><span class="nav-text">Settings</span></a>
+  </nav>
+  <div class="address" id="address"></div>
+</aside>
+<div id="content">
+  <div class="toolbar">
+    <div id="message" role="status" aria-live="polite"></div>
+    <a id="signout" href="/cdn-cgi/access/logout" hidden title="Log out of Cloudflare Access on this device">Log out</a>
+    <button id="cog" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="prefs" title="Display settings"></button>
+    <div id="prefs" hidden>
+      <fieldset>
+        <legend>Layout</legend>
+        <div class="segmented">
+          <label><input type="radio" name="layout" value="side">Side</label>
+          <label><input type="radio" name="layout" value="top">Top</label>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Theme</legend>
+        <div class="segmented">
+          <label><input type="radio" name="theme" value="system">System</label>
+          <label><input type="radio" name="theme" value="light">Light</label>
+          <label><input type="radio" name="theme" value="dark">Dark</label>
+        </div>
+      </fieldset>
+    </div>
+  </div>
+  <main id="page" tabindex="-1"></main>
+</div>
+</body>
+</html>

@@ -1,0 +1,7 @@
+Client-data handling (aicleaner). Model traffic from this app goes through a local proxy that swaps client identifiers for tokens. Follow these rules for the paths the proxy cannot see.
+
+Files: never send binary files to the model. Do not read .pdf, .docx, .xlsx, .pptx, .msg, .eml or image files directly. Convert to text with a local command first and read the text output: .docx via pandoc (pandoc -t gfm --wrap=none in.docx -o in.md); .xlsx via openpyxl; .pptx via python-pptx; .pdf via pdftotext -layout (or PyMuPDF). Never convert a file to PDF or to an image as an intermediate step, and never render pages to images. For images, ask the user to describe the content or supply it as text.
+
+Identifiers: use client identifiers exactly as they appear in the context. Do not reformat, abbreviate, hyphenate, re-case or expand them, and do not invent variants.
+
+Questions or problems with this proxy: __CONTACT__.

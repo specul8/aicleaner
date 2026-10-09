@@ -1,0 +1,46 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8787,
+  "mapping": "client-map.json",
+  "log_dir": "logs",
+  "upstreams": {
+    "anthropic": "https://api.anthropic.com",
+    "openai": "https://api.openai.com"
+  },
+  "allow_non_json_paths": [],
+  "keep_tokenised_tools": [
+    "mcp__*learn*__*",
+    "mcp__context7__*"
+  ],
+  "credentials": {
+    "anthropic": {
+      "gateway_token_file": "%USERPROFILE%/.aicleaner/secrets/anthropic.gateway.token",
+      "upstream_key_file": "%USERPROFILE%/.aicleaner/secrets/anthropic.key.dpapi",
+      "upstream_key_env": "AICLEANER_ANTHROPIC_API_KEY"
+    }
+  },
+  "detect": {
+    "enabled": true,
+    "footer": true,
+    "toast": true,
+    "ui_url": ""
+  },
+  "secrets": {
+    "mode": "redact",
+    "user_file": ""
+  },
+  "attachments": {
+    "allow_images": false,
+    "pdftotext": "",
+    "ocr": true,
+    "ocr_max_pages": 10,
+    "ocr_timeout_s": 60,
+    "ocr_max_bytes": 20000000
+  },
+  "client_max_mb": 64,
+  "upstream_timeout_s": 600,
+  "logs": {
+    "detail": true,
+    "detail_retention_days": 90
+  }
+}

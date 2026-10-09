@@ -1,0 +1,1209 @@
+/* aicleaner UI: "calm security" direction. One set of tokens, redefined per theme. ASCII only. */
+
+:root,
+:root[data-theme="light"] {
+  --bg: #f4f7f6;
+  --surface: #ffffff;
+  --surface-2: #eef3f1;
+  --border: #d5dfdc;
+  --text: #10231f;
+  --muted: #4b6660;
+  --faint: #7a918b;
+  --accent: #0f766e;
+  --accent-hover: #0b5f58;
+  --accent-text: #ffffff;
+  --side-bg: #0f2e2a;
+  --side-text: #a7c4bd;
+  --side-strong: #ffffff;
+  --side-active: #1d4d46;
+  --side-border: #1d4d46;
+  --ok-bg: #e3f4ee;
+  --ok-border: #9fd8c4;
+  --ok-text: #0b7a55;
+  --warn-bg: #fdf3dc;
+  --warn-border: #e2b54a;
+  --warn-text: #8a5a00;
+  --bad-bg: #fde8e8;
+  --bad-border: #e8a0a0;
+  --bad-text: #b42318;
+  --focus: #2563eb;
+  --shadow: 0 6px 20px rgba(16, 35, 31, 0.14);
+  --mono: Consolas, "Cascadia Mono", "SFMono-Regular", Menlo, monospace;
+  --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+  --radius: 10px;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --bg: #0b1715;
+  --surface: #10201d;
+  --surface-2: #0d1b19;
+  --border: #1f3a35;
+  --text: #dcebe7;
+  --muted: #8fb3aa;
+  --faint: #5f7d76;
+  --accent: #1f7a66;
+  --accent-hover: #26927a;
+  --accent-text: #ffffff;
+  --side-bg: #06100e;
+  --side-text: #8fb3aa;
+  --side-strong: #ffffff;
+  --side-active: #153a34;
+  --side-border: #1f3a35;
+  --ok-bg: #10312b;
+  --ok-border: #1f6b5a;
+  --ok-text: #4fd1a5;
+  --warn-bg: #33280c;
+  --warn-border: #8a6d1d;
+  --warn-text: #f5c451;
+  --bad-bg: #3a1414;
+  --bad-border: #8f2d2d;
+  --bad-text: #ff8a8a;
+  --focus: #7cc4ff;
+  --shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--sans);
+  min-height: 100vh;
+}
+a { color: var(--accent); }
+:root[data-theme="dark"] a { color: #6fd6b8; }
+code, .mono { font-family: var(--mono); font-size: 0.95em; }
+h1 { font-size: 20px; margin: 0; line-height: 1.3; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+h3 { font-size: 14px; margin: 0 0 6px; }
+p { margin: 0 0 8px; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px; }
+.skip { position: absolute; left: -9999px; }
+.skip:focus { left: 8px; top: 8px; z-index: 50; background: var(--surface); padding: 6px 10px; }
+.muted { color: var(--muted); }
+.faint { color: var(--faint); }
+.small { font-size: 12px; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+/* ---- Shell: side layout (default) ------------------------------------------------------ */
+
+body { display: grid; grid-template-columns: 228px minmax(0, 1fr); }
+#shell {
+  background: var(--side-bg);
+  color: var(--side-text);
+  padding: 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+#shell .brand .title { color: var(--side-strong); font-weight: 700; font-size: 16px; text-decoration: none; letter-spacing: 0.02em; }
+#status-stack { display: flex; flex-direction: column; gap: 6px; }
+/* Through the tunnel: encrypted or observable, always in view (the user, 2026-10-08). */
+.tunnel-state { display: flex; align-items: center; gap: .4rem; padding: 5px 8px; border-radius: 6px;
+  font-size: 12px; font-weight: 600; text-decoration: none; border: 1px solid; }
+.tunnel-state[hidden] { display: none; }
+.tunnel-state.sealed { color: #3fb950; border-color: #3fb950; background: rgba(46, 160, 67, .12); }
+.tunnel-state.open { color: #d29922; border-color: #d29922; background: rgba(210, 153, 34, .12); }
+.tunnel-state .tunnel-lock-icon { display: inline-flex; }
+.tunnel-state .tunnel-lock-icon svg { width: 16px; height: 16px; }
+.tunnel-states { margin: 0 0 .6rem; display: grid; gap: .3rem .6rem; grid-template-columns: max-content 1fr; align-items: start; }
+.tunnel-states dt { margin: 0; white-space: nowrap; }
+.tunnel-states dd { margin: 0; font-size: 13px; }
+:root[data-nav="rail"] .tunnel-state { justify-content: center; padding: 5px; }
+:root[data-nav="rail"] .tunnel-state .tunnel-lock-text { display: none; }
+.status {
+  display: flex; gap: 6px; align-items: flex-start;
+  border: 1px solid; border-radius: 8px; padding: 5px 8px;
+  font-size: 12.5px; line-height: 1.35; text-decoration: none;
+}
+.status svg { flex: none; width: 14px; height: 14px; margin-top: 1px; }
+.status[data-level="green"] { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok-text) !important; }
+.status[data-level="amber"] { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-text) !important; }
+.status[data-level="red"] { background: var(--bad-bg); border-color: var(--bad-border); color: var(--bad-text) !important; }
+:root[data-theme="light"] #shell .status[data-level="green"] { background: #10312b; border-color: #1f6b5a; color: #4fd1a5 !important; }
+:root[data-theme="light"] #shell .status[data-level="amber"] { background: #33280c; border-color: #8a6d1d; color: #f5c451 !important; }
+:root[data-theme="light"] #shell .status[data-level="red"] { background: #3a1414; border-color: #8f2d2d; color: #ff8a8a !important; }
+
+#nav { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+#nav a, #nav .caret {
+  color: var(--side-text); text-decoration: none; border-radius: 6px; padding: 5px 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+#nav a:hover { color: var(--side-strong); background: var(--side-active); }
+#nav a[aria-current="page"] { background: var(--side-active); color: var(--side-strong); font-weight: 600; }
+/* A page that only works on the machine itself, seen through the tunnel: kept in place, greyed,
+   inert; its title says why (the user, 2026-10-01). */
+#nav a.nav-disabled, #nav a.nav-disabled:hover { opacity: .45; cursor: not-allowed; background: none; color: inherit; }
+#nav .group { display: flex; align-items: center; }
+#nav .group a { flex: 1; }
+#nav .caret { background: none; border: 0; cursor: pointer; padding: 5px 6px; }
+#nav .caret svg { width: 14px; height: 14px; transition: transform 0.15s; }
+.nav-mark {
+  flex: 0 0 auto; width: 1.2em; text-align: center;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 14px; line-height: 1;
+}
+
+/* ---- The nav as an icon rail (feature 55) ----------------------------------------------
+   An icon rail rather than a collapse to nothing, so the nav stays usable while narrow and the
+   filter status keeps somewhere to live. `data-nav` is set by prefs.js before first paint, for
+   the same reason `data-layout` is: otherwise the page shows 228px of nav and snaps to 48.
+
+   The links keep their text in the markup and only hide it visually, so the accessible name is
+   still a word and never a picture - and the same text is the tooltip. */
+#nav-toggle {
+  background: none; border: 0; color: var(--side-text); cursor: pointer;
+  align-self: flex-end; padding: 2px 6px; font: inherit; font-size: 15px; line-height: 1;
+}
+#nav-toggle::before { content: "\00AB"; }
+#nav-toggle:hover { color: var(--side-strong); }
+:root[data-nav="rail"] body { grid-template-columns: 56px minmax(0, 1fr); }
+:root[data-nav="rail"] #shell { padding: 12px 6px; align-items: center; }
+:root[data-nav="rail"] #nav-toggle { align-self: center; }
+:root[data-nav="rail"] #nav-toggle::before { content: "\00BB"; }
+:root[data-nav="rail"] .brand .title,
+:root[data-nav="rail"] .nav-text,
+:root[data-nav="rail"] #nav .caret,
+:root[data-nav="rail"] #address { display: none; }
+:root[data-nav="rail"] #nav { width: 100%; }
+:root[data-nav="rail"] #nav a { justify-content: center; padding: 7px 4px; }
+:root[data-nav="rail"] .nav-mark { font-size: 17px; width: auto; }
+/* The status becomes the mark at the top of the rail. It must stay a link and stay coloured:
+   it is the one indicator saying whether the filter is on, and a rail is no reason to lose it. */
+:root[data-nav="rail"] .status { padding: 5px; justify-content: center; }
+:root[data-nav="rail"] .status .status-text { display: none; }
+/* The clients sub-list has no room and no marks of its own; the Clients link still reaches it. */
+:root[data-nav="rail"] #nav-clients { display: none; }
+#nav .caret[aria-expanded="true"] svg { transform: rotate(90deg); }
+#nav .sub, #nav-clients a { padding-left: 22px; font-size: 13px; }
+#nav-clients { display: flex; flex-direction: column; gap: 1px; }
+/* Running sessions under Project Sessions, each opening its chat (the user, 2026-10-06). */
+#nav-sessions { display: flex; flex-direction: column; gap: 1px; }
+#nav-sessions:empty { display: none; }
+#nav-sessions a { padding-left: 22px; font-size: 13px; }
+#nav-sessions .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok, #4fd1a5); flex: none; }
+#nav-sessions a.waiting .dot { background: var(--warn, #c9a227); }
+:root[data-nav="rail"] #nav-sessions { display: none; }
+#nav a.bad { color: var(--bad-text); }
+#nav a svg { width: 13px; height: 13px; flex: none; }
+:root[data-theme="light"] #nav a.bad { color: #ff8a8a; }
+#nav a.bad[aria-current="page"] { background: #3a1414; }
+#nav .count {
+  margin-left: auto; background: var(--warn-text); color: #111; border-radius: 9px;
+  padding: 0 6px; font-size: 11.5px; font-weight: 700; line-height: 18px;
+}
+:root[data-theme="light"] #nav .count { background: #f5c451; }
+#shell .address { margin-top: auto; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+
+#content { min-width: 0; display: flex; flex-direction: column; }
+.toolbar {
+  display: flex; align-items: center; gap: 10px; padding: 10px 22px 0;
+  position: relative; min-height: 44px;
+}
+/* The toolbar keeps its spacer so Log out and the cog stay right-aligned; messages moved out
+   of it into the toast stack below. */
+#message { flex: 1; min-height: 20px; }
+
+/* Toasts. Fixed, so scrolling a long page cannot hide one, and stacked downward so nothing
+   replaces anything. Below the toolbar rather than over it: Log out and the cog live in that
+   corner and stay there (feature 37). */
+#toasts {
+  position: fixed; top: 52px; right: 22px; z-index: 60;
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(30rem, calc(100vw - 44px)); pointer-events: none;
+}
+.toast {
+  pointer-events: auto; display: flex; align-items: flex-start; gap: 8px;
+  flex-wrap: wrap;
+  padding: 10px 12px; border-radius: var(--radius); font-size: 13px;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-left-width: 3px;
+  box-shadow: var(--shadow);
+}
+.toast[data-level="ok"] { border-left-color: var(--ok-text); }
+.toast[data-level="error"] { border-left-color: var(--bad-text); }
+.toast[data-level="warn"] { border-left-color: var(--warn-text, var(--bad-text)); }
+/* A refusal that explains itself is three stacked parts, not three things on one line, so the
+   toast wraps and `order` keeps the dismiss button up beside the message where it belongs
+   rather than trailing the explanation. */
+.toast-text { flex: 1; overflow-wrap: anywhere; order: 0; }
+.toast-count { color: var(--muted); font-variant-numeric: tabular-nums; order: 1; }
+/* On every toast (2026-10-01), pinned to the top-right corner so an action button on the same line
+   (Undo) cannot push it inward, with a target a finger can hit. The toast keeps room for it. */
+.toast { position: relative; padding-right: 40px; }
+.toast-close {
+  position: absolute; top: 4px; right: 4px;
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  font-size: 18px; line-height: 1; width: 28px; height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 4px;
+}
+.toast-close:hover { color: var(--text); }
+.toast-why {
+  order: 3; flex: 0 0 100%; color: var(--muted);
+  font-size: 12px; line-height: 1.45; overflow-wrap: anywhere;
+}
+.toast-action {
+  order: 4; align-self: flex-start; margin-top: 2px;
+  padding: 4px 10px; border-radius: var(--radius); cursor: pointer;
+  font: inherit; font-size: 12px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+}
+.toast-action:hover:not(:disabled) { border-color: var(--text); }
+.toast-action:disabled { opacity: 0.55; cursor: default; }
+@media (max-width: 40rem) { #toasts { top: auto; bottom: 12px; right: 12px; left: 12px; width: auto; } }
+#cog {
+  background: none; border: 1px solid transparent; color: var(--muted); border-radius: 8px;
+  cursor: pointer; padding: 5px; display: flex;
+}
+#cog:hover, #cog[aria-expanded="true"] { border-color: var(--border); color: var(--text); background: var(--surface); }
+#cog svg { width: 18px; height: 18px; }
+/* Beside the cog, and only when the page came through the tunnel (see app.js showsSignOut). */
+#signout {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; font-size: 13px;
+  color: var(--muted); text-decoration: none; border: 1px solid transparent; border-radius: 8px;
+}
+#signout[hidden] { display: none; }
+#signout:hover { border-color: var(--border); color: var(--text); background: var(--surface); }
+#signout svg { width: 16px; height: 16px; }
+#prefs {
+  position: absolute; right: 22px; top: 44px; z-index: 20; width: 230px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 12px;
+}
+#prefs fieldset { border: 0; margin: 0 0 10px; padding: 0; }
+#prefs legend { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+.segmented { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.segmented label { flex: 1; text-align: center; cursor: pointer; padding: 4px 6px; font-size: 13px; position: relative; }
+.segmented label + label { border-left: 1px solid var(--border); }
+.segmented input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.segmented label:has(input:checked) { background: var(--accent); color: var(--accent-text); }
+.segmented label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+main#page { padding: 14px 22px 40px; display: flex; flex-direction: column; gap: 14px; max-width: 1280px; }
+/* The toolbar takes the same measure, so Log out and the cog line up with the right edge of the
+   cards instead of floating past them - which is what made a row that costs no horizontal space
+   look like it was holding the strip open (37). */
+.toolbar { max-width: 1280px; }
+/* And the routes whose content is data rather than prose get the width that is there. A table of
+   several hundred entries and a conversation both want it; a page of forms does not. */
+:root[data-route="clients"] main#page,
+:root[data-route="global"] main#page,
+:root[data-route="review"] main#page,
+:root[data-route="session"] main#page,
+:root[data-route="clients"] .toolbar,
+:root[data-route="global"] .toolbar,
+:root[data-route="review"] .toolbar,
+:root[data-route="session"] .toolbar { max-width: none; }
+main#page:focus { outline: none; }
+.page-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.page-head .muted { font-size: 13px; }
+.page-head .actions { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+/* ---- Shell: top layout ----------------------------------------------------------------- */
+
+:root[data-layout="top"] body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
+:root[data-layout="top"] #shell {
+  flex-direction: row; align-items: center; flex-wrap: wrap; height: auto; position: sticky;
+  top: 0; z-index: 10; padding: 8px 16px; gap: 14px; overflow: visible;
+}
+:root[data-layout="top"] #status-stack { flex-direction: row; order: 3; margin-left: auto; flex-wrap: wrap; }
+/* On a phone the top layout is forced (D48, D49, D66). There the shell scrolls away instead of
+   sticking: wrapped, it is a third of the screen, and pinned it covered the very place each page's
+   own sticky bar and table headings stick to - so rows slid under the page rather than under
+   their headings (D49). And the queue table scrolls inside its card rather than taking the page
+   sideways (D66); its headings stop sticking there, because a horizontal scroller becomes their
+   sticking frame - the lesser cost on a screen that shows a few rows at a time. */
+@media (max-width: 40rem) {
+  :root[data-layout="top"] #shell { position: static; }
+  #inbox-wrap { overflow-x: auto; }
+}
+/* Wraps: on a phone the top layout is forced (D48, D49, D66) and eight links do not fit 390px. */
+:root[data-layout="top"] #nav { flex-direction: row; flex-wrap: wrap; margin: 0; gap: 2px; align-items: center; position: relative; }
+:root[data-layout="top"] #nav .sub { padding-left: 8px; }
+:root[data-layout="top"] #nav-clients {
+  position: absolute; top: 34px; left: 150px; z-index: 30; min-width: 190px;
+  background: var(--side-bg); border: 1px solid var(--side-border); border-radius: 8px; padding: 6px;
+  box-shadow: var(--shadow);
+}
+:root[data-layout="top"] #nav-clients a { padding-left: 8px; }
+:root[data-layout="top"] #nav-sessions { flex-direction: row; flex-wrap: wrap; }
+:root[data-layout="top"] #nav-sessions a { padding-left: 8px; }
+:root[data-layout="top"] #shell .address { display: none; }
+
+/* ---- Common components ----------------------------------------------------------------- */
+
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.card.warn { border-color: var(--warn-border); }
+/* Arrived here from a link that named this card (#/settings/<card>). Fades out by itself, because
+   a highlight that stays stops being one. */
+.card.found { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent); transition: box-shadow .4s ease, border-color .4s ease; }
+@media (prefers-reduced-motion: reduce) { .card.found { transition: none; } }
+.card.emergency { border-width: 2px; border-color: var(--bad-border); }
+#inbox td.seen-with .chip { margin: 0 4px 4px 0; }
+/* Resizable columns. Fixed layout is what makes a width an instruction: under the default auto
+   algorithm a set width is one input among several and is quietly overridden when content does not
+   fit. It is switched on only once a column has actually been sized - applying it up front re-laid
+   out every table that had been happily automatic, which moved cells out from under their own
+   buttons. Until then a table looks and behaves exactly as it always did. The grip straddles the
+   cell edge so there is something to aim at without widening the gap between columns. */
+table[data-resizable][data-cols-fixed] { table-layout: fixed; }
+table[data-resizable] th { position: relative; }
+.col-grip {
+  position: absolute; top: 0; right: -4px; z-index: 2;
+  width: 8px; height: 100%; cursor: col-resize;
+  background: none; border: none; touch-action: none;
+}
+.col-grip::after {
+  content: ""; position: absolute; top: 20%; left: 3px; width: 2px; height: 60%;
+  background: var(--border); border-radius: 1px; opacity: 0; transition: opacity 0.12s;
+}
+.col-grip:hover::after, .col-grip:focus-visible::after, .col-grip.dragging::after { opacity: 1; }
+.col-grip:focus-visible { outline: 2px solid var(--focus); outline-offset: -1px; }
+.col-grip.dragging::after { background: var(--accent); }
+/* Review only (#inbox): the columns whose content is fixed are fixed; Identifier, Seen and Seen
+   with have no width and share what is left, which is where the long values are. */
+#inbox { table-layout: fixed; }
+#inbox th.pick, #inbox td.pick { width: 44px; padding: 0; }   /* the select column: see .pick-hit */
+#inbox th.kind, #inbox td.kind { width: 180px; }
+#inbox th.map, #inbox td.map { width: 190px; }
+#inbox th.actions, #inbox td.actions { width: 140px; }
+#inbox th.bin, #inbox td.bin { width: 40px; text-align: right; padding-left: 0; }
+/* Kind is never cut off: it wraps, and at this width no label takes more than two lines. */
+#inbox td.kind { max-width: none; white-space: normal; overflow: visible; }
+#inbox td.kind .chip { display: inline-block; white-space: normal; line-height: 1.3; }
+#inbox td.map select { width: 100%; }
+button.icon.dismiss:hover { color: var(--bad-text); border-color: var(--bad-border); }
+#inbox th button.sort { background: none; border: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+#inbox th[aria-sort="ascending"] button.sort::after { content: " \25B2"; }
+#inbox th[aria-sort="descending"] button.sort::after { content: " \25BC"; }
+.card.emergency h2 { color: var(--bad-text); }
+.card.bad { border-color: var(--bad-border); }
+.grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 1000px) { .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } .grid-2 { grid-template-columns: 1fr; } }
+
+button, .btn {
+  font: inherit; font-size: 13px; cursor: pointer; border-radius: 7px; padding: 5px 12px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  display: inline-flex; align-items: center; gap: 6px; line-height: 1.3;
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button.primary:hover { background: var(--accent-hover); }
+button.danger { color: var(--bad-text); border-color: var(--bad-border); }
+button:disabled { opacity: 0.55; cursor: not-allowed; }
+button.icon {
+  padding: 4px; border-color: transparent; background: none; color: var(--muted);
+}
+button.icon:hover { color: var(--text); border-color: var(--border); }
+button.icon.danger:hover { color: var(--bad-text); border-color: var(--bad-border); }
+button svg, .btn svg { width: 16px; height: 16px; }
+/* Emoji glyphs (D21, 39). They carry their own colour, so nothing here tries to tint them - the
+   button's border and text still respond, which is what marks an action button. Fixed width so a
+   row of them lines up the way the 16px SVGs did, and a font stack that names the emoji faces
+   first: without it a glyph can fall back to a monochrome text presentation and lose the colour
+   that is the whole point. */
+.emoji {
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 15px; line-height: 1; width: 1.15em; text-align: center;
+  display: inline-block; flex: 0 0 auto; font-style: normal;
+}
+button.icon .emoji { font-size: 16px; }
+
+input[type="text"], input[type="search"], input[type="number"], input[type="password"], select, textarea {
+  font: inherit; font-size: 13px; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: 7px; padding: 5px 8px; min-width: 0;
+}
+textarea { font-family: var(--mono); width: 100%; min-height: 70px; }
+input:focus, select:focus, textarea:focus { border-color: var(--focus); outline: none; }
+input.invalid { border-color: var(--bad-border); }
+label.field { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
+.form-row { display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap; }
+.hint { font-size: 12px; color: var(--muted); }
+.error-text { font-size: 12px; color: var(--bad-text); }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+td { padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+td.actions, th.actions { width: 1%; white-space: nowrap; }
+/* Nothing scrolls sideways. A cell is as wide as its column and clips what does not fit, with an
+   ellipsis; hovering shows the whole value (app.js setupClipTitles). max-width: 0 is what lets an
+   auto-layout table share out the width instead of growing to the longest string. */
+td { max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td > div, td > p, td > code, td > .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+td select, td input { max-width: 100%; }
+/* A label/value table (row headers in the body, as on Settings > Advanced): the label is as wide as
+   its words and the value takes the rest, wrapping rather than clipping, so a path is read whole. */
+tbody th { width: 1%; white-space: nowrap; padding-right: 16px; }
+tbody th + td { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+/* Buttons keep their width and never clip; a confirmation floats over the row instead of widening
+   the table, anchored at its right edge and reaching left, so it is always on screen. */
+td.actions, td.bin { max-width: none; overflow: visible; position: relative; }
+td.actions .confirm {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%); z-index: 5;
+  padding: 6px 10px; border: 1px solid var(--bad-border); border-radius: 8px;
+  background: var(--surface); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); white-space: nowrap;
+}
+tr:has(td.actions .confirm) td { background: var(--bad-bg, rgba(200, 60, 60, 0.08)); }
+td .actions-wrap { display: flex; gap: 2px; align-items: center; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 4px; border-radius: 9px; padding: 0 8px;
+  font-size: 12px; line-height: 20px; border: 1px solid var(--border); background: var(--surface-2);
+  color: var(--muted); white-space: nowrap;
+}
+.chip.ok { background: var(--ok-bg); border-color: var(--ok-border); color: var(--ok-text); }
+/* A form that does not replace everywhere its text appears says so beside its shape (23). */
+.chip.match { margin-left: .4rem; }
+/* Where an entry came from (30). A button, not a span, because the detail behind it has to be
+   reachable by tap and by keyboard - a title attribute is neither. */
+.chip.source { margin-left: .4rem; cursor: pointer; font: inherit; font-size: 11.5px; }
+.chip.source:hover, .chip.source:focus { border-color: var(--text); color: var(--text); }
+.match-near { margin-top: .25rem; gap: .25rem; align-items: center; }
+.match-near .match-words { min-width: 8rem; }
+td .match, td .kind { max-width: 100%; }
+.chip.warn { background: var(--warn-bg); border-color: var(--warn-border); color: var(--warn-text); }
+.chip.bad { background: var(--bad-bg); border-color: var(--bad-border); color: var(--bad-text); }
+.chip button { padding: 0 2px; border: 0; background: none; color: inherit; font-size: 13px; }
+
+.banner { border: 1px solid; border-radius: var(--radius); padding: 12px 16px; }
+.banner .headline { font-size: 16px; font-weight: 700; display: flex; gap: 8px; align-items: center; }
+.banner .headline svg { width: 18px; height: 18px; flex: none; }
+.banner .detail { margin-top: 3px; }
+.banner[data-level="green"] { background: var(--ok-bg); border-color: var(--ok-border); }
+.banner[data-level="green"] .headline { color: var(--ok-text); }
+.banner[data-level="amber"] { background: var(--warn-bg); border-color: var(--warn-border); }
+.banner[data-level="amber"] .headline { color: var(--warn-text); }
+.banner[data-level="red"] { background: var(--bad-bg); border-color: var(--bad-border); }
+.banner[data-level="red"] .headline { color: var(--bad-text); }
+.banner a { font-weight: 600; }
+
+.tile { display: flex; flex-direction: column; gap: 2px; }
+.tile .label { color: var(--muted); font-size: 12.5px; }
+.tile .value { font-size: 20px; font-weight: 700; }
+.tile .sub { color: var(--muted); font-size: 12.5px; }
+.tile.warn { border-color: var(--warn-border); }
+
+details.more { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+details.more > summary { cursor: pointer; padding: 10px 14px; font-weight: 600; }
+details.more > div { padding: 0 14px 12px; }
+pre.diagram { font-family: var(--mono); font-size: 12px; overflow-x: auto; background: var(--surface-2); padding: 10px; border-radius: 8px; }
+
+.empty { color: var(--muted); padding: 10px 0; }
+.saved { color: var(--ok-text); font-size: 12px; display: inline-flex; align-items: center; gap: 3px; }
+.saved svg { width: 13px; height: 13px; }
+.confirm { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; color: var(--bad-text); }
+
+/* ---- Clients --------------------------------------------------------------------------- */
+
+.client { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.client.has-warn { border-color: var(--warn-border); }
+.client.has-bad { border-color: var(--bad-border); }
+.client-toggle {
+  width: 100%; background: none; border: 0; border-radius: var(--radius); padding: 9px 14px;
+  display: flex; align-items: center; gap: 10px; font-size: 14px; text-align: left;
+}
+.client-toggle:hover { background: var(--surface-2); border: 0; }
+.client-toggle .name { font-weight: 700; }
+.client-toggle .desc { color: var(--muted); font-size: 12.5px; }
+.client-toggle .count { margin-left: auto; color: var(--muted); font-size: 12.5px; }
+.client-toggle svg.chev { width: 14px; height: 14px; color: var(--muted); transition: transform 0.15s; }
+.client-toggle[aria-expanded="true"] svg.chev { transform: rotate(90deg); }
+.client-body { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 12px; }
+/* The filter bar and the column headings stay put while the rows scroll past.
+   A client with several hundred entries is the normal case, so scrolling into one used to leave
+   you reading a grid of untitled columns, with the filter box off the top of the window - the
+   longer the list, the more it cost, which is exactly backwards (32).
+   The bar sticks first, at the top, and the headings take their offset from its height, so the
+   two stack rather than overlap. --tools-h is the bar's own height; the fallback covers the
+   moment before the script measures it. */
+.client-body { --tools-h: 3rem; }
+.client-body .tools {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 3;
+  background: var(--surface); padding: 6px 0;
+}
+.client-body .tools input[type="search"] { flex: 1; min-width: 200px; }
+/* A sticky th needs its own background: the rows scroll UNDER it, not behind the table. And the
+   border travels with it, because a bottom border on a sticky cell is painted at its own edge. */
+/* Put aside by a kind toggle, as hidden-by-filter is by the search box. Both are "out of view",
+   and an action never touches a row that is out of view. */
+tr.hidden-by-kind { display: none; }
+.kind-toggles { display: flex; gap: 4px; flex-wrap: wrap; }
+button.kind-toggle { cursor: pointer; border: 1px solid var(--border); background: none; color: var(--muted); }
+button.kind-toggle.on { background: var(--surface-2); color: var(--text); border-color: var(--accent); }
+/* A heading you can sort by says so, and says which way it went. */
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--text); }
+th.sorted-asc::after { content: " \2191"; }
+th.sorted-desc::after { content: " \2193"; }
+
+.client-body table.entries thead th {
+  position: sticky; top: var(--tools-h); z-index: 2;
+  background: var(--surface);
+  box-shadow: inset 0 -1px 0 var(--border);
+  border-bottom: 0;
+}
+tr.entry td.real { cursor: pointer; }
+tr.entry.editing td { background: var(--surface-2); }
+tr.entry.invalid td { background: var(--bad-bg); }
+tr.entry.invalid td.reason { color: var(--bad-text); font-size: 12.5px; }
+tr.entry input { width: 100%; }
+tr.entry.hidden-by-filter, #inbox tr.hidden-by-filter, .ignores > .chip.hidden-by-filter { display: none; }
+/* 14rem where there is room for it, and never wider than its row: a fixed minimum pushed the
+   Review bar off a phone's screen once the bar grew its outcome groups (D45). */
+#review-filter { flex: 1 1 14rem; min-width: 0; max-width: 100%; }
+.callout { border: 1px solid var(--warn-border); background: var(--warn-bg); border-radius: 8px; padding: 8px 12px; }
+.callout.bad { border-color: var(--bad-border); background: var(--bad-bg); }
+.callout b { color: var(--warn-text); }
+/* Settings, "What your AI clients are pointed at": paths and URLs wrap anywhere rather than widen
+   the page on a phone. */
+.routing-table { width: 100%; table-layout: fixed; }
+.routing-table th { width: 8.5rem; vertical-align: top; }
+.routing-table td, .routing-override .mono { overflow-wrap: anywhere; word-break: break-all; max-width: none; white-space: normal; }
+/* A client key, shown once (DECISIONS 51): 43 characters with no break in them, so let it wrap. */
+.client-key { overflow-wrap: anywhere; user-select: all; }
+.callout.bad b { color: var(--bad-text); }
+pre.raw { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 10px; border-radius: 8px; overflow-x: auto; margin: 0; }
+pre.raw mark { background: var(--bad-bg); color: var(--bad-text); outline: 1px solid var(--bad-border); }
+.ignores { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.client-list { display: flex; flex-direction: column; gap: 8px; }
+label.check { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; }
+tr.entry.locked td { color: var(--muted); }
+tr.entry.locked td.real { cursor: default; }
+.lock { display: inline-flex; color: var(--muted); padding: 4px; }
+.lock svg { width: 16px; height: 16px; }
+.page-head .rename svg { width: 15px; height: 15px; }
+form.rename { margin: 0; }
+
+/* Session page: the transcript of what was said, and by whom. */
+.log {
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: .75rem;
+  margin-bottom: .75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.turn { display: flex; gap: .75rem; padding: 0.35rem 0; border-bottom: 1px solid var(--border); }
+.turn:last-child { border-bottom: 0; }
+.turn .who { flex: 0 0 5rem; color: var(--muted); font-size: 0.85rem; text-transform: uppercase; }
+.turn div { white-space: pre-wrap; }
+.turn.you div { color: var(--text); }
+.turn.claude div { color: var(--text); }
+/* A reply drawn as Markdown (D107): the document's own spacing, not the transcript's pre-wrap, and
+   tight enough to read as a turn rather than a page. */
+.turn .md-reply, .turn .md-reply div { white-space: normal; }
+.turn .md-reply { max-width: none; padding: 0; min-width: 0; flex: 1 1 auto; }
+.turn .md-reply > :first-child { margin-top: 0; }
+.turn .md-reply > :last-child { margin-bottom: 0; }
+.turn .md-reply p, .turn .md-reply ul, .turn .md-reply ol { margin-bottom: .5rem; }
+.turn .md-reply h1, .turn .md-reply h2, .turn .md-reply h3 { margin: .6rem 0 .35rem; }
+.turn.tool div { color: var(--muted); font-style: italic; }
+/* Where a picked-up conversation ends and this sitting starts. */
+.turn.resumed-here { border-top: 1px dashed var(--border); margin-top: .5rem; padding-top: .5rem; }
+.turn.resumed-here div { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+#session-prompt { width: 100%; }
+
+/* The session file tree: a column beside the transcript, and one row per entry. */
+/* The tree lives under the session list now (42), so the styling that used to hang off
+   `.session-split .tree` hangs off the panel itself - it has to survive the wrapper going away,
+   which is also what keeps feature 62's sideways scroll working. */
+/* One line per file, and the panel scrolls sideways rather than wrapping a path mid-word (62).
+   `word-break: break-all` used to fold `C:\Repos\ContosoWebsite` into two lines split at
+   no meaningful point, which costs a row of height per long name in a panel whose whole job is
+   to let you scan names. */
+/* Two capped, independently scrolling panes stacked in one column would make a 64rem run with
+   two scrollbars inside a page that also scrolls. The list keeps a modest cap and the tree takes
+   what is left of the viewport, so the column ends where the window does. */
+.session-side { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+#session-files { max-height: calc(100vh - 20rem); min-height: 14rem; overflow: auto; }
+/* Under the transcript: what Claude is doing (46) and the way back down once the pane has stopped
+   following (43). Below it rather than over it, so neither covers the last line of the reply. */
+.session-stream { display: flex; flex-direction: column; min-width: 0; }
+.session-underlog { display: flex; align-items: center; gap: 8px; min-height: 1.6rem; margin-top: .25rem; }
+#session-doing { font-style: italic; }
+/* What was started in the background (49). Under the transcript rather than beside it: it is a
+   short list that grows by a row at a time, and the transcript is the pane that wants width.
+   Hidden entirely when empty - it should not take space to say nothing. */
+#session-background {
+  margin-top: .4rem; padding: .5rem .65rem; font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2);
+}
+#session-background[hidden] { display: none; }
+.bg-head {
+  font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted); font-weight: 700; margin-bottom: .3rem;
+}
+.bg-row { display: flex; align-items: baseline; gap: .5rem; padding: .15rem 0; }
+.bg-name { font-weight: 600; flex: 0 0 auto; }
+.bg-what { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; }
+.bg-since { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.bg-insert { border: 0; background: none; color: inherit; cursor: pointer; opacity: .6; padding: 0 .25rem; }
+.bg-insert:hover, .bg-insert:focus { opacity: 1; }
+.to-latest { margin-left: auto; font-size: 12px; padding: 2px 8px; }
+.tree-root { font-weight: 600; margin-top: .5rem; white-space: nowrap; }
+/* Files heading with its Refresh beside it: listings are cached now, so there has to be a way
+   to ask again (D32, D33). */
+.tree-head { align-items: baseline; justify-content: space-between; }
+.tree-refresh { font-size: 12px; padding: 2px 8px; }
+/* Searching the tree by name (feature 90): the glass sits right after the heading; while a search
+   runs its status line pulses, so a slow folder reads as working rather than empty. */
+/* "Files" | "Search": the pair takes the heading's place; Refresh stays at the right. */
+.tree-head .tree-view-switch { margin-right: auto; }
+.tree-search-box { width: 100%; margin: 4px 0; }
+.tree-search-status.searching { animation: tree-searching 1s ease-in-out infinite alternate; }
+@keyframes tree-searching { from { opacity: 1; } to { opacity: 0.35; } }
+.tree-row.search-hit .tree-text { white-space: normal; word-break: break-all; }
+/* A search that stopped early says why, larger than the ordinary count (D146). */
+.tree-search-status.stopped { font-size: 14px; color: var(--text); padding: .35rem .5rem; margin: .25rem 0;
+  border-left: 3px solid var(--warn, #d29922); background: var(--surface-2); border-radius: 0 4px 4px 0; }
+.tree-search-status .search-stop b { font-size: 15px; }
+.tree-search-more { margin-left: .25rem; font-size: 13px; }
+.tree-branch { display: contents; }
+/* `width: max-content; min-width: 100%` is what makes the sideways scroll work: the row grows to
+   fit the longest name rather than being clipped to the panel, and still fills the panel when the
+   name is short - so the hover highlight covers the whole row, indent included, and reads as one
+   thing. */
+.tree-row { display: flex; align-items: center; gap: .25rem;
+  white-space: nowrap; width: max-content; min-width: 100%; border-radius: 4px; }
+.tree-row:hover, .tree-row:focus-within { background: var(--surface-2); }
+.tree-row[data-depth="1"] { padding-left: 1rem; }
+.tree-row[data-depth="2"] { padding-left: 2rem; }
+.tree-row[data-depth="3"] { padding-left: 3rem; }
+.tree-row[data-depth="4"] { padding-left: 4rem; }
+.tree-row[data-depth="5"] { padding-left: 5rem; }
+.tree-row[data-depth="6"] { padding-left: 6rem; }
+.tree-row .tree-name { background: none; border: 0; color: inherit; font: inherit; text-align: left;
+                       padding: .1rem .2rem; cursor: default; flex: 1 0 auto;
+                       display: inline-flex; align-items: baseline; gap: .3rem; }
+/* The triangle now means only open-or-closed, and the folder/file mark says which it is (39).
+   A fixed width on the chevron keeps names aligned whether a row is a folder or a file. */
+.tree-chev { flex: 0 0 auto; color: var(--muted); font-size: 1.5em; line-height: 1; }
+/* The triangle is its own button (the user, 2026-10-01): half as big again, in a 28px square so a
+   finger finds it; the negative margin keeps rows from growing by the whole target. A file gets a
+   space the same width, so names line up. */
+.tree-toggle, .tree-toggle-space { flex: 0 0 auto; width: 28px; height: 28px; margin: -3px 0;
+  display: inline-flex; align-items: center; justify-content: center; }
+.tree-toggle { background: none; border: 0; padding: 0; color: inherit; cursor: pointer; border-radius: 4px; font: inherit; }
+.tree-toggle:hover .tree-chev, .tree-toggle:focus-visible .tree-chev { color: var(--text, inherit); }
+.tree-toggle:hover { background: var(--surface); }
+.tree-mark { flex: 0 0 auto;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  font-size: 13px; line-height: 1; }
+.tree-text { min-width: 0; }
+.tree-row button.tree-name { cursor: pointer; }
+/* A folder that cannot be read (or a link out of the project): shown, marked, not usable. */
+.tree-row button.tree-name.blocked { cursor: not-allowed; opacity: .6; }
+/* Chosen for acting on several at once (feature 97): the pressed-button look, so it reads as chosen. */
+.tree-row button.tree-name.selected, .tree-root button.tree-name.selected {
+  background: var(--accent); color: var(--accent-text); border-radius: 4px; box-shadow: inset 0 0 0 1px var(--focus);
+}
+/* Several selected: what each action covers sits on a second row inside the button (taller, not wider). */
+.tree-menu.group button { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.25; }
+.tree-menu-detail { font-size: 11px; opacity: .8; }
+.tree-menu button:not(:disabled) { white-space: nowrap; }
+.tree-row button.tree-name:hover { text-decoration: underline; }
+/* A file or folder's actions open under its name when it is tapped or clicked (the user,
+   2026-09-30), laid over the row below. The fixed column on the right they replace covered the end
+   of long names, and revealing it on hover left phones out. */
+.tree-row, .tree-root { position: relative; }
+.tree-row .tree-name.file { cursor: pointer; }
+.tree-menu {
+  position: absolute; top: 100%; left: 1.4rem; z-index: 5; display: flex; gap: .25rem;
+  padding: .2rem; border: 1px solid var(--border); border-radius: 6px; background: var(--surface);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .35);
+}
+.tree-row[data-depth] .tree-menu { left: auto; }
+.tree-menu button { border: 1px solid var(--border); background: var(--surface-2); color: inherit;
+  border-radius: 4px; padding: .15rem .5rem; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.tree-menu button:disabled { opacity: .45; cursor: default; }
+/* The tree had its own breakpoint; the shell below now covers both panes at once. */
+
+/* The shell's layout is with the working band, below (feature 51). */
+.session-main { display: grid; gap: 1rem; }
+/* Continue | Folder | Asks, a third each (D62). minmax(0, 1fr) rather than 1fr: a select sizes
+   itself to its longest option, and 1fr would let a long conversation title widen its column at
+   the others' expense. The closed box ellipses; the whole value is on its title. */
+.session-head { align-items: center; }
+.session-head #session-run { margin-left: auto; }
+.session-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.session-controls .field { display: flex; flex-direction: column; gap: 3px; min-width: 0;
+  font-size: 12.5px; color: var(--muted); }
+.session-controls select { width: 100%; text-overflow: ellipsis; }
+/* Where sessions start (DECISIONS 64): a path, so it wraps rather than widening the page on a phone. */
+.session-home { min-width: 0; overflow-wrap: anywhere; padding-top: .3rem; color: var(--text); }
+@media (max-width: 50rem) {
+  .session-controls { grid-template-columns: 1fr; }
+}
+#session-list { max-height: 22rem; overflow: auto; }
+/* The running sessions, as wide as their text and side by side, wrapping onto another line inside
+   the card only when the line is full (the user, 2026-10-05). */
+.active-sessions:not(.empty) { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .25rem; }
+.session-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem; max-width: 100%;
+  padding: .4rem .6rem; border: 1px solid var(--border); border-radius: 6px;
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.session-row:hover { border-color: var(--accent); }
+.session-row.selected { border-color: var(--accent); background: var(--surface-2); }
+.session-row .session-name { font-weight: 600; word-break: break-all; }
+/* The project profile editor: one tab per profile, one profile shown at a time, Save / Delete /
+   Close on the bottom row acting on the open tab (the user, 2026-10-04). Inside a tab, option A
+   of the settings mockups - six columns at desktop widths, three on a narrow window, one on a
+   phone. Buttons under a box stay at their own width rather than stretching across the column. */
+#session-editor:empty { display: none; }
+.p-tabs { display: flex; flex-wrap: wrap; gap: .25rem; margin-top: .75rem; }
+.p-tab { display: inline-flex; align-items: center; gap: .3rem; padding: .35rem .9rem; font: inherit;
+  color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-bottom: 0;
+  border-radius: 6px 6px 0 0; cursor: pointer; }
+.p-tab:hover { color: var(--text); }
+.p-tab.selected { color: var(--accent); background: var(--surface); font-weight: 600; border-color: var(--accent); }
+.profile-row { min-width: 0; margin: 0; padding: 1rem; border: 1px solid var(--border);
+  border-radius: 0 8px 8px 8px; }
+.p-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .75rem 1rem; align-items: start; }
+.p-grid > * { min-width: 0; }
+.p-grid input:not([type="hidden"]), .p-grid select, .p-grid textarea { width: 100%; box-sizing: border-box; }
+.p-grid .field > button, .p-grid .field > .pick-folder { align-self: flex-start; }
+.p-half { grid-column: span 3; }
+.p-full { grid-column: 1 / -1; }
+.p-home-row { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
+/* "Home folder - <path> (how)" on the heading line (the user, 2026-10-05), the why under it. */
+.p-home-head { display: block; }
+.p-home-label { white-space: nowrap; }
+.p-home-head .p-home { color: var(--text); word-break: break-all; }
+.p-home-why { font-size: 12px; }
+/* Workspace files: the list with the create question beside it, the browse button with Yes beside
+   that (the user, 2026-10-05). An empty side column takes no room. */
+.p-ws { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
+.p-ws-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem .75rem; align-items: start; }
+.p-slot-create-ask, .p-slot-create-yes { max-width: 22rem; }
+.create-offer p { margin: 0 0 .2rem; }
+.p-tab-add { font-weight: 600; padding-inline: .7rem; }
+/* The folder and both its buttons on one row while there is room (the user, 2026-10-04). */
+.p-home-line { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center; }
+.p-home-buttons { display: inline-flex; flex-wrap: wrap; gap: .4rem; }
+.p-home-buttons > button { white-space: nowrap; }
+.p-notices { display: flex; flex-wrap: wrap; gap: .4rem 1.5rem; align-items: baseline; }
+.p-notices > * { margin: 0; }
+.p-actions { margin-top: .75rem; align-items: center; }
+.p-actions .grow { flex: 1 1 auto; }
+#profile-delete.armed { border-color: var(--bad, #c0504d); color: var(--bad, #c0504d); }
+@media (max-width: 90rem) {
+  .p-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .p-half { grid-column: 1 / -1; }
+}
+@media (max-width: 50rem) {
+  .p-grid { grid-template-columns: minmax(0, 1fr); }
+}
+button.link { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit;
+  padding: .4rem 0; text-decoration: underline; }
+@media (max-width: 60rem) {
+  /* Stacked, the column is the page, so a tree sized against the viewport would push the
+     transcript below two screenfuls of file names. It goes back to a modest cap. */
+  #session-files { max-height: 24rem; }
+}
+
+/* A name the proxy restored: the AI saw a token here. Green, so the filter's work is visible. */
+:root, :root[data-theme="light"] { --restored: #0b7a3a; }
+:root[data-theme="dark"] { --restored: #5fd68a; }
+.restored { color: var(--restored); font-weight: 600; }
+
+/* The client's OneDrive share, pinned above the repo folders. */
+/* Same shape as a tree row, so the root's action lands in the same sticky column as the rest. */
+.tree-root { display: flex; align-items: center; gap: .25rem; width: max-content; min-width: 100%; }
+.tree-root .tree-root-name { margin-right: auto; }
+/* A root heading is a folder button now (D70), styled as the heading it replaced. */
+.tree-root button.tree-root-name { background: none; border: 0; color: inherit; font: inherit;
+  text-align: left; padding: .1rem .2rem; cursor: pointer; display: inline-flex; align-items: baseline; gap: .3rem; }
+.tree-root:hover, .tree-root:focus-within { background: var(--surface-2); border-radius: 4px; }
+.tree-root.share { color: var(--accent); }
+.tree-root.share.none { color: var(--muted); font-weight: 400; font-style: italic; }
+
+/* The slash list under the prompt box: names on the left, where they came from, then what they
+   do. It sits in the flow rather than floating, so a phone gets the same list as a desktop. */
+.slash-list { display: flex; flex-direction: column; margin-top: .4rem; border: 1px solid var(--border);
+  border-radius: 6px; max-height: 16rem; overflow: auto; }
+.slash-list[hidden] { display: none; }
+/* How many matched, pinned at the foot: the list is no longer capped at twelve, so it should say
+   how long it is (47). */
+.slash-count { position: sticky; bottom: 0; background: var(--surface); padding: 3px 8px;
+               border-top: 1px solid var(--border); }
+
+/* The Names card: three facets of one fact, side by side where there is room and stacked where
+   there is not - auto-fit does both with no media query, which matters because this card is also
+   what the remote page shows on a phone (34). */
+.identity-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 12px; }
+.identity-label { color: var(--muted); font-size: 12px; }
+.identity-value { overflow-wrap: anywhere; }
+.identity-why { margin-top: 2px; }
+button.slash-row { display: grid; grid-template-columns: minmax(8rem, auto) auto 1fr; gap: .5rem;
+  align-items: baseline; width: 100%; padding: .35rem .5rem; border: 0; border-bottom: 1px solid var(--border);
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+button.slash-row:last-child { border-bottom: 0; }
+button.slash-row.selected, button.slash-row:hover { background: var(--row-hover, rgba(127, 127, 127, .15)); }
+.slash-name { font-family: var(--mono, monospace); font-weight: 600; }
+.slash-what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 40rem) {
+  button.slash-row { grid-template-columns: 1fr auto; }
+  .slash-what { grid-column: 1 / -1; }
+}
+
+/* A scan's report, as the command line would have printed it. */
+pre.scan-report { max-height: 22rem; overflow: auto; white-space: pre-wrap; word-break: break-word;
+  background: var(--row-hover, rgba(127, 127, 127, .08)); padding: .5rem .7rem; border-radius: 6px; }
+.scan-out { margin-top: .6rem; }
+input.wide { width: 100%; box-sizing: border-box; }
+
+/* The way to make another client, at the foot of the client list it will join. */
+button.nav-add { display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: var(--accent); cursor: pointer; font: inherit; padding: .35rem .5rem .35rem 1.1rem; }
+button.nav-add:hover { background: var(--row-hover, rgba(127, 127, 127, .15)); }
+
+/* A decision with a few answers, taken over the top of whatever is behind it. */
+/* --surface, the same as .card: there is no --card variable, and var(--card) with no fallback is
+   invalid at computed-value time, which is transparent rather than an error - so the dialog showed
+   the page straight through its own text. */
+dialog.sheet { border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
+  color: inherit; padding: 1rem 1.2rem 1.2rem; max-width: 34rem; width: calc(100vw - 2rem); }
+dialog.sheet::backdrop { background: rgba(0, 0, 0, .45); }
+dialog.sheet h2 { margin-top: 0; }
+dialog.sheet .field { margin-bottom: .7rem; }
+.field.wide { width: 100%; }
+.field.wide input { width: 100%; box-sizing: border-box; }
+
+/* The uninspected-endpoints card lists holes, not settings: each one in red, monospaced, so it
+   reads as a finding rather than a preference. */
+.bad-list { margin: 0; padding-left: 1.2rem; color: var(--bad-text); }
+.bad-list li { margin: .15rem 0; }
+
+/* Settings: two columns that pack independently. The outer grid holds one item per column, so a
+   tall card can never set a row height and push a gap into the column beside it; the spacing
+   between every pair of cards is the one gap below, everywhere on the page. */
+.settings-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+  align-items: start; }
+.settings-column { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+@media (max-width: 1000px) { .settings-columns { grid-template-columns: minmax(0, 1fr); } }
+
+/* Scan progress. The bar is sized from the bytes that will really be read, so it moves evenly
+   rather than sprinting through small files and stalling on one large one. */
+.scan-progress { margin-top: .5rem; }
+.scan-progress progress { width: 100%; height: 8px; border-radius: 4px; }
+.scan-progress p { margin: .35rem 0 0; }
+
+/* Selecting rows. The box is double the browser's default and the label fills the cell, so a click
+   anywhere in the column - above the box, beside it, on the padding - ticks it. Picking through a
+   list of a thousand entries was described as threading a needle, and it was the aiming that cost
+   the time, not the clicking. */
+th.pick, td.pick { width: 44px; padding: 0; position: relative; }
+/* Absolutely positioned rather than height:100%: a child of a table cell does not fill it, and a
+   row is taller than the box whenever another column wraps - which left dead space directly above
+   the checkbox, the very place a hurried click lands. inset:0 is the cell, whatever height it is. */
+.pick-hit {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.pick-hit input[type="checkbox"] { width: 26px; height: 26px; margin: 0; cursor: pointer; }
+.pick-hit:hover { background: var(--surface-2); }
+
+/* Acting on many rows at once. Sits above the list with the filter, so the count and the actions
+   are where the eye already is when a selection is being built. */
+/* Worded by the outcome, grouped under headings that say it (38, option C). The grouping is the
+   safety property, not decoration: "who they should belong to" and "stop watching for them" are
+   different kinds of outcome and must never sit adjacent, which is how a mis-click between two
+   unrelated actions happened. */
+.bulk-entries { display: flex; align-items: flex-end; gap: 4px; flex-wrap: wrap; margin-left: auto; }
+.bulk-entries .bulk-count-wrap { align-self: center; padding: 0 10px 0 0; }
+.bulk-entries .bulk-count { min-width: 96px; }
+.bulk-entries button[disabled] { opacity: .5; cursor: default; }
+.bulk-group {
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 0 12px; border-left: 1px solid var(--border);
+}
+.bulk-group-head {
+  font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--muted); font-weight: 700; white-space: nowrap;
+}
+.bulk-group-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* On a narrow screen the groups stack rather than crowd, and the rule between them turns into a
+   rule above them - the panel is served over the tunnel, so this is the common case, not the
+   exception. */
+@media (max-width: 50rem) {
+  .bulk-entries { width: 100%; }
+  .bulk-group { border-left: 0; border-top: 1px solid var(--border); padding: 6px 0 0; width: 100%; }
+}
+
+/* A Save button that reports on itself (see dom.js savingButton). The confirmation has to be where
+   the button is: Settings is taller than the window, so a message in the toolbar is off-screen for
+   every card below the fold. */
+button.save-card.saved { background: var(--ok-text); border-color: var(--ok-text); }
+button.save-card.failed { background: var(--bad-text); border-color: var(--bad-text); }
+.save-note { color: var(--bad-text); font-size: 13px; }
+/* A hint that is reporting a failure rather than explaining something. */
+.hint.bad-text { color: var(--bad-text); }
+
+/* Choosing a folder or a workspace file on the proxy machine (D114): a modal dialog, 60% wide with
+   15% above and below on a desktop, about 95% of a phone's screen. The heading and the buttons are
+   fixed; the tree between them scrolls on its own. A step on the way down to an allowed folder can
+   be opened but not chosen, and looks like it: it is navigation, not an answer. */
+dialog.picker-dialog {
+  width: min(60vw, 72rem); height: 70dvh; max-width: none; max-height: none; margin: auto; padding: 0;
+  display: flex; flex-direction: column; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+}
+dialog.picker-dialog:not([open]) { display: none; }
+dialog.picker-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+.picker-head { flex: none; padding: .9rem 1.1rem .6rem; border-bottom: 1px solid var(--border); }
+.picker-head h2 { margin: 0 0 .35rem; font-size: 1.05rem; }
+.picker-crumbs { font-size: 12.5px; overflow-wrap: anywhere; }
+.picker-crumb { padding: 0; font-family: var(--mono, monospace); }
+.picker-tree { flex: 1 1 auto; min-height: 0; overflow: auto; padding: .4rem .5rem; }
+.picker-node { min-width: max-content; }
+.picker-twisty { display: inline-block; width: 1em; color: var(--muted); }
+.picker-empty { margin: .2rem 0; }
+.picker-foot { flex: none; padding: .6rem 1.1rem .9rem; border-top: 1px solid var(--border); }
+.picker-selected { font-size: 12.5px; margin-bottom: .5rem; overflow-wrap: anywhere; }
+.folder-here { font-size: 12.5px; color: var(--text); overflow-wrap: anywhere; }
+.folder-rows { display: flex; flex-direction: column; }
+.folder-row {
+  display: flex; align-items: center; gap: 6px; text-align: left; width: 100%; white-space: nowrap;
+  background: none; border: 1px solid transparent; padding: 5px 8px; border-radius: 6px; cursor: pointer; color: inherit;
+}
+.folder-row:hover, .file-row:hover { background: var(--surface-2); }
+.folder-row.selected, .file-row.selected { border-color: var(--accent); background: var(--surface-2); }
+.file-row { display: block; text-align: left; width: 100%; white-space: nowrap; background: none; border: 1px solid transparent;
+  padding: 5px 8px; border-radius: 6px; cursor: pointer; color: inherit; font-family: var(--mono, monospace); font-size: 12.5px; }
+.folder-row svg { width: 13px; height: 13px; flex: none; }
+.picker-tree .folder-row { padding-left: calc(.5rem + var(--depth, 0) * 1.1rem); }
+.picker-tree .indented { padding-left: calc(1.6rem + var(--depth, 0) * 1.1rem); }
+.folder-row.step-only { color: var(--faint); }
+.folder-foot { display: flex; flex-wrap: wrap; gap: 8px; }
+.folder-foot button[disabled] { opacity: .5; cursor: default; }
+.folder-new-row { display: flex; gap: 8px; margin-bottom: .5rem; }
+.folder-new-row input { flex: 1; min-width: 0; }
+@media (max-width: 40rem) {
+  dialog.picker-dialog { width: 95vw; height: 95dvh; }
+}
+
+/* Feature 65 / D61. Beside Send, because waiting for a reply is when "is this still connected?"
+   gets asked. Three states rather than two: a page that only says connected/disconnected cannot
+   tell the reader whether silence means working or broken, which is the fault D61 recorded. */
+.link-state {
+  margin-left: auto; font-size: 12px; font-weight: 600; padding: 2px 8px;
+  border-radius: 999px; border: 1px solid transparent; white-space: nowrap;
+}
+.link-state[data-level="green"] { color: var(--ok-text); border-color: var(--ok-border); }
+.link-state[data-level="amber"] { color: var(--warn-text); border-color: var(--warn-border); }
+.link-state[data-level="red"] { color: var(--bad-text); border-color: var(--bad-border); }
+
+/* Through the tunnel, a card of settings that can only be changed on the machine itself (D50):
+   greyed out, with its heading and the reason left readable. */
+.card.local-only > :not(h2):not(.local-only-note) { opacity: .5; }
+.card.local-only .local-only-note { display: inline-block; margin: 0 0 .5rem; }
+
+/* When a message was said, under its who (feature 66). */
+.turn .who .when { display: block; font-size: 11px; font-weight: 400; color: var(--muted); white-space: nowrap; }
+
+/* A tool call's line and its whole input (feature 68). */
+/* Claude's reasoning, collapsed and greyed so it reads as an aside, not the reply (2026-10-01). */
+.thinking summary { cursor: pointer; color: var(--muted); font-style: italic; }
+.thinking-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); font-size: 12.5px;
+  line-height: 1.5; margin: .3rem 0 0; padding-left: .6rem; border-left: 2px solid var(--border);
+  max-height: 24rem; overflow: auto; }
+.tool-detail summary { cursor: pointer; }
+.tool-detail pre { white-space: pre-wrap; word-break: break-word; max-height: 24rem; overflow: auto; margin: .3rem 0 0; }
+
+/* ---- The Session page: a working band in a page that scrolls (feature 51, D76; DECISIONS 30, 35)
+   The page scrolls as any page does. In the middle is a band exactly one viewport tall holding only
+   the files, the transcript and the prompt - with what Claude is doing, and any question waiting on
+   you, inside it. The session selector and its controls sit above the band; tool usage below it.
+   Start (or Start chatting) scrolls the band into view; nothing else scrolls the page for you.
+   Two stored edges (file column, prompt) and the transcript takes the rest. `min-height: 0` on
+   every child that must shrink, or it refuses to be smaller than its content. `100dvh`, because on
+   a phone `100vh` counts neither the address bar nor the keyboard. */
+.drag-bar { background: transparent; touch-action: none; }
+.drag-bar:hover, .drag-bar:active { background: var(--border); }
+.drag-bar.x { cursor: col-resize; width: 6px; border-radius: 3px; }
+.drag-bar.y { cursor: row-resize; height: 6px; border-radius: 3px; flex: 0 0 6px; }
+/* The Files toggle, on every screen size (the user, 2026-10-01): a row of its own across the top
+   of the band. Closed, the files and their drag bar go and the work takes the whole width. */
+.rail-toggle { grid-column: 1 / -1; justify-self: start; padding: .2rem .6rem; font-size: 12.5px; }
+.session-band:not(.rail-open) { grid-template-columns: minmax(0, 1fr); }
+.session-band:not(.rail-open) #session-files, .session-band:not(.rail-open) #files-resize { display: none; }
+:root[data-route="session"] main#page { max-width: none; }
+/* Nothing sits below the working band now (the tools panel moved between the conversation and the
+   prompt), so the page's bottom padding went: the end of the page is the band filling the screen,
+   the same view Start chatting gives (the user, 2026-10-06). */
+:root[data-route="session"] main#page { padding-bottom: 0; }
+/* Stretch, said outright: the shell's old grid rule set `align-items: start`, which survived the
+   move to flex, so an empty band shrank to its content - the transcript and prompt started narrow
+   and only widened as they filled (the user, 2026-10-01). */
+.session-shell { display: flex; flex-direction: column; gap: 1rem; align-items: stretch; }
+.session-top { display: grid; grid-template-columns: minmax(14rem, 22rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
+.session-band {
+  height: 100dvh; box-sizing: border-box; padding: .5rem 0; min-height: 0;
+  display: grid; grid-template-columns: var(--files-w, 22rem) 6px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr); gap: .3rem .4rem;
+}
+.session-band #session-files { max-height: none; height: 100%; min-height: 0; overflow: auto; }
+.session-work { display: flex; flex-direction: column; gap: .5rem; min-height: 0; }
+.session-work .session-stream { flex: 1 1 auto; min-height: 0; }
+.session-work .log { flex: 1 1 auto; max-height: none; min-height: 0; margin-bottom: 0; }
+/* The page keeps the reader's place itself, by the line in view (D116); the browser's own scroll
+   anchoring would correct the same shift a second time. */
+#session-log { overflow-anchor: none; }
+/* "Show earlier" at the top of the conversation (feature 82). */
+.log-head .show-earlier { display: block; margin: .2rem auto .6rem; }
+.log-earlier:empty { display: none; }
+.log-earlier { border-bottom: 1px dashed var(--border); margin-bottom: .4rem; padding-bottom: .4rem; }
+/* Between the transcript and the prompt (2026-09-30): background tasks, then below them any question
+   or permission waiting (D119, the user, 2026-10-06: a question beside the tools panel was squeezed
+   into half the width; it is what needs answering, so it gets the whole width, under the tools). */
+.session-work .session-mid { flex: 0 0 auto; max-height: 40%; display: flex; flex-direction: column; gap: .5rem;
+  align-items: stretch; min-height: 0; overflow: auto; }
+.session-mid > #session-background, .session-mid > #session-permissions { flex: 0 0 auto; min-width: 0; }
+.session-mid > #session-background { margin-top: 0; }
+.session-mid > #session-permissions:empty { display: none; }
+#prompt-pane { flex: 0 0 auto; height: var(--prompt-h, auto); min-height: 0; display: flex; flex-direction: column; gap: .4rem; }
+#prompt-pane #session-prompt { flex: 1 1 auto; min-height: 2.6rem; resize: none; }
+@media (max-width: 60rem) {
+  .session-top { grid-template-columns: minmax(0, 1fr); }
+}
+/* A phone (DECISIONS 30): the band is the transcript and the prompt; the file browser opens from
+   the toggle at the band's top edge, and the prompt's height is the one edge to drag. */
+@media (max-width: 40rem) {
+  #files-resize { display: none; }
+  .rail-toggle { width: 100%; text-align: left; }
+  .session-band { display: flex; flex-direction: column; gap: .4rem; }
+  .session-band.rail-open #session-files { flex: 0 0 auto; height: auto; max-height: 40%; }
+  .session-band .session-work { flex: 1 1 auto; }
+}
+
+/* Log (DECISIONS 38): a wide table that scrolls inside its card, never the page. */
+.log-wrap { overflow-x: auto; max-width: 100%; }
+.log-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.log-table th, .log-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.log-table td.mono { font-family: var(--mono); word-break: break-all; }
+.log-table td.nowrap { white-space: nowrap; }
+.log-filters { flex-wrap: wrap; gap: 8px; }
+.log-filters input, .log-filters select { min-width: 0; max-width: 100%; }
+.log-context { font-family: var(--sans, inherit); word-break: normal; margin-top: 4px; }
+.log-context mark { padding: 0 2px; }
+.log-where { font-size: 11px; }
+
+/* What happens to something new (DECISIONS 46): scrolls inside its card on a phone. */
+.kinds-wrap { overflow-x: auto; max-width: 100%; }
+.kinds-table { border-collapse: collapse; font-size: 13px; }
+/* The four choice columns shrink to their headings (1% + nowrap); the Type column takes the rest.
+   The global td rule (max-width 0, ellipsis) squeezed Type to a few characters - undone here. */
+.kinds-table th, .kinds-table td { padding: 4px 8px; text-align: center; border-bottom: 1px solid var(--border);
+  width: 1%; white-space: nowrap; max-width: none; overflow: visible; text-overflow: clip; }
+.kinds-table th:first-child, .kinds-table td:first-child { text-align: left; width: auto; white-space: normal; }
+.kinds-table .kind-warning { font-size: 12px; max-width: 28em; text-align: left; }
+/* The ? beside a type, and what its choices add up to (the user, 2026-10-06). */
+.kinds-table .kind-help { padding: 0 .15rem; text-decoration: none; font-size: 13px; line-height: 1; cursor: help; }
+.kinds-table .kind-effect { font-size: 12px; max-width: 34em; text-align: left; margin-top: .3rem; }
+
+/* The model request's own state, under the prompt (DECISIONS 47). */
+.model-state { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; margin-top: 4px; }
+.model-state[data-level="green"] .model-state-text { color: var(--ok-text); }
+.model-state[data-level="amber"] .model-state-text { color: var(--warn-text); }
+.model-state[data-level="red"] .model-state-text { color: var(--bad-text); }
+
+/* A question from Claude: one option per line, its description under it, Other a real choice with a
+   text area the width of the card (2026-09-30). */
+.question-card fieldset.question { display: flex; flex-direction: column; gap: 6px; }
+.question-card label.option { display: flex; align-items: flex-start; gap: 8px; }
+.question-card label.option input { margin-top: 3px; flex: none; }
+.question-card .option-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.question-card .option-description { white-space: normal; }
+.question-card textarea.other-answer { width: 100%; box-sizing: border-box; resize: vertical; overflow: hidden;
+  min-height: 2.2em; font: inherit; }
+
+/* File tabs (DECISIONS 50): a strip over the transcript; a file shows in the transcript's place. */
+.session-work .file-tabs { flex: 0 0 auto; display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid var(--border); }
+.file-tab { display: inline-flex; align-items: center; gap: 2px; padding: 0 2px; border: 1px solid var(--border);
+  border-bottom: 0; border-radius: 6px 6px 0 0; background: var(--surface-2); white-space: nowrap; font-size: 12.5px; }
+button.file-tab, .file-tab button { border: 0; background: none; color: inherit; cursor: pointer; padding: .3rem .5rem; font: inherit; }
+.file-tab .file-tab-close { padding: .3rem .35rem; opacity: .6; }
+.file-tab .file-tab-close:hover { opacity: 1; }
+.file-tab[aria-selected="true"] { background: var(--surface); font-weight: 600; }
+.file-tab.stale { border-color: var(--bad-border); color: var(--bad-text); }
+.file-tab.gone { opacity: .6; text-decoration: line-through; }
+.session-work .file-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.file-pane[hidden], .session-stream[hidden], .file-tabs[hidden] { display: none; }
+.file-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .3rem 0; font-size: 12.5px; }
+.file-head .file-path { font-weight: 600; overflow-wrap: anywhere; }
+.file-head .file-actions { margin-left: auto; display: flex; gap: .4rem; }
+.file-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; }
+.file-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; align-items: flex-start; background: var(--surface-2); }
+.file-gutter, .file-text { margin: 0; padding: .5rem; font-family: var(--mono); font-size: 12.5px; line-height: 1.45; }
+.file-gutter { position: sticky; left: 0; text-align: right; color: var(--muted); user-select: none;
+  background: var(--surface-2); border-right: 1px solid var(--border); }
+.file-text { white-space: pre; flex: 1 0 auto; }
+/* An editable file tab (F54, DECISIONS 53): fills the tab, same monospace as the read view, no
+   wrapping so a line on screen is a line in the file. */
+.file-editor { flex: 1 1 auto; min-height: 0; width: 100%; box-sizing: border-box; resize: none; margin: 0;
+  padding: .5rem; font-family: var(--mono); font-size: 12.5px; line-height: 1.45; white-space: pre;
+  overflow: auto; border: 0; background: var(--surface-2); color: inherit; tab-size: 4; }
+/* The editor's line numbers (D101): a gutter beside the box, scrolled with it from script. */
+.file-editor-frame { flex: 1 1 auto; min-height: 0; display: flex; background: var(--surface-2); }
+.file-editor-frame .file-gutter { position: static; flex: 0 0 auto; overflow: hidden; min-width: 2.5em; }
+.file-editor-frame .file-editor { flex: 1 1 auto; width: auto; min-width: 0; }
+.file-conflict { margin-bottom: .4rem; }
+.file-conflict button { margin: .2rem .2rem 0 0; }
+.file-media { flex: 1 1 auto; min-height: 0; overflow: auto; padding: .5rem; display: flex; flex-direction: column; }
+.file-media img { max-width: 100%; height: auto; align-self: flex-start; }
+.file-media.pdf .file-pdf { flex: 1 1 auto; min-height: 300px; width: 100%; border: 0; background: #fff; }
+.md-switch { display: inline-flex; }
+.md-switch .btn { border-radius: 0; padding: .15rem .6rem; font-size: 12px; }
+.md-switch .btn:first-child { border-radius: 4px 0 0 4px; }
+.md-switch .btn:last-child { border-radius: 0 4px 4px 0; border-left: 0; }
+/* The view showing must be obvious at a glance, not only on hover (D142): filled with the accent and
+   ringed with the focus colour, for Source / Preview and Files / Search alike. */
+.md-switch .btn[aria-pressed="true"], .md-switch .btn[aria-pressed="true"]:hover {
+  background: var(--accent); color: var(--accent-text); font-weight: 600;
+  border-color: var(--focus); box-shadow: inset 0 0 0 1px var(--focus); position: relative; z-index: 1;
+}
+.md-preview-body { display: block; }
+/* The whole width of its pane (D134): 60rem left a wide pane mostly empty and pushed tables into
+   their cut-off cells. */
+.md-doc { max-width: none; padding: .5rem 1rem 1rem; line-height: 1.55; overflow-wrap: anywhere; }
+.md-doc h1, .md-doc h2, .md-doc h3 { margin: 1rem 0 .5rem; line-height: 1.25; }
+.md-doc h1 { font-size: 1.5rem; } .md-doc h2 { font-size: 1.25rem; } .md-doc h3 { font-size: 1.1rem; }
+.md-doc p, .md-doc ul, .md-doc ol, .md-doc blockquote, .md-doc .md-table { margin: 0 0 .75rem; }
+.md-doc code { font-family: var(--mono); font-size: .92em; background: var(--surface); padding: 0 .2em; border-radius: 3px; }
+.md-doc pre.md-code { font-family: var(--mono); font-size: 12.5px; background: var(--surface); padding: .5rem; border-radius: 4px; overflow-x: auto; }
+.md-doc pre.md-code code { background: none; padding: 0; }
+.md-doc blockquote { border-left: 3px solid var(--border); padding-left: .75rem; color: var(--muted); }
+.md-doc .md-table { overflow-x: auto; }
+.md-doc table { border-collapse: collapse; }
+.md-doc th, .md-doc td { border: 1px solid var(--border); padding: .25rem .5rem; text-align: left; vertical-align: top; }
+/* A document's table shows everything (D134). The app's data tables cut a cell to one line with an
+   ellipsis and show the rest on hover; in a document that hid the content, and on a touch screen
+   there is no hover. Here a cell wraps and its row grows downwards. */
+.md-doc td, .md-doc th, .md-doc td > *, .md-doc th > * {
+  max-width: none; overflow: visible; text-overflow: clip; white-space: normal;
+}
+/* One short word stays whole (D139): `anywhere` would let the column shrink until "Empty" split. */
+.md-doc td.md-nowrap, .md-doc th.md-nowrap { white-space: nowrap; overflow-wrap: normal; }
+.md-doc .md-center { text-align: center; } .md-doc .md-right { text-align: right; }
+.md-doc .md-image { font-style: italic; color: var(--muted); }
+.md-doc img.md-img { max-width: 100%; height: auto; vertical-align: middle; }
+.md-doc hr { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
+.tree-menu a.tree-download { border: 1px solid var(--border); background: var(--surface-2); color: inherit;
+  border-radius: 4px; padding: .15rem .5rem; font-size: 12px; white-space: nowrap; text-decoration: none; }

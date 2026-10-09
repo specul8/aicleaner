@@ -1,0 +1,85 @@
+/* The file editor's colouring and suggestions (feature 80; spec 2026-10-07-f80). Kept apart from
+   app.css. Everything here is classes: the page's policy allows no inline styles. */
+
+/* The coloured layer sits exactly behind the textarea: same box, font, padding, tab size, no wrap.
+   The textarea's own text is transparent and its caret visible, so what is seen is the layer and
+   what is typed into is the textarea. */
+.code-stack { position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; }
+.code-stack > .file-editor { position: relative; z-index: 1; flex: 1 1 auto; width: auto; min-width: 0; }
+.code-stack > .file-editor.coloured { color: transparent; caret-color: var(--text, #e6e6e6); background: transparent; }
+.code-stack > .file-editor.coloured::selection { color: transparent; background: rgba(120, 160, 255, .35); }
+.code-layer { position: absolute; inset: 0; margin: 0; overflow: hidden; pointer-events: none;
+  padding: .5rem; font-family: var(--mono); font-size: 12.5px; line-height: 1.45; white-space: pre;
+  tab-size: 4; background: var(--surface-2); color: var(--text, #e6e6e6); }
+
+/* Token colours, dark theme, shared by the editor and the read-only view. */
+.tok-comment { color: #6a9955; font-style: italic; }
+.tok-string { color: #ce9178; }
+.tok-number { color: #b5cea8; }
+.tok-keyword { color: #569cd6; }
+.tok-builtin { color: #dcdcaa; }
+.tok-variable { color: #9cdcfe; }
+.tok-type { color: #4ec9b0; }
+.tok-operator { color: #c586c0; }
+.tok-property { color: #9cdcfe; }
+.tok-heading { color: #569cd6; font-weight: 600; }
+.tok-punct { color: #808080; }
+
+/* The light theme's equivalents. */
+[data-theme="light"] .tok-comment { color: #008000; }
+[data-theme="light"] .tok-string { color: #a31515; }
+[data-theme="light"] .tok-number { color: #098658; }
+[data-theme="light"] .tok-keyword, [data-theme="light"] .tok-heading { color: #0000ff; }
+[data-theme="light"] .tok-builtin { color: #795e26; }
+[data-theme="light"] .tok-variable, [data-theme="light"] .tok-property { color: #001080; }
+[data-theme="light"] .tok-type { color: #267f99; }
+[data-theme="light"] .tok-operator { color: #af00db; }
+[data-theme="light"] .code-stack > .file-editor.coloured::selection { background: rgba(0, 90, 220, .2); }
+
+/* The double-click question (feature 92): a bubble beside the pointer, placed from script. */
+.preview-jump-ask.floating { position: fixed; z-index: 50; margin: 0; max-width: 26rem; padding: .6rem .75rem;
+  border: 1px solid var(--focus); border-radius: 8px; background: var(--surface);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45); }
+.preview-jump-ask.floating p { margin: 0 0 .4rem; }
+.preview-jump-ask.floating .form-row { flex-wrap: wrap; gap: .4rem; }
+
+/* Prompt autocorrect (feature 94). The layer sits behind the prompt box (whose background is made
+   clear so it shows through); corrected words get a green background there, the text itself stays
+   the box's own. The bubble and the layer's size are placed from script. */
+.ac-stack { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.ac-stack > #session-prompt { position: relative; z-index: 1; background: transparent; flex: 1 1 auto; }
+.ac-layer { position: absolute; top: 0; left: 0; overflow: hidden; pointer-events: none; color: transparent;
+  border-style: solid; border-color: transparent; box-sizing: border-box; margin: 0;
+  background: var(--surface-2); white-space: pre-wrap; overflow-wrap: break-word; }
+/* Not known and nothing close (D164): a red wavy line under it, as word processors do. */
+.ac-layer .ac-unknown { text-decoration: underline wavy #f85149; text-decoration-skip-ink: none; text-underline-offset: 3px; }
+.ac-layer .ac-fixed { background: rgba(46, 160, 67, .35); border-radius: 3px; box-shadow: 0 1px 0 rgba(46, 160, 67, .9); }
+/* Just left of Connected, at the far end from Send (D153): beside Send it was clicked by mistake.
+   The toggle takes the push to the right that the link indicator had; the indicator follows it. */
+.ac-toggle { font-size: 12px; padding: .15rem .55rem; margin-left: auto; }
+.ac-toggle + .link-state { margin-left: 0; }
+.ac-toggle .ac-mark { display: inline-block; min-width: 1em; font-weight: 700; color: var(--bad, #f85149); }
+.ac-toggle.on .ac-mark { color: #3fb950; }
+.ac-bubble { position: fixed; z-index: 60; padding: .45rem .6rem; border: 1px solid #3fb950; border-radius: 8px;
+  background: var(--surface); box-shadow: 0 6px 20px rgba(0, 0, 0, .45); max-width: 28rem; }
+.ac-bubble .hint { margin: 0 0 .35rem; }
+.ac-choices { display: flex; flex-wrap: wrap; gap: .3rem; }
+.ac-choices button { font-size: 12px; padding: .15rem .5rem; }
+.ac-choices + .ac-choices { margin-top: .35rem; }
+.ac-bubble .hint + .hint, .ac-choices + .hint { margin: .35rem 0 0; }
+
+/* The suggestion list, placed under the word from script (CSSOM left/top, which the policy allows). */
+.complete-list { position: absolute; z-index: 5; margin: 0; padding: 2px 0; list-style: none; min-width: 16rem;
+  max-width: 36rem; max-height: 14rem; overflow-y: auto; background: var(--surface, #252526);
+  border: 1px solid var(--border, #454545); border-radius: 4px; box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+  font-family: var(--mono); font-size: 12.5px; }
+.complete-list[hidden] { display: none; }
+.complete-item { display: flex; gap: .5rem; align-items: baseline; padding: 1px 8px; cursor: pointer; white-space: nowrap; }
+.complete-item.active { background: rgba(120, 160, 255, .25); }
+.complete-kind { flex: 0 0 1.8em; text-align: center; color: var(--muted, #999); font-size: 11px; }
+.complete-kind.kind-snippet { color: #dcdcaa; }
+.complete-kind.kind-command, .complete-kind.kind-builtin { color: #dcdcaa; }
+.complete-kind.kind-keyword { color: #569cd6; }
+.complete-kind.kind-parameter { color: #c586c0; }
+.complete-label { overflow: hidden; text-overflow: ellipsis; }
+.complete-foot { padding: 2px 8px; border-top: 1px solid var(--border, #454545); color: var(--muted, #999); font-size: 11px; }

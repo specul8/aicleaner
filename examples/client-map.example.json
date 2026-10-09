@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "_comment": "Copy to client-map.json (gitignored) and fill in real values. Forms match longest-first. Tokens: letters, digits, space . _ @ - only. No quotes or backslashes anywhere.",
+  "clients": [
+    {
+      "id": "CLIENT04",
+      "expand_case": true,
+      "forms": [
+        { "real": "ACME Incorporated",              "token": "Client04 Pty Ltd" },
+        { "real": "ACME Inc",                       "token": "Client04 Pty" },
+        { "real": "ACME",                           "token": "Client04" },
+        { "real": "acme-inc",                       "token": "client04-pty" },
+        { "real": "acmeinc",                        "token": "client04pty" },
+        { "real": "acme.com.au",                    "token": "client04.invalid" },
+        { "real": "acmeinc.onmicrosoft.com",        "token": "client04pty.onmicrosoft.invalid" },
+        { "real": "1f3e5a7c-0000-0000-0000-000000000000", "token": "00000000-0000-4000-8000-000000000004" }
+      ]
+    }
+  ]
+}

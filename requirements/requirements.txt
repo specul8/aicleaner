@@ -1,0 +1,3 @@
+aiohttp>=3.10,<4
+# AES-256-GCM for the encrypted tunnel (feature 21, DECISIONS 57): the standard library has no AES.
+cryptography>=46,<51

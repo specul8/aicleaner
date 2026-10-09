@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to contact-<audience>.json (gitignored) beside the aicleaner folder. Empty or null fields are not shown. Only http(s) URLs are used.",
+  "name": "Contoso IT",
+  "email": "it-support@contoso.com",
+  "organisation": "Contoso",
+  "repo_url": "https://git.contoso.com/it/aicleaner",
+  "issues_url": "https://git.contoso.com/it/aicleaner/issues",
+  "profile_url": null
+}
