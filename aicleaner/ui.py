@@ -1951,6 +1951,80 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(exc, status=409)
         return web.json_response({"ok": True, "log": str(log_path)})
 
+    # ---- the setup wizard (feature 106) - local only, see guard.REMOTE_REFUSED_PREFIXES ----------
+
+    async def setup_dns(request: web.Request) -> web.Response:
+        """What a domain's DNS looks like now, for the remote-access step. Read-only."""
+        from .dnsguide import look_up
+        report = await asyncio.to_thread(look_up, request.query.get("domain", ""))
+        return web.json_response(report.as_dict())
+
+    async def setup_enable(request: web.Request) -> web.Response:
+        """Route the AI tools through aicleaner: the same Enable-AiCleaner.ps1 a person would run,
+        readiness checks and all. Run without blocking the server - the script asks this proxy for
+        /healthz and sends a request through it while it runs."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Enable-AiCleaner.ps1"
+        if not script.exists():
+            script = root / "Enable-AiCleaner.ps1"                    # an install from before the move
+        from .restart import powershell
+        child = await asyncio.create_subprocess_exec(
+            powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-LogPath", "",
+            cwd=str(root), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(child.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            child.kill()
+            return err(ValueError("Enable-AiCleaner.ps1 did not finish within three minutes"), status=504)
+        text = out.decode("utf-8", errors="replace")
+        return web.json_response({"ok": child.returncode == 0, "output": text[-6000:]})
+
+    async def setup_remote(request: web.Request) -> web.Response:
+        """Remote access from the wizard: Enable-RemoteControl.ps1's API route, unattended. Detached,
+        because it restarts this proxy at the end; the page reads its log and waits for it back."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        body = await request.json()
+        hostname = str(body.get("hostname") or "").strip().lower()
+        email = str(body.get("email") or "").strip()
+        token = str(body.get("token") or "").strip()
+        from .dnsguide import DOMAIN_RE
+        if not DOMAIN_RE.match(hostname) or hostname.count(".") < 2:
+            return err(ValueError("give the full address for aicleaner, for example ai.example.com"))
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            return err(ValueError("give the email address that may sign in"))
+        if not re.fullmatch(r"[A-Za-z0-9_-]{30,}", token):
+            return err(ValueError("that does not look like a Cloudflare API token"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Enable-RemoteControl.ps1"
+        from .restart import RestartError, powershell, spawn_detached
+        log_path = Path(proxy.cfg.log_dir) / "remote-setup.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("", encoding="utf-8")                    # this run's log only
+        try:
+            spawn_detached([powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
+                            "-File", str(script), "-Setup", "api", "-Hostname", hostname, "-Email", email,
+                            "-LogPath", ""], root, log_path, env={"AICLEANER_CLOUDFLARE_TOKEN": token})
+        except RestartError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True})
+
+    async def setup_remote_log(request: web.Request) -> web.Response:
+        """What the remote-access run has said so far."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        path = Path(proxy.cfg.log_dir) / "remote-setup.log"
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        failed = "FullyQualifiedErrorId" in text or "CategoryInfo" in text
+        return web.json_response({"text": text[-8000:], "ok": "Remote control is on:" in text, "failed": failed,
+                                  "done": "Remote control is on:" in text or failed})
+
     async def export_client(request: web.Request) -> web.Response:
         cid = request.match_info["cid"]
         try:
@@ -2419,6 +2493,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/config", config_get)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
+    app.router.add_get("/api/setup/dns", setup_dns)
+    app.router.add_post("/api/setup/enable", setup_enable)
+    app.router.add_post("/api/setup/remote", setup_remote)
+    app.router.add_get("/api/setup/remote/log", setup_remote_log)
     app.router.add_get("/api/export/client/{cid}", export_client)
     app.router.add_get("/api/export/all", export_all)
     app.router.add_get("/api/export/public", export_public)

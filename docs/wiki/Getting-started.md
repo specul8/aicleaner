@@ -21,17 +21,19 @@ offers to fetch through winget, asking first. Windows 11 already has winget.
 
 ## 1. Install
 
-Copy two files into one folder on the machine where the agent runs:
+The quickest way: download **`aicleaner-setup.zip`** from the
+[latest release](https://github.com/specul8/aicleaner/releases/latest), extract it anywhere, and
+double-click **`Install aicleaner.cmd`**. It runs the installer below for you, step by step, and at
+the end opens the **setup page** in your browser (`http://127.0.0.1:8787/#/setup`), which walks you
+through routing your AI tools, adding your first client and - if you want it - remote access,
+including what moving your domain's DNS to Cloudflare would involve. The setup page is in
+Settings too ([Set up](Settings.md#card-setup)), on this machine only.
 
-| File | Where it comes from |
-|---|---|
-| `Deploy-AiCleaner.ps1` | the repository |
-| `contact-<audience>.json` | whoever maintains your deployment; its `repo_url` names the repository |
-
-Then run, with no parameters:
+By hand: copy `Deploy-AiCleaner.ps1` and a `contact-<audience>.json` (its `repo_url` names the
+repository) into one folder and run, with no parameters:
 
 ```powershell
-.\installer\Deploy-AiCleaner.ps1
+.\Deploy-AiCleaner.ps1
 ```
 
 The first question is which agent this machine is for. A machine is often more than one, so give

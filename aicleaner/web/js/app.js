@@ -13,12 +13,13 @@ import * as settings from './pages/settings.js';
 import * as session from './pages/session.js';
 import * as logPage from './pages/log.js';
 import * as wiki from './pages/wiki.js';
+import * as setup from './pages/setup.js';
 import { activityItems, noticeActivity, seen } from './activity.js';
 import { begin, setTiming } from './timing.js';
 import { confirmLeave, dirty } from './unsaved.js';
 import { isSealed, openTunnel } from './sealed.js';
 
-const PAGES = { overview, review, clients, global: clients, secrets, settings, session, log: logPage, wiki };
+const PAGES = { overview, review, clients, global: clients, secrets, settings, session, log: logPage, wiki, setup };
 
 // Arriving on a page never scrolls it (DECISIONS 35): whoever came to stop a session would be
 // chasing the Stop button. A reload used to put the browser's remembered position back - the

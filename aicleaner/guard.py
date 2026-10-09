@@ -68,7 +68,8 @@ FILE_CSP = web.RequestKey("file_csp", str)
 # capability with no matching purpose, which is exactly the kind worth not exposing. Export is the
 # opposite: a person clicks it once and gets a file they wanted.
 REMOTE_REFUSED_PREFIXES: tuple[str, ...] = (
-    "/api/secrets", "/api/tokenise", "/api/rehydrate")
+    "/api/secrets", "/api/tokenise", "/api/rehydrate",
+    "/api/setup")      # the setup wizard runs this machine's scripts (feature 106)
 
 
 def refused_remotely(path: str) -> bool:

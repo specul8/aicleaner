@@ -1294,6 +1294,12 @@ try {
     $script:TunnelName = $TunnelName
     $script:CloudflaredExe = $exe
     $script:ApiTokenSecure = $ApiToken
+    # From the setup wizard (feature 106): the token arrives in this process's environment, never on
+    # its command line, and leaves the environment at once.
+    if (-not $script:ApiTokenSecure -and $env:AICLEANER_CLOUDFLARE_TOKEN) {
+        $script:ApiTokenSecure = ConvertTo-SecureString -String $env:AICLEANER_CLOUDFLARE_TOKEN -AsPlainText -Force
+        Remove-Item Env:\AICLEANER_CLOUDFLARE_TOKEN -ErrorAction SilentlyContinue
+    }
     $script:Hostname = $Hostname
     $script:Emails = @($Email | Where-Object { $_ })
     Set-OwnedIds -Config $config      # before anything can reuse instead of create

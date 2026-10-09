@@ -16,6 +16,7 @@ restart unless a card says otherwise. Leaving a card with unsaved changes asks f
 
 | Card | Setting (key) | What it does | Default |
 |---|---|---|---|
+| [Set up](Settings.md#card-setup) | button | Opens the setup wizard: route your AI tools, add a client, remote access with a look at your domain's DNS. On this machine only. | |
 | [Logging](Settings.md#card-logging) | Write the substitution log (`logs.detail`) | Records what was replaced and by what, whose it is, and who was driving - real names, kept on this machine, read on the Log page. The evidence log (counts only) is always written. | On |
 | | Log every value on every request (`logs.detail_every_request`) | Off: a value is logged the first time a session sends it and when what happens to it changes. On: every value, every request, for diagnosis. | Off |
 | | Keep substitution log files for (`logs.detail_retention_days`) | Days; older files are deleted at proxy start. 0 keeps them for ever. | 90 |

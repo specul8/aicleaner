@@ -61,7 +61,14 @@ def restart(root: Path, port: int, log_dir: Path) -> Path:
     if missing:
         raise RestartError(f"{', '.join(missing)} not found beside the app in {root}; restart it by hand")
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / LOG_NAME
+    return spawn_detached(command(root, port), root, log_dir / LOG_NAME)
+
+
+def spawn_detached(cmd: list[str], cwd: Path, log_path: Path, env: dict[str, str] | None = None) -> Path:
+    """Start a PowerShell that outlives this process - one that will stop the proxy, or wait for it
+    to restart - writing to log_path. `env` is added to the child's environment only (a secret it
+    needs goes there, never on its command line)."""
+    child_env = {**os.environ, **env} if env else None
     # CREATE_NO_WINDOW, never DETACHED_PROCESS. They read like synonyms and are not: DETACHED_PROCESS
     # gives the child no console object at all, and powershell.exe is a console application, so its
     # host has nothing to attach to. It then exits 0 without running the command - success, silently,
@@ -75,9 +82,9 @@ def restart(root: Path, port: int, log_dir: Path) -> Path:
     with open(log_path, "ab") as out:
         for flags in (hidden | breakaway, hidden):
             try:
-                subprocess.Popen(command(root, port), cwd=str(root), stdin=subprocess.DEVNULL,
+                subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL,
                                  stdout=out, stderr=subprocess.STDOUT, creationflags=flags,
-                                 close_fds=True)
+                                 close_fds=True, env=child_env)
                 return log_path
             except OSError as exc:  # a job that forbids breakaway refuses the first attempt
                 last = exc

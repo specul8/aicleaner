@@ -2477,7 +2477,13 @@ function Invoke-Install {
         $(if ($workstationOnly) { 'Client files: none on this device' } else { "Client files: $($folders.Clients)" }),
         "AI tools:     $(if ($targets) { $targets -join ', ' } else { 'none yet' })",
         '',
-        'Next: open http://127.0.0.1:8787 and add your first client.')
+        'Next: the setup page, http://127.0.0.1:8787/#/setup')
+    # The rest of the setup happens in the browser (feature 106) - only when a person is here and a
+    # proxy runs on this machine to show it.
+    if (-not $script:Unattended -and -not $env:SSH_CONNECTION -and -not $workstationOnly -and -not $WhatIfPreference) {
+        $port = Get-ConfiguredPort -AppRoot $folders.App
+        if (Wait-ProxyHealth -Port $port -Seconds 20) { Start-Process "http://127.0.0.1:$port/#/setup" }
+    }
 }
 
 function Resolve-UpdateSource {

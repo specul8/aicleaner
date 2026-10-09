@@ -1207,3 +1207,18 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
 .md-doc hr { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
 .tree-menu a.tree-download { border: 1px solid var(--border); background: var(--surface-2); color: inherit;
   border-radius: 4px; padding: .15rem .5rem; font-size: 12px; white-space: nowrap; text-decoration: none; }
+
+/* The setup wizard (feature 106). */
+.setup-steps { display: flex; flex-wrap: wrap; gap: .3rem 1rem; list-style: none; padding: 0; margin: 0 0 .8rem; }
+.setup-steps li button { font-size: 14px; }
+.setup-steps li.current button { font-weight: 700; text-decoration: underline; }
+.setup-steps li.done button { opacity: .75; }
+.setup-card h3 { margin: 1rem 0 .3rem; }
+.setup-card ol { padding-left: 1.4rem; }
+.setup-card ol li { margin: .25rem 0; }
+.setup-output { max-height: 18rem; overflow: auto; white-space: pre-wrap; font-size: 12px; }
+.setup-facts { display: grid; grid-template-columns: max-content 1fr; gap: .2rem .8rem; margin: .5rem 0; }
+.setup-facts dt { font-weight: 600; }
+.setup-facts dd { margin: 0; overflow-wrap: anywhere; }
+.setup-domain { min-width: 16rem; }
+.setup-nav { justify-content: space-between; margin-top: .6rem; }

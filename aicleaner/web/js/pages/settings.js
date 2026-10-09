@@ -76,6 +76,7 @@ function paintCards() {
   const kinds = view.config.kinds || [];
   // The same page near and far while the filter is being debugged (see ui.REMOTE_SETTINGS).
   const everyday = [
+    view.config.remote ? null : setupCard(),
     loggingCard(s), notificationsCard(s, Boolean(view.config.remote)), kindsCard(s, kinds),
     nearMissCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
     view.config.windows ? bashGuardCard(s) : null,
@@ -93,6 +94,12 @@ function paintCards() {
   const dangerous = [bypassCard(s), imagesCard(s), failOpenCard(s)];
   view.cards = [...everyday, ...dangerous].filter(Boolean);   // a card with nothing to show is null
   dealCards(view.host, view.cards);
+}
+
+// The setup wizard (feature 106), opened again from here: on this machine only, as it runs its scripts.
+function setupCard() {
+  return card('setup', 'Set up', 'Step by step: route your AI tools through aicleaner, add a client, and set up remote access.',
+    [h('div', { class: 'form-row' }, h('a', { class: 'btn primary', href: '#/setup' }, 'Open the setup wizard'))], null);
 }
 
 function card(key, title, hint, fields, onSave, afterSave = null) {
