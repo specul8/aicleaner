@@ -1582,6 +1582,128 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except (MappingError, KeyError, ValueError) as exc:
             return err(exc)
 
+    # ---- the Add Client wizard's drafts (feature 111) --------------------------------------------
+
+    def drafts():
+        from .clientdrafts import DRAFTS_FOLDER, DraftStore
+        base = Path(proxy.cfg.path).parent if proxy is not None and getattr(proxy.cfg, "path", None) else Path(log_dir).parent
+        return DraftStore(base / DRAFTS_FOLDER)
+
+    async def draft_list(request: web.Request) -> web.Response:
+        return web.json_response({"drafts": await asyncio.to_thread(drafts().list)})
+
+    async def draft_save(request: web.Request) -> web.Response:
+        from .clientdrafts import DraftError
+        try:
+            saved = await asyncio.to_thread(drafts().save, await request.json())
+        except (DraftError, ValueError, TypeError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "draft": saved})
+
+    async def draft_get(request: web.Request) -> web.Response:
+        from .clientdrafts import DraftError
+        try:
+            return web.json_response(await asyncio.to_thread(drafts().load, request.match_info["did"]))
+        except DraftError as exc:
+            return err(exc, status=404)
+
+    async def draft_delete(request: web.Request) -> web.Response:
+        from .clientdrafts import DraftError
+        try:
+            await asyncio.to_thread(drafts().delete, request.match_info["did"])
+        except DraftError as exc:
+            return err(exc)
+        return web.json_response({"ok": True})
+
+    async def draft_summary(request: web.Request) -> web.Response:
+        """The Finish page: the counts per kind, and the index the client would get."""
+        from .clientdrafts import DraftError, summary
+        from .mapping import client_index
+        try:
+            draft = await asyncio.to_thread(drafts().load, request.match_info["did"])
+        except DraftError as exc:
+            return err(exc, status=404)
+        out = summary(draft)
+        cid = draft["client_id"]
+        out["index"] = 0 if draft["mode"] == "global" else (client_index(cid) if cid else None)
+        return web.json_response(out)
+
+    async def draft_finish(request: web.Request) -> web.Response:
+        """Save: the draft becomes a client - its entries in one write, its email domains as rules,
+        its ticked scan finds as finds - and the draft goes. A refusal leaves no client behind."""
+        from .clientdrafts import DraftError, entries_of
+        from .mapping import ORIGIN_SCAN, SOURCE_SCAN
+        try:
+            draft = await asyncio.to_thread(drafts().load, request.match_info["did"])
+        except DraftError as exc:
+            return err(exc, status=404)
+        is_global = draft["mode"] == "global"
+        cid = GLOBAL_ID if is_global else draft["client_id"]
+        if not cid:
+            return err(ValueError("the client needs an id first (the Client name page)"))
+        entries, rules, found = entries_of(draft)
+        try:
+            index, added = await asyncio.to_thread(mf.create_client, cid, draft["label"] or None, entries, SOURCE_MANUAL)
+            scanned = await asyncio.to_thread(mf.add_forms, cid, found, ORIGIN_SCAN, SOURCE_SCAN) if found else []
+        except (MappingError, ValueError) as exc:
+            return err(exc)
+        for real, _token in added:
+            _record_provenance(mf, cid, real, SOURCE_MANUAL, note="added in the Add Client wizard")
+        for real, _token in scanned:
+            _record_provenance(mf, cid, real, SOURCE_SCAN, note="found by the Add Client wizard's repository scan")
+        ruled, refused = [], []
+        for domain in ([] if is_global else rules):
+            try:
+                await asyncio.to_thread(mf.set_email_rule, cid, domain, True)
+                ruled.append(domain)
+            except MappingError as exc:
+                refused.append(f"{domain}: {exc}")
+        await asyncio.to_thread(drafts().delete, draft["id"])
+        return web.json_response({"ok": True, "client": cid, "index": index, "added": len(added) + len(scanned),
+                                  "email_rules": ruled, "refused": refused})
+
+    async def wizard_lookup(request: web.Request) -> web.Response:
+        """A domain on the wizard's Domains page, looked up at Microsoft (feature 111): suggestions
+        to tick - the tenant, its SharePoint, its other domains, its sign-in name."""
+        from .tenantlookup import look_up
+        body = await request.json()
+        return web.json_response(await asyncio.to_thread(look_up, str(body.get("domain", ""))))
+
+    async def wizard_scan(request: web.Request) -> web.Response:
+        """The wizard's Scan page (feature 111): a repository read for the draft's names, the finds
+        returned to tick rather than queued for Review. Bounded by folders.roots like any scan."""
+        from .clientdrafts import DraftError, entries_of
+        from .folders import FolderError, FolderOutside, check_usable
+        from .mapping import Mapper, client_index, client_tokens
+        from .scan import scan_candidates
+        body = await request.json()
+        try:
+            folder = check_usable(str(body.get("folder", "")), folder_roots(), "folder to scan")
+            draft = await asyncio.to_thread(drafts().load, str(body.get("draft", "")))
+        except FolderOutside as problem:
+            return err(problem, status=403)
+        except (FolderError, DraftError) as problem:
+            return err(problem)
+        entries, _rules, _found = entries_of(draft)
+        cid = GLOBAL_ID if draft["mode"] == "global" else (draft["client_id"] or "draft-client")
+
+        def run() -> list[dict]:
+            data = mf.load_tolerant(record=False)[0].data
+            clients = [c for c in data.get("clients", []) if c.get("id") != cid]
+            names = [e for e in entries if not any(f.get("real") == e for c in clients for f in c.get("forms", []))]
+            temp = {"id": cid, "index": client_index(cid) if cid != GLOBAL_ID else 0, "forms": [{"real": r} for r in names]}
+            temp["forms"] = [{"real": r, "token": tok} for r, tok in client_tokens(temp).items()]
+            mapper = Mapper.from_dict({**data, "clients": clients + [temp]})
+            rows = scan_candidates(Path(folder), mapper, min_count=1)
+            return [{"value": r.value, "kind": r.kind, "confidence": r.confidence, "count": r.count,
+                     "theirs": r.client == cid} for r in rows][:300]
+
+        try:
+            rows = await asyncio.to_thread(run)
+        except (MappingError, OSError) as exc:
+            return err(exc)
+        return web.json_response({"folder": str(folder), "finds": rows})
+
     async def add_form(request: web.Request) -> web.Response:
         body = await request.json()
         try:
@@ -2629,6 +2751,14 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/restart", restart_proxy)
     app.router.add_get("/api/setup/dns", setup_dns)
     app.router.add_post("/api/setup/enable", setup_enable)
+    app.router.add_get("/api/client-drafts", draft_list)
+    app.router.add_post("/api/client-drafts", draft_save)
+    app.router.add_get("/api/client-drafts/{did}", draft_get)
+    app.router.add_post("/api/client-drafts/{did}/delete", draft_delete)
+    app.router.add_get("/api/client-drafts/{did}/summary", draft_summary)
+    app.router.add_post("/api/client-drafts/{did}/finish", draft_finish)
+    app.router.add_post("/api/client-wizard/lookup", wizard_lookup)
+    app.router.add_post("/api/client-wizard/scan", wizard_scan)
     app.router.add_post("/api/setup/remote", setup_remote)
     app.router.add_get("/api/setup/remote/state", setup_remote_state)
     app.router.add_post("/api/setup/remote/replace", setup_remote_replace)

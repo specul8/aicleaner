@@ -1284,16 +1284,14 @@ function addClientForm(list) {
   const form = h('form', { id: 'add-client-form', class: 'card form-row', hidden: true },
     h('label', { class: 'field' }, 'Client id', h('input', { type: 'text', name: 'id', required: true, placeholder: 'e.g. northwind' })),
     h('label', { class: 'field' }, 'Display name (optional)', h('input', { type: 'text', name: 'label', maxlength: '80', placeholder: 'e.g. Northwind Traders' })),
-    h('label', { class: 'field' }, 'Index (optional)', h('input', { type: 'number', name: 'index', min: '1', placeholder: 'automatic' })),
     h('button', { type: 'submit', class: 'primary' }, icon('plus'), 'Add client'),
-    h('span', { class: 'hint' }, 'Letters, digits, - and _. The index decides the tokens and is derived from the id unless you set one.'));
+    h('span', { class: 'hint' }, 'Letters, digits, - and _. The number inside its stand-ins is worked out from the id.'));
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const id = form.elements.id.value.trim();
-    const index = form.elements.index.value.trim();
     const label = form.elements.label.value.trim();
     try {
-      await postJSON('/api/mapping/client', { id, index: index ? Number(index) : null, label: label || null });
+      await postJSON('/api/mapping/client', { id, index: null, label: label || null });
       say(`Added client ${label || id}.`, 'ok');
       expanded.add(id);
       view.ctx.status = await view.ctx.refresh();
@@ -1438,7 +1436,16 @@ export async function render(main, ctx) {
   const addButton = h('button', { type: 'button', id: 'add-client' }, icon('plus'), 'Add client');
   const list = h('div', { class: 'client-list', id: 'client-list' });
   const form = addClientForm(list);
-  addButton.addEventListener('click', () => { form.hidden = !form.hidden; if (!form.hidden) form.elements.id.focus(); });
+  // The Add Client wizard (feature 111); the short form below once "Skip the wizard next time" is ticked.
+  addButton.addEventListener('click', async () => {
+    const { openClientWizard, wizardSkipped } = await import('./clientwizard.js');
+    if (!wizardSkipped()) {
+      openClientWizard(async (id) => { expanded.add(id); view.ctx.status = await view.ctx.refresh(); paintList(list); });
+      return;
+    }
+    form.hidden = !form.hidden;
+    if (!form.hidden) form.elements.id.focus();
+  });
   find.addEventListener('input', () => {
     clearTimeout(view.findTimer);
     view.findTimer = setTimeout(() => findEverywhere(list, find.value.trim().toLowerCase()).catch(sayError), 250);

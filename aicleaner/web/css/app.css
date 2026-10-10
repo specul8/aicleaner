@@ -1243,3 +1243,17 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
 .setup-host { display: inline-flex; align-items: center; gap: .2rem; }
 .setup-host .setup-zone { color: var(--muted); }
 .setup-remote-guide ol { margin: .25rem 0 .5rem; }
+
+/* Feature 111: the Add Client wizard. */
+dialog.wizard { width: min(46rem, 94vw); }
+.wizard-head { display: flex; align-items: center; gap: .4rem; margin-bottom: .6rem; }
+.wizard-head .wizard-where { flex: 1; }
+.wizard-back, .wizard-forward { min-width: 2.2rem; font-weight: 700; }
+.wizard-list { display: grid; gap: .3rem; margin-bottom: .4rem; }
+.wizard-row { display: flex; align-items: center; gap: .4rem; }
+.wizard-row input { flex: 1; min-width: 0; }
+.wizard-row.fixed { opacity: .8; }
+.wizard-drafts .wizard-draft { display: flex; align-items: center; gap: .5rem; padding: .2rem 0; }
+.wizard-suggestions, .wizard-finds fieldset { display: grid; gap: .2rem; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .7rem; margin: .5rem 0; }
+.wizard-nav { margin-top: .8rem; }
+.wizard-counts { margin: .3rem 0 .6rem; }

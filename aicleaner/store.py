@@ -1214,6 +1214,40 @@ class MappingStore:
             self._validate_then_write(self.mapping_path, doc)
         return idx
 
+    def create_client(self, cid: str, label: str | None = None, reals: list[str] | None = None,
+                      source: str = "", index: int | None = None) -> tuple[int, list[tuple[str, str]]]:
+        """A new client and its first entries in ONE write (feature 111): the Add Client wizard's
+        Save. Validated as a whole before anything is written, so a refusal leaves no client file
+        and no index taken - nothing half made. Global (and the single-file layout) take the
+        entries the usual way. Returns the index and the (real, token) pairs added."""
+        cid = self._check_id(cid)
+        wanted = [r.strip() for r in (reals or []) if r and r.strip()]
+        if cid == GLOBAL_ID:
+            return 0, self.add_forms(GLOBAL_ID, wanted, source=source)
+        label = _check_label(label)
+        if cid in self.load_tolerant(record=False)[0].sources or self._file_for(cid).exists():
+            raise MappingError(f"client {cid} already exists")
+        if not self._dir_mode():
+            idx = self.add_client(cid, index, True, label)
+            return idx, self.add_forms(cid, wanted, source=source)
+        idx = client_index(cid, index)
+        owner = self.registry().get(str(idx))
+        if owner and owner != cid:
+            raise MappingError(f"index {idx} is already allocated to {owner} in {REGISTRY}")
+        doc: dict[str, Any] = {"id": cid, "index": idx, "expand_case": True, "forms": [], "ignore": []}
+        if label:
+            doc["label"] = label
+        added: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for real in wanted:
+            if real in seen:
+                continue
+            seen.add(real)
+            added.append((real, self._append_form(cid, doc, real, None, "", source)))
+        self._validate_then_write(self._file_for(cid), doc)
+        self._register(cid, idx)
+        return idx, added
+
     def _append_form(self, cid: str, client: dict[str, Any], real: str, token: str | None = None,
                      origin: str = "", source: str = "") -> str:
         """Derive one form's token and append it to the client document IN MEMORY.

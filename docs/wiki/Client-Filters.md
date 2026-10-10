@@ -30,13 +30,31 @@ its display name.
 
 ## Adding a client
 
-**Add client** (on this page, from the menu, or **+ New client** on [Review](Review.md)) asks for:
+**Add client** (on this page, from the menu, from the setup wizard, or **+ New client** on
+[Review](Review.md)) opens the **Add Client wizard**, which walks through:
 
-| Field | What it is |
-|---|---|
-| Client id | The key. Names the file, keys the mapping, and is what the command line wants. 1-64 letters, digits, `-` and `_`, starting with a letter or digit. Keep it meaningless - it appears in the evidence log. |
-| Display name | Optional. What you read everywhere in the UI; the id is shown when it is empty. Up to 80 characters. |
-| Index | Optional. The number inside the tokens the AI sees (index 42 gives `Client42`). Derived from the id when blank. |
+1. **Client name** - the Client ID (the key: names the file, keys the mapping; 1-64 letters, digits,
+   `-` and `_`, starting with a letter or digit - keep it meaningless, it appears in the evidence
+   log) and the Display name (what you read everywhere; the id when blank). The number inside the
+   tokens the AI sees (`Client42`) is worked out from the id.
+2. **Alternate names** - other names that make the company obvious: legal names, acronyms and what
+   they stand for, brands. A name is replaced on its own and at a capital-letter join (`newAcme`),
+   not inside a lower-case run (`acmeish`).
+3. **Domains** - `https://` and paths are taken off as you type. Each is looked up at Microsoft (only
+   the domain is sent, to `login.microsoftonline.com` and `autodiscover-s.outlook.com`) for its
+   tenant, SharePoint and other domains.
+4. **Email domains** - `*@` each domain, prefilled: every address there counts as the client's (an
+   email rule).
+5. **Other identifiers** - what the Microsoft lookup found, to tick, and anything else unique to the
+   client: a SharePoint host (its `-my` and `-admin` twins are added), a DevOps or GitHub
+   organisation, cloud account names.
+6. **Scan a repository** (optional) - a local copy of their work, read for more identifiers to tick.
+7. **Finish** - the client, its index and how many entries of each kind; **Save** makes it.
+
+What you type is kept as a draft on this machine as you go: close the wizard and **Add client**
+offers to resume or delete it. **Add Global Info** runs the same pages into Global. Tick **Skip the
+wizard next time** on the last page for the short form instead (Client ID and Display name only);
+its "Use the step-by-step wizard instead" brings the wizard back.
 
 ## Entries (forms) and tokens
 
