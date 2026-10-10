@@ -101,13 +101,18 @@ param(
     [switch]$SkipTheChooser,
     # Give the existing address a new name (with -Hostname): same tunnel, same Access application.
     [switch]$Rename,
-    [switch]$Remove
+    [switch]$Remove,
+    # Nobody at the keyboard (the setup wizard runs this, D177): every yes/no takes its default, and
+    # anything that has no default - a token, an address, a client secret - must come as a parameter
+    # or the run stops and says which, rather than reading a closed input.
+    [switch]$AssumeDefaults
 )
 # The app folder: this script's own, or its parent when it sits in installer\ (feature 102).
 $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:Unattended = [bool]$AssumeDefaults
 
 # --- Contact attribution (inlined per script so each script stays self-contained) ---------
 function Get-ContactInfo {
@@ -151,6 +156,10 @@ function Confirm-Action {
     [CmdletBinding()]
     [OutputType([bool])]
     param([Parameter(Mandatory)][string]$Message, [ValidateSet('Yes', 'No')][string]$Default = 'No')
+    if ((Get-Variable -Name 'Unattended' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) {
+        Write-Status "$Message -> $Default (default)" -Level Detail
+        return ($Default -eq 'Yes')
+    }
     $suffix = if ($Default -eq 'Yes') { '[Y/n]' } else { '[y/N]' }
     $response = Read-Host "$Message $suffix"
     if ([string]::IsNullOrWhiteSpace($response)) { return ($Default -eq 'Yes') }
@@ -161,6 +170,11 @@ function Read-Value {
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][string]$Message, [AllowEmptyString()][string]$Default = '')
+    if ((Get-Variable -Name 'Unattended' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) {
+        if (-not $Default) { throw "Unattended, and nothing answers this: $Message (pass it as a parameter)" }
+        Write-Status "$Message -> $Default (default)" -Level Detail
+        return $Default
+    }
     $prompt = if ($Default) { "$Message [$Default]" } else { $Message }
     $response = Read-Host $prompt
     if ([string]::IsNullOrWhiteSpace($response)) { return $Default }
@@ -371,6 +385,7 @@ function Invoke-ApiSetup {
     [CmdletBinding(SupportsShouldProcess)]
     param()
     if (-not $script:ApiTokenSecure) {
+        if ((Get-Variable -Name 'Unattended' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) { throw 'Unattended, and no API token was given (AICLEANER_CLOUDFLARE_TOKEN or -ApiToken)' }
         Show-TokenSteps -PublicHostname $script:Hostname -SignInWith $Identity
         $script:ApiTokenSecure = Read-Host -Prompt 'Paste the API token (hidden)' -AsSecureString
     }
@@ -932,7 +947,10 @@ function New-IdentityProvider {
     }
     if (-not $ClientId) { $ClientId = Read-Value -Message "$Provider client ID" -Default '' }
     if (-not $ClientId) { throw "A client ID is needed to register $Provider" }
-    if (-not $ClientSecret) { $ClientSecret = Read-Host -AsSecureString -Prompt "$Provider client secret" }
+    if (-not $ClientSecret) {
+        if ((Get-Variable -Name 'Unattended' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) { throw "Unattended, and no $Provider client secret was given" }
+        $ClientSecret = Read-Host -AsSecureString -Prompt "$Provider client secret"
+    }
     $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR(
         [Runtime.InteropServices.Marshal]::SecureStringToBSTR($ClientSecret))
     if (-not $plain) { throw "A client secret is needed to register $Provider" }
@@ -1336,6 +1354,7 @@ try {
         if (-not $newName) { throw 'A new name is needed' }
         $secure = if ($ApiToken) { $ApiToken } else { Read-StoredCloudflareToken }
         if (-not $secure) {
+            if ((Get-Variable -Name 'Unattended' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) { throw 'Unattended, and no API token is stored or given' }
             Show-TokenSteps -PublicHostname $newName -SignInWith $Identity
             $secure = Read-Host -Prompt 'Paste the API token (hidden)' -AsSecureString
         }

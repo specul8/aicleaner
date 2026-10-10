@@ -1,13 +1,14 @@
 // The setup wizard (feature 106; spec docs/superpowers/specs/2026-10-09-onboarding-and-public-release-design.md,
 // section 6). Opened by the installer at the end of its console part, and from Settings at any time.
-// Five steps, each skippable: what happens, your AI tools, your first client, remote access, done.
+// Five steps, each skippable: what happens, your first client, remote access, your AI tools, done.
+// Routing the AI tools is last but one (feature 110): nothing is switched over before a client exists.
 // Local only - the server refuses /api/setup through the tunnel - because it runs this machine's
 // scripts. The Cloudflare and DNS guidance is text the owner checks (TESTING marks it so).
 
 import { getJSON, postJSON, sayError } from '../api.js';
 import { h, setChildren } from '../dom.js';
 
-const STEPS = ['What happens', 'Your AI tools', 'Your first client', 'Remote access', 'Done'];
+const STEPS = ['What happens', 'Your first client', 'Remote access', 'Your AI tools', 'Done'];
 const view = { step: 0, main: null, ctx: null, dns: null };
 
 export async function render(main, ctx) {
@@ -30,7 +31,7 @@ function paint() {
     const button = event.target.closest('button[data-step]');
     if (button) { view.step = Number(button.dataset.step); paint(); }
   });
-  const body = [welcome, tools, firstClient, remote, done][view.step](status);
+  const body = [welcome, firstClient, remote, tools, done][view.step](status);
   const back = h('button', { type: 'button', class: 'setup-back', disabled: view.step === 0 }, 'Back');
   const next = h('button', { type: 'button', class: 'primary setup-next' }, view.step === STEPS.length - 1 ? 'Finish' : 'Next');
   back.addEventListener('click', () => { view.step -= 1; paint(); });
@@ -51,8 +52,9 @@ function welcome() {
       + 'each client\'s names, domains, tenants, addresses and resource names are swapped for neutral stand-ins; '
       + 'when the reply comes back, the real names are put back. Nothing about your clients leaves this machine '
       + 'except as a stand-in.'),
-    h('p', {}, 'The next steps: point your AI tools at aicleaner, tell it your first client, and - only if you want to use '
-      + 'it from another device - set up remote access. Every step can be skipped and done later from Settings.'),
+    h('p', {}, 'The next steps: tell aicleaner your first client, set up remote access - only if you want to use it from '
+      + 'another device - and then point your AI tools at aicleaner, last, once it knows who to protect. Every step can be '
+      + 'skipped and done later from Settings.'),
   ];
 }
 
@@ -221,8 +223,8 @@ function done(status) {
   return [
     h('h2', {}, 'Done'),
     h('ul', {},
-      h('li', {}, routed ? 'Your AI tools go through aicleaner.' : 'Your AI tools are not routed yet - step 2 does it.'),
-      h('li', {}, clients ? `${clients} client${clients === 1 ? '' : 's'} set up.` : 'No client yet - step 3 adds one.')),
+      h('li', {}, clients ? `${clients} client${clients === 1 ? '' : 's'} set up.` : 'No client yet - step 2 adds one.'),
+      h('li', {}, routed ? 'Your AI tools go through aicleaner.' : 'Your AI tools are not routed yet - step 4 does it.')),
     h('p', {}, 'Try it: ask Claude something that names your client, then open the Log to see what was replaced. '
       + 'New names it finds wait in Review. '),
     h('p', {}, h('a', { href: '#/wiki/Getting-started' }, 'Getting started'), ' · ', h('a', { href: '#/wiki/How-it-works' }, 'How it works'),

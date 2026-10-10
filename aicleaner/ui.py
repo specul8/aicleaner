@@ -155,6 +155,20 @@ log = logging.getLogger("aicleaner.ui")
 model_list = ModelList()
 
 
+# The sign-in methods the wizard can set up unattended (D177; part D of the 2026-10-10 spec adds more).
+REMOTE_IDENTITIES = ("OneTimePin",)
+
+
+def remote_setup_command(shell: str, script: Path | str, hostname: str, email: str,
+                         identity: str = "OneTimePin") -> list[str]:
+    """How the setup wizard runs Enable-RemoteControl.ps1 (D177). Only parameters the script has -
+    it was passed -LogPath, which it never had, so the run stopped before it started - and
+    -AssumeDefaults, so no question is read from a closed input. The token travels in the
+    environment, never here."""
+    return [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(script),
+            "-Setup", "api", "-Hostname", hostname, "-Email", email, "-Identity", identity, "-AssumeDefaults"]
+
+
 def _health_state(cfg) -> dict | None:
     """What the health check last found, or None when it has never run (feature 17).
 
@@ -2022,6 +2036,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(ValueError("give the email address that may sign in"))
         if not re.fullmatch(r"[A-Za-z0-9_-]{30,}", token):
             return err(ValueError("that does not look like a Cloudflare API token"))
+        identity = str(body.get("identity") or "OneTimePin")
+        if identity not in REMOTE_IDENTITIES:
+            return err(ValueError(f"sign-in method must be one of: {', '.join(REMOTE_IDENTITIES)}"))
         root = proxy.cfg.path.parent
         script = root / "installer" / "Enable-RemoteControl.ps1"
         from .restart import RestartError, powershell, spawn_detached
@@ -2029,9 +2046,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("", encoding="utf-8")                    # this run's log only
         try:
-            spawn_detached([powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
-                            "-File", str(script), "-Setup", "api", "-Hostname", hostname, "-Email", email,
-                            "-LogPath", ""], root, log_path, env={"AICLEANER_CLOUDFLARE_TOKEN": token})
+            spawn_detached(remote_setup_command(powershell(), script, hostname, email, identity), root, log_path,
+                           env={"AICLEANER_CLOUDFLARE_TOKEN": token})
         except RestartError as exc:
             return err(exc, status=409)
         return web.json_response({"ok": True})
