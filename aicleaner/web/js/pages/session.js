@@ -325,7 +325,10 @@ function transcript(events, { after = null, placeholder = true } = {}) {
       }
       const tools = ((event.message || {}).content || []).filter((c) => c.type === 'tool_use');
       for (const tool of tools) {
-        lines.push(h('div', { class: 'turn tool' }, h('span', { class: 'who' }, 'tool'), toolDetail(tool)));
+        // The dot says whether the call is still running (D176); markTools sets it, on every
+        // paint, because a result arrives after the line was drawn.
+        const dot = h('span', { class: 'tool-dot', 'data-tool-id': tool.id || '', 'aria-hidden': 'true' });
+        lines.push(h('div', { class: 'turn tool' }, h('span', { class: 'who' }, dot, 'tool'), toolDetail(tool)));
       }
     } else if (event.type === 'brief') {
       lines.push(h('div', { class: 'turn tool' }, h('span', { class: 'who' }, 'brief'), h('div', {}, event.text)));
@@ -437,6 +440,58 @@ function finishedIds(events) {
     }
   }
   return done;
+}
+
+// Each tool call's state for its dot (D176): "done" once a result names it, "stopped" when the turn
+// it belonged to ended without one (an interrupt, an exit) or the session is not running, and
+// "running" otherwise. Several calls run at once, so each is answered for itself.
+const TURN_ENDS = new Set(['result', 'interrupted', 'exited', 'stopped']);
+
+function toolStates(events, running) {
+  const list = events || [];
+  const done = finishedIds(list);
+  for (const event of list) {
+    if (event.type !== 'user') continue;
+    for (const block of ((event.message || {}).content || [])) {
+      if (block && block.type === 'tool_result' && block.tool_use_id) done.add(block.tool_use_id);
+    }
+  }
+  let lastEnd = -1;
+  list.forEach((event, at) => { if (TURN_ENDS.has(event.type)) lastEnd = at; });
+  const states = new Map();
+  list.forEach((event, at) => {
+    if (event.type !== 'assistant') return;
+    for (const block of ((event.message || {}).content || [])) {
+      if (block.type !== 'tool_use' || !block.id) continue;
+      if (done.has(block.id)) states.set(block.id, 'done');
+      else states.set(block.id, !running || at < lastEnd ? 'stopped' : 'running');
+    }
+  });
+  return states;
+}
+
+function markTools(log, events, running) {
+  const states = toolStates(events, running);
+  for (const dot of log.querySelectorAll('.tool-dot[data-tool-id]')) {
+    const state = states.get(dot.dataset.toolId) || 'done';
+    dot.dataset.state = state;
+    dot.title = state === 'running' ? 'still running' : state === 'stopped' ? 'stopped before it finished' : 'finished';
+  }
+}
+
+// Prompts waiting for the running turn to end (D176): above the prompt box, not in the transcript,
+// until the session takes them. Held ones came back from before a restart and go only when sent.
+function queueChips(queued) {
+  const items = queued || [];
+  if (!items.length) return [];
+  const head = h('div', { class: 'hint queue-head' },
+    `${items.length} waiting - sent when the current turn ends, one at a time`);
+  const chips = items.map((item) => h('div', { class: `queue-chip${item.held ? ' held' : ''}`, 'data-id': item.id },
+    h('span', { class: 'queue-text', title: item.text }, item.text.length > 140 ? `${item.text.slice(0, 140)}...` : item.text),
+    item.held ? h('span', { class: 'hint' }, ' (held after a restart)') : null,
+    h('button', { type: 'button', class: 'queue-send', 'data-action': 'send', 'data-id': item.id }, 'Send now'),
+    h('button', { type: 'button', class: 'queue-cancel', 'data-action': 'cancel', 'data-id': item.id }, 'Cancel')));
+  return [head, ...chips];
 }
 
 function backgroundTasks(events) {
@@ -1934,6 +1989,26 @@ export async function render(main, context = {}) {
     h('label', { for: 'session-mode' }, 'Asks'), modeSelect,
     h('span', { class: 'hint', id: 'session-mode-why' }, ''));
   const editorSlot = h('div', { id: 'session-editor' });
+  // Prompts waiting for the turn to end (D176), above the box they were typed in.
+  const queueBox = h('div', { id: 'session-queue', hidden: true });
+  const paintQueue = (queued) => {
+    repaint(queueBox, queueChips(queued));
+    queueBox.hidden = !(queued || []).length;
+  };
+  queueBox.addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+    button.disabled = true;
+    try {
+      const path = button.dataset.action === 'send' ? '/api/session/queue/send' : '/api/session/queue/cancel';
+      const answer = await postJSON(path, { name: view.name, id: button.dataset.id });
+      if (answer.outcome === 'interrupting') say('Stopping the current turn, then sending this.', 'ok');
+      await refresh();
+    } catch (error) {
+      button.disabled = false;
+      sayError(error);
+    }
+  });
 
   const paint = () => {
     // A refresh that lands after the page was left - another page routed in while it was in flight,
@@ -1981,7 +2056,9 @@ export async function render(main, context = {}) {
     homeShown.title = homeFolder;
     const drawing = begin('paint.transcript', { events: (session.events || []).length });
     paintLog(log, session.events, view.name);
+    markTools(log, session.events, Boolean(session.running));
     drawing.end();
+    paintQueue(session.queued);
     showEarlierWhen();
     paintBackground(background, session.events, box);
     // Not rebuilt while unchanged or in use: a half-answered question must survive the poll (D58, D69).
@@ -2113,6 +2190,13 @@ export async function render(main, context = {}) {
 
   const applyEvent = (event) => {
     if (!event) return;
+    // The waiting prompts changed (D176): the chips follow; nothing in the transcript does.
+    if (event.type === 'queue') {
+      const mine = (view.state.sessions || {})[view.name];
+      if (mine) mine.queued = event.queued || [];
+      paintQueue(event.queued);
+      return;
+    }
     noteActivity(event);
     // A turn has ended, which is exactly when files have just changed (D33): look at the open
     // folders again. Only open ones are fetched - collapsed roots are not listed (D70) - so this
@@ -2131,6 +2215,7 @@ export async function render(main, context = {}) {
     if (event.seq !== undefined && last !== undefined && event.seq <= last) return;
     view.state.events = [...events, event];
     paintLog(log, view.state.events, view.name);
+    markTools(log, view.state.events, Boolean(current().running));
     paintBackground(background, view.state.events, box);
   };
 
@@ -2302,6 +2387,7 @@ export async function render(main, context = {}) {
   const autocorrect = attachAutocorrect(box, { conversation: () => log.textContent || '' });
   view.autocorrect = autocorrect;
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
+    queueBox,
     autocorrect.stack,
     slash,
     h('div', { class: 'form-row' },

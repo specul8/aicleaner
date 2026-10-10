@@ -18,6 +18,8 @@ API (JSON; writes need Content-Type application/json):
   POST /api/session/prompt                 {name, text}
   POST /api/session/stop                   {name} end that session
   POST /api/session/interrupt              {name} stop the turn, keep the session
+  POST /api/session/queue/send             {name, id} send a waiting prompt now (D176)
+  POST /api/session/queue/cancel           {name, id} drop a waiting prompt (D176)
   POST /api/session/permission-mode        {name, mode} how it asks before it acts
   POST /api/session/permission             {id, allow} answer a waiting permission request
   POST /api/session/permission/request     the approval host asking; waits for the answer
@@ -1198,7 +1200,29 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
 
         body = await request.json()
         try:
-            await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")))
+            # "queued": a turn is running, so it waits on the page until that turn ends (D176).
+            outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")))
+        except SessionError as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "outcome": outcome})
+
+    async def session_queue_send(request: web.Request) -> web.Response:
+        """A waiting prompt sent now: first in line, and the running turn interrupted (D176)."""
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            outcome = await session_host().send_queued_now(str(body.get("id", "")), name=str(body.get("name", "")))
+        except SessionError as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "outcome": outcome})
+
+    async def session_queue_cancel(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            await session_host().cancel_queued(str(body.get("id", "")), name=str(body.get("name", "")))
         except SessionError as exc:
             return err(exc)
         return web.json_response({"ok": True})
@@ -2429,6 +2453,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/session/prompt", session_prompt)
         app.router.add_post("/api/session/stop", session_stop)
         app.router.add_post("/api/session/interrupt", session_interrupt)
+        app.router.add_post("/api/session/queue/send", session_queue_send)
+        app.router.add_post("/api/session/queue/cancel", session_queue_cancel)
         app.router.add_post("/api/session/permission-mode", session_permission_mode)
         app.router.add_post("/api/session/permission", session_permission)
         app.router.add_post("/api/session/permission/request", session_permission_request)

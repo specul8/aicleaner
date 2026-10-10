@@ -555,7 +555,8 @@ class Proxy:
         if body is None and request.method == "GET":
             body = dict(request.query)          # a logged read: which file, from which folder
         body = _withheld(body, path)
-        if path in ("/api/session/start", "/api/session/prompt") and 200 <= status < 300 and self.session:
+        if path in ("/api/session/start", "/api/session/prompt", "/api/session/queue/send") \
+                and 200 <= status < 300 and self.session:
             name = str((body or {}).get("name", "")) if isinstance(body, dict) else ""
             try:
                 name = self.session.profile(name).name

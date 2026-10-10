@@ -619,6 +619,12 @@ class Session:
         # The interrupt still waiting for its answer, if any. A second Escape joins it rather than
         # writing another request that would also land, later.
         self._interrupt_pending: asyncio.Future | None = None
+        # Prompts sent while a turn was running (D176): held here, shown on the page as waiting,
+        # and sent one at a time as each turn ends - not written to stdin, where the CLI held them
+        # out of sight until the turn finished. `held` ones came back from before a proxy restart
+        # and are sent only when someone says so.
+        self.queued: list[dict[str, Any]] = []
+        self._flushing: asyncio.Task | None = None
 
     # ---- what the UI asks for ---------------------------------------------------------
 
@@ -658,6 +664,8 @@ class Session:
             "permission_mode": self.permission_mode,
             "pending": [{"id": p.id, "tool": p.tool, "detail": p.detail, "asked_at": p.asked_at}
                         for p in self.pending.values()],
+            "busy": self.busy,
+            "queued": [dict(item) for item in self.queued],
             "events": list(self.events),
             "error": self.last_error,
         }
@@ -836,6 +844,7 @@ class Session:
         self.pending.clear()
         self.last_error = ""
         self._briefed = True           # the brief went with the first prompt, before the restart
+        self._load_queue()
         resume = str(launch.get("resume") or "")
         if resume and self.project:
             # Only what came before this sitting: the resumed conversation writes to the file the
@@ -1084,12 +1093,107 @@ class Session:
             raise SessionError("no project folders are configured (session.projects)")
         return SearchWalk(needle, self._allowed_roots(share)[1])
 
-    async def prompt(self, text: str) -> None:
-        """Send one user message; the reply arrives as events."""
+    async def prompt(self, text: str) -> str:
+        """Send one user message; the reply arrives as events. While a turn is running it waits
+        in `queued` instead (D176) and goes when the turn ends. Returns "sent" or "queued"."""
         if not self.running or self._process is None or self._process.stdin is None:
             raise SessionError("no session is running")
         if not text.strip():
             raise SessionError("nothing to send")
+        if self.busy:
+            self.queued.append({"id": uuid.uuid4().hex[:12], "text": text, "at": time.time(), "held": False})
+            self._queue_changed()
+            return "queued"
+        await self._send(text)
+        return "sent"
+
+    def _queue_changed(self) -> None:
+        """Keep the waiting prompts on disk beside the broker, and tell watchers the list changed."""
+        self._save_queue()
+        self._emit({"type": "queue", "queued": [dict(item) for item in self.queued]})
+
+    def _queue_file(self) -> Path | None:
+        return self.folder / "queued.json" if self.folder is not None else None
+
+    def _save_queue(self) -> None:
+        path = self._queue_file()
+        if path is None:
+            return
+        try:
+            path.write_text(json.dumps(self.queued, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            log.warning("could not keep the waiting prompts in %s: %s", path, exc)
+
+    def _load_queue(self) -> None:
+        """Waiting prompts from before a proxy restart come back held: the turn they waited on may
+        have ended unseen, so they wait for a person to send them rather than going on their own."""
+        path = self._queue_file()
+        self.queued = []
+        if path is None or not path.is_file():
+            return
+        try:
+            items = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            log.warning("could not read the waiting prompts in %s: %s", path, exc)
+            return
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("id"):
+                self.queued.append({"id": str(item["id"]), "text": item["text"],
+                                    "at": float(item.get("at") or 0), "held": True})
+
+    async def cancel_queued(self, item_id: str) -> None:
+        """Drop one waiting prompt."""
+        before = len(self.queued)
+        self.queued = [item for item in self.queued if item["id"] != item_id]
+        if len(self.queued) == before:
+            raise SessionError("that prompt is no longer waiting")
+        self._queue_changed()
+
+    async def send_queued_now(self, item_id: str) -> str:
+        """Send one waiting prompt now: to the front, and the running turn interrupted so it goes
+        as soon as the CLI ends it. Not busy: it is sent at once. Returns "sent" or "interrupting"."""
+        found = [item for item in self.queued if item["id"] == item_id]
+        if not found:
+            raise SessionError("that prompt is no longer waiting")
+        item = {**found[0], "held": False}
+        self.queued = [item] + [other for other in self.queued if other["id"] != item_id]
+        if not self.busy:
+            self.queued.pop(0)
+            self._queue_changed()
+            await self._send(item["text"])
+            return "sent"
+        self._queue_changed()
+        await self.interrupt(cancel_queued=True)
+        return "interrupting"
+
+    def _flush_soon(self) -> None:
+        """A turn ended: send the next waiting prompt, unless it is held or something else is."""
+        if not self.queued or self.queued[0].get("held") or not self.running:
+            return
+        if self._flushing is not None and not self._flushing.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._flushing = loop.create_task(self._send_next())
+
+    async def _send_next(self) -> None:
+        if self.busy or not self.queued or self.queued[0].get("held") or not self.running:
+            return
+        item = self.queued.pop(0)
+        self._queue_changed()
+        try:
+            await self._send(item["text"])
+        except (SessionError, OSError) as exc:
+            # Put back rather than lost: it is still on screen, and Send now can try again.
+            self.queued.insert(0, {**item, "held": True})
+            self.last_error = f"a waiting prompt could not be sent: {exc}"
+            self._queue_changed()
+
+    async def _send(self, text: str) -> None:
+        if not self.running or self._process is None or self._process.stdin is None:
+            raise SessionError("no session is running")
         sent = text
         self.busy = True
         brief = (self.profile.brief if self.profile else "").strip()
@@ -1342,6 +1446,7 @@ class Session:
         if event.get("type") == "result":
             self.turns += 1
             self.busy = False
+            self._flush_soon()                 # the next waiting prompt, if any (D176)
         elif event.get("type") in ("exited", "stopped"):
             self.busy = False
         # Everything is broadcast; only what the page draws or reads back is kept (KEPT_EVENTS).
@@ -1727,8 +1832,14 @@ class SessionHost:
         return await session.start(project=str(home) if home else project, resume=resume,
                                    model=model or profile.model)
 
-    async def prompt(self, text: str, name: str = "") -> None:
-        await self._session(name).prompt(text)
+    async def prompt(self, text: str, name: str = "") -> str:
+        return await self._session(name).prompt(text)
+
+    async def send_queued_now(self, item_id: str, name: str = "") -> str:
+        return await self._session(name).send_queued_now(item_id)
+
+    async def cancel_queued(self, item_id: str, name: str = "") -> None:
+        await self._session(name).cancel_queued(item_id)
 
     async def stop(self, name: str = "") -> None:
         await self._session(name).stop()
