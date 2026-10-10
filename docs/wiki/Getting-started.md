@@ -54,6 +54,11 @@ this machine, shown in green (for example "VS Code Server IS here"):
 | 5 | None here: this device uses a remote AI agent on a different computer (screenshot tooling only) |
 | 6 | None yet: just put the files in place |
 
+If you take screenshots on the machine, the next question is which keys you press to take one; the
+installer makes them send the screenshot's text instead. Before the installers run, the changes they
+will make are listed with one choice: **(A)ccept the defaults** (no further questions, except an API
+key to paste for Claude Desktop) or **(C)hoose each one** (a yes/no before each change).
+
 Every question says what Enter chooses. Yes/no questions show `[Y/n]`; a choice between two shows
 the letter to type in colour, for example `(Y)es / (N)o`. Folders are typed in full, the suggestion
 in brackets.

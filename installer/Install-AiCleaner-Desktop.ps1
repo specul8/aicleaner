@@ -76,6 +76,10 @@
     the engine built into Windows is used, which needs no install; this is for a machine that
     wants the better reader.
 
+.PARAMETER AcceptDefaults
+    Take the default answer to every yes/no question without asking (what the deploy's "(A)ccept the
+    defaults" passes). A question with no default - an API key to paste - is still asked.
+
 .PARAMETER PythonExe
     Explicit Python executable for the venv. Default: auto-detect (py -3.13, then python).
 
@@ -121,6 +125,8 @@ param(
     [switch]$WithTesseract,
     [switch]$SkipSnippingTool,
     [string]$PythonExe = '',
+    # Take every Confirm-Action's default without asking (the deploy's "(A)ccept the defaults").
+    [switch]$AcceptDefaults,
     [AllowEmptyString()][string]$LogPath = $(
         $base = if ($PSCommandPath) { [IO.Path]::GetFileNameWithoutExtension($PSCommandPath) } else { 'Install-AiCleaner-Desktop' }
         $dir = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
@@ -132,6 +138,7 @@ $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -L
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:AcceptDefaultsGiven = [bool]$AcceptDefaults
 
 # --- Contact attribution (inlined per script so each script stays self-contained) ---------
 function Get-ContactInfo {
@@ -190,6 +197,11 @@ function Confirm-Action {
         [Parameter(Mandatory)][string]$Message,
         [ValidateSet('Yes', 'No')][string]$Default = 'No'
     )
+    # -AcceptDefaults (the deploy's "(A)ccept the defaults", 2026-10-11): said, not asked.
+    if (Get-Variable -Name 'AcceptDefaultsGiven' -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+        Write-Status "$Message -> $Default (the default)" -Level Detail
+        return ($Default -eq 'Yes')
+    }
     $suffix = if ($Default -eq 'Yes') { '[Y/n]' } else { '[y/N]' }
     $response = Read-Host "$Message $suffix"
     if ([string]::IsNullOrWhiteSpace($response)) { return ($Default -eq 'Yes') }
@@ -642,7 +654,7 @@ function Get-ScreenshotKeys {
         $marker = if ($number -eq '1') { '*' } else { ' ' }
         Write-Host ("  {0}{1}. {2}" -f $marker, $number, $options[$number].Label)
     }
-    $answer = ([string](Read-Host 'Number [1]')).Trim()
+    $answer = ([string](Read-Host 'Type your selection and press Enter (just press Enter to choose 1)')).Trim()
     if (-not $answer) { $answer = '1' }
     if (-not $options.Contains($answer)) { throw "Not one of the choices: $answer" }
     $codes = [string]$options[$answer].Codes

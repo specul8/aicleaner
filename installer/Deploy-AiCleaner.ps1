@@ -1462,6 +1462,11 @@ function Invoke-Wiring {
         if ($desktopArgs -notcontains '-WithTesseract') { $desktopArgs += '-WithTesseract' }
     }
     $workstationArgs = if ($Role) { @($Role.Workstation) } else { $WorkstationArguments }
+    # One question for both installers' defaults, before either runs (the user, 2026-10-11).
+    if (Confirm-InstallerDefault -Targets $Targets -VSCodeArgs $vscodeArgs -DesktopArgs $desktopArgs) {
+        $vscodeArgs += '-AcceptDefaults'
+        $desktopArgs += '-AcceptDefaults'
+    }
     if ($Targets -contains 'VSCode') {
         Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Install-AiCleaner-VSCode.ps1') -Arguments (@('-RegisterStartupTask') + $vscodeArgs)
     }
@@ -1472,6 +1477,55 @@ function Invoke-Wiring {
     if ($Targets -contains 'Workstation') {
         Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Install-AiCleaner-Workstation.ps1') -Arguments $workstationArgs
     }
+}
+
+function Confirm-InstallerDefault {
+    <#
+    .SYNOPSIS
+        Before the role installers run: their changes listed, and one either-or - accept the
+        defaults, or be asked each one (the user, 2026-10-11). Returns $true to accept.
+    .DESCRIPTION
+        The installers ask a yes/no before each change, and the answer is nearly always the default:
+        a long run of Enter presses for somebody new. Accepted, each installer is run with
+        -AcceptDefaults and takes every default without asking; the questions with no default (an API
+        key to paste) are still asked. Choosing asks each one as before - and answering one
+        differently can bring further questions.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string[]]$Targets = @(), [string[]]$VSCodeArgs = @(), [string[]]$DesktopArgs = @())
+    $changes = New-Object System.Collections.Generic.List[string]
+    $vscode = $Targets -contains 'VSCode'
+    $desktop = $Targets -contains 'Desktop'
+    if (-not ($vscode -or $desktop)) { return $false }
+    $changes.Add("Python 3.13 (installed with winget if there is none) and aicleaner's Python environment")
+    if ($desktop) {
+        $changes.Add('Claude Desktop: its policy values, so it sends through aicleaner (third-party inference mode)')
+        $changes.Add('The Anthropic API key you paste, stored encrypted for this Windows account')
+        if ($DesktopArgs -contains '-RegisterBackupTask') { $changes.Add('A nightly backup of the Claude Desktop profile (03:00)') }
+    }
+    if ($vscode) {
+        $changes.Add('Claude Code settings: web-fetch preflight off, telemetry and error reporting off, MCP tool arguments kept tokenised')
+        $where = @()
+        if ($VSCodeArgs -notcontains '-SkipVSCode') { $where += 'this PC' }
+        if ($VSCodeArgs -notcontains '-SkipVSCodeServer') { $where += 'VS Code Server' }
+        if ($where.Count) { $changes.Add("VS Code telemetry off (settings for $($where -join ' and '))") }
+        $changes.Add('The aicleaner rules block in your CLAUDE.md (files converted locally, never sent)')
+        $changes.Add('Opt-out variables an earlier install set are removed; Desktop Commander telemetry off, if it is installed')
+        $changes.Add('User-scope telemetry variables are kept (removing them is a No by default)')
+    }
+    $changes.Add('The aicleaner-proxy task at sign-in, and the proxy started now')
+    $screens = ($vscode -and $VSCodeArgs -notcontains '-SkipPowerToys') -or ($desktop -and $DesktopArgs -notcontains '-SkipPowerToys')
+    if ($screens) { $changes.Add('Screenshots: the Snipping Tool and PowerToys, your screenshot keys sending the text') }
+    $changes.Add('Document converters (pandoc, Poppler, the Office readers) and PSScriptAnalyzer, where missing')
+    Write-Host ''
+    Write-Status 'The installer is about to make these changes, each one its default:' -Level Step
+    foreach ($change in $changes) { Write-Status "  - $change" -Level Detail }
+    $answer = Read-Either -Message 'Make them all, or decide each one?' -Default 'accept' -Options ([ordered]@{
+        'accept' = '(A)ccept the defaults - make all of these changes without asking each one'
+        'choose' = '(C)hoose each one - be asked before each change; answering one differently from its default may bring more questions'
+    })
+    return ($answer -eq 'accept')
 }
 
 function Get-ConfiguredPort {
@@ -1970,6 +2024,34 @@ function Get-AgentChoice {
     return ''
 }
 
+function Read-ScreenshotShortcut {
+    <#
+    .SYNOPSIS
+        Which keys this person presses to take a screenshot, asked straight after "do you take
+        screenshots" (the user, 2026-10-11) and handed to the installer as -ScreenshotKeys.
+    .DESCRIPTION
+        The installer remaps those keys to the Snipping Tool's text extractor. It used to ask this
+        itself, steps later, in a prompt of its own style; asked here, the subject is asked once.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $keys = Read-Choice -Message 'Which keys do you press now to take a screenshot?' -Default 'win+shift+s' -Options ([ordered]@{
+        'win+shift+s' = 'Win+Shift+S (the Snipping Tool shortcut)'
+        'prtsc'       = 'PrtSc'
+        'ctrl+prtsc'  = 'Ctrl+PrtSc'
+        'alt+prtsc'   = 'Alt+PrtSc'
+        'other'       = 'Something else (type the keys)'
+    })
+    if ($keys -ne 'other') { return $keys }
+    for ($try = 0; $try -lt 3; $try++) {
+        $typed = (Read-Value -Message 'Type them, e.g. ctrl+alt+p' -Default 'win+shift+s').ToLowerInvariant()
+        if ($typed -match '^[a-z0-9]+([+ ,-][a-z0-9]+)*$') { return $typed }
+        Write-Status 'Key names like win, ctrl, shift, alt, prtsc, or a letter, joined with +' -Level Warn
+    }
+    return 'win+shift+s'
+}
+
 function Show-ViewerHelp {
     <#
     .SYNOPSIS
@@ -2106,6 +2188,7 @@ function Get-MachineRole {
     $roles = @(Resolve-Roles -Chosen $roles)
     $agentHere = @('code-local', 'code-remote', 'code-headless', 'desktop')
     $nothingToDo = $false
+    $workstationArgs = @($WorkstationArguments)
     if ($roles -contains 'workstation' -and @($roles | Where-Object { $_ -ne 'workstation' }).Count -eq 0) {
         # A viewing device is a viewing device whether you look through VS Code over SSH or a
         # browser: neither runs the agent, and both want the same one thing if anything.
@@ -2115,6 +2198,8 @@ function Get-MachineRole {
         if (-not (Confirm-Action -Message 'Do you take screenshots on this device (so they can be pasted as text)?' -Default 'Yes')) {
             $roles = @()
             $nothingToDo = $true
+        } else {
+            $workstationArgs = @($WorkstationArguments) + @('-ScreenshotKeys', (Read-ScreenshotShortcut))
         }
     }
     $wanted = @($roles | Where-Object { $agentHere -contains $_ })
@@ -2147,6 +2232,10 @@ function Get-MachineRole {
         if (-not (Confirm-Action -Message 'Do you take screenshots on this machine?' -Default 'Yes')) {
             $vscodeArgs += @('-SkipPowerToys', '-SkipSnippingTool')
             $advice = 'Screenshots are taken elsewhere: run this script on that PC and choose "None here".'
+        } else {
+            $keys = Read-ScreenshotShortcut
+            $vscodeArgs += @('-ScreenshotKeys', $keys)
+            $desktopArgs += @('-ScreenshotKeys', $keys)
         }
     } elseif ($codeRoles.Count -gt 0) {
         # Nobody looks at a screen on a machine reached only over SSH.
@@ -2168,7 +2257,7 @@ function Get-MachineRole {
     # for screenshots (feature 109).
     $fromElsewhere = $codeRoles.Count -gt 0 -and -not $screenHere
     return [pscustomobject]@{ Targets = $targets; VSCode = $vscodeArgs; Desktop = $desktopArgs
-                              Workstation = $WorkstationArguments; Advice = $advice
+                              Workstation = $workstationArgs; Advice = $advice
                               FromElsewhere = $fromElsewhere; NothingToDo = $nothingToDo }
 }
 
@@ -2612,7 +2701,9 @@ function Invoke-Install {
     # The rest of the setup happens in the browser (features 106, 109): whenever the tools were not
     # switched over here, and a proxy runs on this machine to show it. Whoever installs is at this
     # machine or signed in to it (the user, 2026-10-10), so it opens for every role.
-    if ($script:Activated -or $script:Unattended -or $workstationOnly -or $WhatIfPreference) { return }
+    # Only where a proxy now runs to show it: "files only" (no targets) and a viewing device start none.
+    $proxyHere = @($targets | Where-Object { $_ -in @('VSCode', 'Desktop') }).Count -gt 0
+    if ($script:Activated -or $script:Unattended -or -not $proxyHere -or $WhatIfPreference) { return }
     Write-Status "I'm about to open the setup wizard in your browser: $setupUrl" -Level Step
     if ($env:SSH_CONNECTION) {
         Write-Status 'This is an SSH session, so there is no browser here: open the address on this machine, or through VS Code''s forwarded port.' -Level Detail

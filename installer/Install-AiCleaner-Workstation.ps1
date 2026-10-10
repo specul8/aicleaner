@@ -306,7 +306,7 @@ function Get-ScreenshotKeys {
         $marker = if ($number -eq '1') { '*' } else { ' ' }
         Write-Host ("  {0}{1}. {2}" -f $marker, $number, $options[$number].Label)
     }
-    $answer = ([string](Read-Host 'Number [1]')).Trim()
+    $answer = ([string](Read-Host 'Type your selection and press Enter (just press Enter to choose 1)')).Trim()
     if (-not $answer) { $answer = '1' }
     if (-not $options.Contains($answer)) { throw "Not one of the choices: $answer" }
     $codes = [string]$options[$answer].Codes
