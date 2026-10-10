@@ -99,12 +99,11 @@ ollback\, so a code drop that will not start can be undone
     Extra arguments for Install-AiCleaner-Workstation.ps1, e.g. @('-SkipPowerToys').
 
 .PARAMETER RemoteHostname
-    Set up remote control for this hostname as part of the install (Enable-RemoteControl.ps1). Asked
-    for on a machine where an agent runs; never offered on a client PC, which has nothing to drive.
+    Ignored since v0.9.203 (feature 109): remote access is set up in the app - the setup wizard that
+    opens at the end of the install, or Settings. Accepted so an old command line still runs.
 
 .PARAMETER Identity
-    How the remote page is signed in to: OneTimePin (an emailed PIN), Google or Microsoft. Asked
-    when remote control is set up and this is not given; the PIN is the default, and the weakest.
+    Ignored since v0.9.203, like -RemoteHostname: the sign-in for remote access is chosen in the app.
 
 .PARAMETER RemoveData
     Uninstall only: also delete the data (after typed confirmation) and the stored secrets.
@@ -194,6 +193,13 @@ $script:RecordPath = Join-Path $StateRoot 'deployment.json'
 # How the remote page is signed in to (D44). Script scope, read as $script:Identity, so the one
 # function that needs it reaches for it visibly rather than through a bare name (D17).
 $script:Identity = $Identity
+# Remote access is set up in the app's wizard now (feature 109): -RemoteHostname and -Identity are
+# accepted, so an old command line still runs, and said to be ignored.
+$script:RemoteHostnameGiven = $RemoteHostname
+# Where this install comes from, for the feature-request link at the first question (feature 109).
+$script:RepoUrlGiven = $RepoUrl
+# Whether the closing question switched the AI tools over; the setup wizard opens when it did not.
+$script:Activated = $false
 # Where a replaced build is kept (#61). Script scope for the same reason RecordPath is: the
 # functions that need it are several calls deep, and threading a folder through every one of
 # them to reach two call sites is worse than naming it once.
@@ -286,6 +292,18 @@ function Write-StepBanner {
     Write-Host "##$text##" -ForegroundColor Cyan
     Write-Host $rule -ForegroundColor Cyan
     Write-Host ''
+}
+
+function Write-Frame {
+    <# A framed heading inside a step, for a question that stands on its own (feature 109). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Title)
+    $text = "  $Title  "
+    $rule = '#' * ($text.Length + 4)
+    Write-Host ''
+    Write-Host $rule -ForegroundColor Cyan
+    Write-Host "##$text##" -ForegroundColor Cyan
+    Write-Host $rule -ForegroundColor Cyan
 }
 
 function Write-SummaryBox {
@@ -1528,28 +1546,44 @@ function Read-Choice {
         A numbered question. Returns the chosen key, or with -Multiple every chosen key.
     .DESCRIPTION
         -Multiple takes several numbers in one answer ("1 3", or "1,3"), because a machine is
-        often more than one of the things on the list.
+        often more than one of the things on the list. The prompt says what Enter chooses
+        (feature 109): "just press Enter to choose 3".
     .PARAMETER Options
         Ordered pairs of key and description, e.g. [ordered]@{ vm = 'The machine where...' }.
+    .PARAMETER Default
+        The key Enter takes; with -Multiple, several keys separated by spaces - what the machine
+        was found to have.
+    .PARAMETER Found
+        Keys mapped to a note shown in green after the option: what was found on this machine.
     #>
     [CmdletBinding()]
     [OutputType([string[]])]
     param([Parameter(Mandatory)][string]$Message, [Parameter(Mandatory)][System.Collections.IDictionary]$Options,
-          [Parameter(Mandatory)][string]$Default, [switch]$Multiple)
+          [Parameter(Mandatory)][string]$Default, [switch]$Multiple,
+          [System.Collections.IDictionary]$Found = @{})
     $keys = @($Options.Keys)
+    $defaults = @($Default -split '\s+' | Where-Object { $_ })
     if ($AssumeDefaults) {
-        Write-Status "$Message -> $Default (default)" -Level Detail
-        return $Default
+        Write-Status "$Message -> $($defaults -join ' ') (default)" -Level Detail
+        if ($Multiple) { return $defaults }
+        return $defaults[0]
     }
     Write-Host ''
     Write-Host $Message -ForegroundColor Cyan
     for ($i = 0; $i -lt $keys.Count; $i++) {
-        $marker = if ($keys[$i] -eq $Default) { '*' } else { ' ' }
-        Write-Host ("  {0}{1}. {2}" -f $marker, ($i + 1), $Options[$keys[$i]])
+        $marker = if ($defaults -contains $keys[$i]) { '*' } else { ' ' }
+        Write-Host ("  {0}{1}. {2}" -f $marker, ($i + 1), $Options[$keys[$i]]) -NoNewline
+        if ($Found.Contains($keys[$i])) { Write-Host (' - ' + $Found[$keys[$i]]) -ForegroundColor Green } else { Write-Host '' }
     }
     if ($Multiple) { Write-Host '   Several apply? Give every number, e.g. 1 3' -ForegroundColor DarkGray }
-    $answer = Read-Host ("Number [{0}]" -f (1 + [Array]::IndexOf($keys, $Default)))
-    if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
+    $numbers = @($defaults | ForEach-Object { [string](1 + [Array]::IndexOf($keys, $_)) })
+    $which = if ($numbers.Count -gt 1) { ($numbers[0..($numbers.Count - 2)] -join ', ') + ' and ' + $numbers[-1] } else { $numbers[0] }
+    $noun = if ($Multiple) { 'selection(s)' } else { 'selection' }
+    $answer = Read-Host "Type your $noun and press Enter (just press Enter to choose $which)"
+    if ([string]::IsNullOrWhiteSpace($answer)) {
+        if ($Multiple) { return $defaults }
+        return $defaults[0]
+    }
     $chosen = New-Object System.Collections.Generic.List[string]
     foreach ($part in ($answer -split '[\s,;]+' | Where-Object { $_ })) {
         $number = 0
@@ -1566,6 +1600,56 @@ function Read-Choice {
     if (-not $Multiple -and $chosen.Count -gt 1) { throw "Only one choice here: $answer" }
     if ($Multiple) { return $chosen.ToArray() }
     return $chosen[0]
+}
+
+function Read-Either {
+    <#
+    .SYNOPSIS
+        An either-or question: two options, the letter to type in each shown in colour (feature 109).
+    .DESCRIPTION
+        Each option is written with its letter in brackets - '(Y)es, ...' / '(N)o, ...' - and that
+        letter is what is typed; the key works too. The default is the capital in the suffix
+        ([Y/n]) and is what Enter takes. Anything else is asked again.
+    .PARAMETER Options
+        Exactly two ordered pairs of key and text, each text holding its letter in brackets.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Message, [Parameter(Mandatory)][System.Collections.IDictionary]$Options,
+          [Parameter(Mandatory)][string]$Default)
+    $keys = @($Options.Keys)
+    if ($keys.Count -ne 2) { throw 'Read-Either takes exactly two options' }
+    $letters = @(foreach ($key in $keys) {
+        $found = [regex]::Match([string]$Options[$key], '\(([A-Za-z])\)')
+        if (-not $found.Success) { throw "No (letter) to type in: $($Options[$key])" }
+        $found.Groups[1].Value.ToUpperInvariant()
+    })
+    if ($script:Unattended) {
+        Write-Status "$Message -> $Default (default)" -Level Detail
+        return $Default
+    }
+    Write-Host ''
+    Write-Host $Message -ForegroundColor Cyan
+    foreach ($key in $keys) {
+        $option = [string]$Options[$key]
+        $found = [regex]::Match($option, '\(([A-Za-z])\)')
+        Write-Host ('    ' + $option.Substring(0, $found.Index) + '(') -NoNewline
+        Write-Host $found.Groups[1].Value -ForegroundColor Cyan -NoNewline
+        Write-Host (')' + $option.Substring($found.Index + $found.Length))
+    }
+    $suffix = '[' + (@(for ($i = 0; $i -lt 2; $i++) {
+        if ($keys[$i] -eq $Default) { $letters[$i] } else { $letters[$i].ToLowerInvariant() }
+    }) -join '/') + ']'
+    for ($try = 0; $try -lt 5; $try++) {
+        $answer = [string](Read-Host "Choose an option $suffix")
+        $answer = $answer.Trim()
+        if (-not $answer) { return $Default }
+        for ($i = 0; $i -lt 2; $i++) {
+            if ($answer -ieq $letters[$i] -or $answer -ieq $keys[$i]) { return $keys[$i] }
+        }
+        Write-Status "Type $($letters[0]) or $($letters[1]), or just press Enter for $Default." -Level Warn
+    }
+    throw 'Stopped: no answer that was one of the two'
 }
 
 function Test-ClaudeCode {
@@ -1585,10 +1669,10 @@ function Test-ClaudeCode {
 }
 
 function Test-ClaudeDesktop {
-    <# Claude Desktop on this machine, and where to get it when it is not. #>
+    <# Claude Desktop on this machine, and where to get it when it is not. -Quiet only looks. #>
     [CmdletBinding()]
     [OutputType([bool])]
-    param()
+    param([switch]$Quiet)
     $places = @(
         (Join-Path $env:LOCALAPPDATA 'AnthropicClaude\claude.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Claude\Claude.exe'),
@@ -1596,7 +1680,7 @@ function Test-ClaudeDesktop {
     )
     foreach ($place in $places) {
         if (Test-Path -LiteralPath $place) {
-            Write-Status "Claude Desktop found at $place" -Level Detail
+            if (-not $Quiet) { Write-Status "Claude Desktop found at $place" -Level Detail }
             return $true
         }
     }
@@ -1608,9 +1692,10 @@ function Test-ClaudeDesktop {
     $aliases = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\Claude_*') `
         -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($aliases) {
-        Write-Status "Claude Desktop found as a packaged (Store) install: $($aliases.FullName)" -Level Detail
+        if (-not $Quiet) { Write-Status "Claude Desktop found as a packaged (Store) install: $($aliases.FullName)" -Level Detail }
         return $true
     }
+    if ($Quiet) { return $false }
     Write-Status 'Claude Desktop is not installed on this machine.' -Level Warn
     Write-Status 'Install it first: winget install Anthropic.Claude (or claude.ai/download)' -Level Detail
     return $false
@@ -1631,49 +1716,39 @@ function Confirm-Agent {
 function Write-NextSteps {
     <#
     .SYNOPSIS
-        The work the install cannot do for you, printed at the end where it cannot be missed.
+        The final steps: what is left to do, built from what applies to this install (feature 109).
     .DESCRIPTION
-        A deployed proxy with no clients seeded and no repositories swept protects nothing: it
-        forwards everything untouched and looks like it is working. These are the steps that turn
-        it into something that filters, in the order worth doing them, each one a command to paste.
+        Only the steps that apply here, numbered as they are written, so a machine reached over SSH
+        is not told to restart a VS Code it does not run. Adding a client is done in the app, a page
+        rather than a command line. A proxy with no clients forwards everything untouched and looks
+        like it is working, so that is said - and that there is no clock on it.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$AppRoot,
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Targets,
         [string]$ClientsPath = '',
-        [string]$RemoteHostname = ''
+        [switch]$FromElsewhere
     )
-    $cli = Get-AppFile -AppRoot $AppRoot -Name 'aicleaner.cmd'
     $port = Get-ConfiguredPort -AppRoot $AppRoot
-    $step = 0
-    $seedStep = 0          # which number the seeding step ends up as, and 0 where there is none
+    $proxyHere = @($Targets | Where-Object { $_ -in @('VSCode', 'Desktop') }).Count -gt 0
+    $addClientStep = 0
     $steps = New-Object System.Collections.Generic.List[string]
 
     if ($Targets -contains 'Workstation') {
         $steps.Add("Take a screenshot with CTRL+ALT+T: the text lands on the clipboard, ready to paste.")
         $steps.Add("Run this script on the machine where the agent runs, if you have not already.")
     }
+    if ($proxyHere) {
+        $steps.Add("Open the Web app (http://127.0.0.1:$port), and navigate to the ""Client Filters"" menu option")
+        $steps.Add('Click "Add Client" and follow the prompts')
+        $addClientStep = $steps.Count
+    }
     if ($Targets -contains 'Desktop') {
         # The filter is a local proxy. It covers the app on this machine and nothing else.
         $steps.Add("Use Claude Desktop for client work ONLY on this machine. The same account on a" +
                    " phone, a tablet or another PC has no aicleaner in front of it, and anything" +
                    " typed there goes out with the real names in it - including claude.ai in a browser.")
-    }
-    if (@($Targets | Where-Object { $_ -in @('VSCode', 'Desktop') }).Count -gt 0) {
-        $steps.Add("Open a NEW terminal (and restart VS Code): a running one still has the environment it started with.")
-        $steps.Add("Seed the clients you work with, one per client:  $cli seed <client-id> --resources")
-        $seedStep = $steps.Count
-        $steps.Add("Sweep the repositories and transcripts you already have, and work through what it finds in Review:  $cli preflight <path to a repo>")
-        $steps.Add("Open the UI and confirm the mappings look right:  http://127.0.0.1:$port (Start-AiCleaner.ps1 runs the proxy if it is not up)")
-        # Last, and on purpose: routing is the only step here that can stop you working, and it is
-        # worth nothing until the steps above have told the filter who it is protecting.
-        $steps.Add("Switch Claude Code and VS Code over, once the filter knows your clients:  $AppRoot\Enable-AiCleaner.ps1  (it checks the filter is ready first; /status then shows the proxy as the Anthropic base URL)")
-        $steps.Add("Teach it which identifiers name nobody, from a tenancy you can sign in to (Microsoft-owned only):  az login --tenant <tenant>  then  $AppRoot\tools\Export-PublicIdentifiers.ps1 -IncludePermissions")
-        if (-not $RemoteHostname) {
-            $steps.Add("Optional - reach the UI from a phone through a Cloudflare tunnel:  $AppRoot\Enable-RemoteControl.ps1 -Hostname <public name>")
-        }
-        $steps.Add("Claude Code keeps itself up to date; its telemetry and error reporting are off (DISABLE_TELEMETRY and DISABLE_ERROR_REPORTING in ~\.claude\settings.json; the VS Code installer's -KeepTelemetry leaves them on)")
     }
     if ($Targets.Count -eq 0) {
         $steps.Add("Nothing is wired up yet: re-run this script with -Target VSCode, Desktop, Both or Workstation when you are ready.")
@@ -1685,40 +1760,52 @@ function Write-NextSteps {
 
     Write-Host ''
     Write-Status 'What to do next' -Level Step
-    foreach ($item in $steps) {
-        $step++
-        Write-Host ("    {0}. {1}" -f $step, $item)
+    for ($i = 0; $i -lt $steps.Count; $i++) {
+        Write-Host ("    {0}. {1}" -f ($i + 1), $steps[$i])
     }
     # Only where there is a proxy to seed: a client PC has no clients and no step to skip.
-    if ($seedStep -gt 0) {
+    if ($addClientStep -gt 0) {
         Write-Host ''
-        Write-Status "Until clients are seeded the proxy forwards everything untouched, so do not skip step $seedStep." -Level Warn
+        Write-Status ("Until clients are seeded the AI Cleaner proxy forwards everything untouched, so do not skip step $addClientStep." +
+                      ' You can take as long as you need to create your clients (start with the ones you want to use' +
+                      ' today; you can always add more later).') -Level Warn
+    }
+    if ($FromElsewhere -and $proxyHere) {
+        Write-Host ''
+        Write-Status 'Using VS Code from another computer' -Level Step
+        Write-Status 'You chose to reach Claude Code on this computer from another computer.' -Level Detail
+        Write-Status 'Screenshots sent to an AI service are processed remotely, and can reveal client information.' -Level Detail
+        Write-Status 'Sending images to an AI service is off by default in the AI Cleaner app (it can be turned on in Settings).' -Level Detail
+        Write-Status 'To lower that risk, the installer can set up the screenshot tools on your other computer so they' -Level Detail
+        Write-Status 'read the text in a screenshot automatically: text is filtered, a picture is not.' -Level Detail
+        Write-Status 'To do that, run this installer on your other computer and choose:' -Level Detail
+        Write-Status '  5. None here: this device uses a remote AI Agent on a different computer' -Level Detail
     }
 }
 
 function Invoke-Activation {
     <#
     .SYNOPSIS
-        The pause before routing: prepare the filter, confirm, verify, then switch over.
+        The closing question: switch the AI tools over now, or set a client up in the app first.
     .DESCRIPTION
         Everything before this point is safe to re-run and cannot stop anyone working, because
-        Claude Code and VS Code are still talking to the real API. Routing is the one step that can,
-        so it comes last, it is asked for, and it happens only after Enable-AiCleaner.ps1 has proved
-        the filter is ready and that a request survives the whole path.
+        the AI tools are still talking to the real API. Routing is the one step that can, so it
+        comes last, it is asked for, and it happens only after Enable-AiCleaner.ps1 has proved the
+        filter is ready - a client with at least one entry among its checks - and that a request
+        survives the whole path. It is never run with -Force.
 
-        The pause matters as much as the checks. A filter switched on before it knows a single
-        client forwards everything untouched while looking like it works, and queues everything it
-        sees for review - which is how one client's list reached 1,478 forms, seven in eight of
-        which identified nobody. There is no clock on the pause: the proxy is running and out of the
-        path, so the person setting it up can take as long as the job needs.
+        A filter switched on before it knows a single client forwards everything untouched while
+        looking like it works. "(N)o" opens the setup wizard (Invoke-Install does that), where the
+        client is added and the tools are switched over last (feature 109).
 
-        A failed check is not a failed deployment. Everything else is installed and working, so this
-        reports what to fix and returns rather than throwing.
+        A failed check is not a failed deployment: everything else is installed and working. Sets
+        $script:Activated; returns nothing, so its children's output is never captured.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param([Parameter(Mandatory)][string]$AppRoot,
           [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Targets)
 
+    $script:Activated = $false
     if (@($Targets | Where-Object { @('VSCode', 'Desktop') -contains $_ }).Count -eq 0) { return }
     $enable = Get-AppFile -AppRoot $AppRoot -Name 'Enable-AiCleaner.ps1'
     if (-not (Test-Path -LiteralPath $enable)) {
@@ -1728,32 +1815,17 @@ function Invoke-Activation {
     # Nobody is at the keyboard to do the preparation, so an unattended run provisions and stops.
     # Answering this one with the default would switch routing on over an empty filter.
     if ($AssumeDefaults) {
-        Write-Status 'Unattended run: provisioned but not switched over. Set a client up, then run Enable-AiCleaner.ps1.' -Level Warn
+        Write-Status "Unattended run: provisioned but not switched over. Set a client up, then run:  $enable" -Level Warn
         return
     }
-    $port = Get-ConfiguredPort -AppRoot $AppRoot
-    $cli = Get-AppFile -AppRoot $AppRoot -Name 'aicleaner.cmd'
+    $tools = @(if ($Targets -contains 'VSCode') { 'Claude Code and VS Code' }; if ($Targets -contains 'Desktop') { 'Claude Desktop' }) -join ' and '
 
-    Write-Host ''
-    Write-Status 'Ready to switch over' -Level Step
-    Write-Host '    Claude Code and VS Code are still talking to the real API, so nothing is filtered yet.'
-    Write-Host '    Set the filter up first - it can only replace what it has been told about:'
-    Write-Host ''
-    Write-Host "      1. Open the UI:  http://127.0.0.1:$port"
-    Write-Host '      2. Add a client, and give it the phrases that name them: the acronym, the full'
-    Write-Host '         name, and any house spelling (ACME, ACME Corporation, ACMECorp).'
-    Write-Host '      3. Add the identifiers you already know - tenant, domains, the people you deal with.'
-    Write-Host "      4. Scan a repository of theirs:  $cli preflight <path to a repo>"
-    Write-Host '      5. Work through Review: keep what names the client, ignore the rest.'
-    Write-Host ''
-    Write-Host '    Take as long as you need. The proxy is up and out of the path, so nothing here is' -ForegroundColor DarkGray
-    Write-Host '    on a clock, and you can stop now and come back to it with Enable-AiCleaner.ps1.' -ForegroundColor DarkGray
-    Write-Host ''
-
-    if (-not (Confirm-Action -Message 'Ready to switch Claude Code and VS Code over?' -Default 'Yes')) {
-        Write-Status "Left switched off. Run this when the filter is ready:  $enable" -Level Done
-        return
-    }
+    Write-Frame -Title 'Ready to activate AI Cleaner?'
+    $answer = Read-Either -Message "Your AI tools are still talking to the AI service directly, so nothing is filtered yet." -Default 'yes' -Options ([ordered]@{
+        'yes' = "(Y)es, I have set up at least 1 client and I'm ready to switch $tools over to use AI Cleaner!"
+        'no'  = "(N)o, I need to go and set up a Client - open the app for me, and once I'm finished I'll activate AI Cleaner in the app."
+    })
+    if ($answer -ne 'yes') { return }
 
     # Not through Invoke-AppScript: that throws on a non-zero exit, and a check that says "no client
     # has any forms yet" is an answer, not a deployment failure.
@@ -1762,10 +1834,11 @@ function Invoke-Activation {
     if ($WhatIfPreference) { $argList += '-WhatIf' }
     & $shell @argList
     if ($LASTEXITCODE -eq 0) {
+        $script:Activated = $true
         Write-Status 'Filtering is on. A session already running follows a value that changes, so it takes effect without restarting anything.' -Level Done
     } else {
         Write-Status "The readiness checks did not pass, so nothing was switched over (exit $LASTEXITCODE)." -Level Warn
-        Write-Status "Everything else is installed and running. Fix what it named above, then run:  $enable" -Level Detail
+        Write-Status "Everything else is installed and running. Fix what it named above in the app, or run:  $enable" -Level Detail
     }
 }
 
@@ -1818,6 +1891,82 @@ function Test-VSCodeServer {
         $path = Join-Path $env:USERPROFILE $folder
         if (Test-Path -LiteralPath $path) { return $path }
     }
+    return ''
+}
+
+function Test-VSCodeLocal {
+    <#
+    .SYNOPSIS
+        Where VS Code itself is installed on this machine, or '' when it is not (feature 109).
+    .DESCRIPTION
+        So the first question can default to what is here: VS Code on PATH, or in the per-user or
+        machine-wide place its installer uses.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $places = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\Microsoft VS Code\Code.exe'),
+        (Join-Path $env:ProgramFiles 'Microsoft VS Code\Code.exe')
+    )
+    foreach ($place in $places) {
+        if (Test-Path -LiteralPath $place) { return $place }
+    }
+    $onPath = Get-Command 'code' -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return [string]$onPath.Source }
+    return ''
+}
+
+function Get-FeatureRequestUrl {
+    <#
+    .SYNOPSIS
+        Where to ask for a feature: the issues of the repository this install comes from (feature 109).
+    .DESCRIPTION
+        The repository given with -RepoUrl, else the one an earlier deployment recorded, else the
+        contact file's, else the public one - so a -dev install points at -dev and a public one at
+        the public repository. A local folder (a working copy) points at the public repository.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$RepoUrl = '', [string]$Title = '')
+    $candidates = @($RepoUrl)
+    $candidates += @(Get-DeploymentRecords | ForEach-Object { [string]$_.repo_url })
+    $contact = Get-ContactInfo
+    if ($contact -and $contact.PSObject.Properties['repo_url']) { $candidates += [string]$contact.repo_url }
+    $repo = 'https://github.com/specul8/aicleaner'
+    foreach ($candidate in $candidates) {
+        if ($candidate -match '^https://github\.com/[^/\s]+/[^/\s]+') { $repo = $candidate; break }
+    }
+    $repo = ($repo -replace '\.git$', '').TrimEnd('/')
+    $query = if ($Title) { '?title=' + [uri]::EscapeDataString($Title) } else { '' }
+    return "$repo/issues/new$query"
+}
+
+function Get-AgentChoice {
+    <#
+    .SYNOPSIS
+        The first question: which AI agent this is for (feature 109). Returns 'claude', or '' to stop.
+    .DESCRIPTION
+        Only Claude is supported today. ChatGPT and Copilot are listed as coming soon; choosing one
+        says how to ask for it - a feature request in the repository the install came from - and
+        nothing is installed.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$RepoUrl = '')
+    $agent = Read-Choice -Message 'Which AI Agent would you like to install the AI Cleaner for?' -Default 'claude' -Options ([ordered]@{
+        'claude'  = 'Claude'
+        'chatgpt' = 'ChatGPT (Coming Soon)'
+        'copilot' = 'Copilot (Coming Soon)'
+    })
+    if ($agent -eq 'claude') { return 'claude' }
+    $name = if ($agent -eq 'chatgpt') { 'ChatGPT' } else { 'Copilot' }
+    $url = Get-FeatureRequestUrl -RepoUrl $RepoUrl -Title "Support for $name"
+    Write-Host ''
+    Write-Status "aicleaner does not support $name yet, so nothing has been installed." -Level Warn
+    Write-Status 'Ask for it - a feature request is how it gets on the list:' -Level Detail
+    Write-Status "  $url" -Level Detail
+    Write-Status '(a GitHub account is needed to open one; say how you use it, and what you need filtered)' -Level Detail
     return ''
 }
 
@@ -1926,21 +2075,32 @@ function Get-MachineRole {
         }
         return [pscustomobject]@{ Targets = $targets; VSCode = $VSCodeArguments; Desktop = $DesktopArguments
                                   Workstation = $WorkstationArguments; Advice = ''
-                                  RemoteHostname = $RemoteHostname; NothingToDo = $false }
+                                  FromElsewhere = $false; NothingToDo = $false }
+    }
+    # Which AI agent first (feature 109): only Claude today; the others say how to ask for them.
+    if (-not (Get-AgentChoice -RepoUrl $script:RepoUrlGiven)) {
+        return [pscustomobject]@{ Targets = @(); VSCode = @(); Desktop = @(); Workstation = @(); Advice = ''
+                                  FromElsewhere = $false; NothingToDo = $true }
     }
     # One question for the whole situation: which agent, and where it runs. The old pair (which
     # agent, then "do you use the VS Code window here") described one thing in two answers, and the
     # second was easy to get wrong. Run it again to add another role to this machine.
     # The two SSH answers differ by one fact the machine already knows, so let it say which it is.
     $vscodeServer = Test-VSCodeServer
-    $remoteNote = if ($vscodeServer) { " - VS Code Server IS here ($vscodeServer)" } else { '' }
     $headlessNote = if ($vscodeServer) { '' } else { ' - no VS Code Server on this machine' }
-    $roles = @(Read-Choice -Multiple -Message 'Which AI agent is this for, and where does it run?' -Default 'code-local' -Options ([ordered]@{
+    # The default is what the machine was found to have (feature 109), each shown in green.
+    $found = [ordered]@{}
+    $vscodeLocal = Test-VSCodeLocal
+    if ($vscodeLocal) { $found['code-local'] = "VS Code IS here ($vscodeLocal)" }
+    if (Test-ClaudeDesktop -Quiet) { $found['desktop'] = 'Claude Desktop IS here' }
+    if ($vscodeServer) { $found['code-remote'] = "VS Code Server IS here ($vscodeServer)" }
+    $default = if ($found.Count) { @($found.Keys) -join ' ' } else { 'code-local' }
+    $roles = @(Read-Choice -Multiple -Message 'How do you use Claude?' -Default $default -Found $found -Options ([ordered]@{
         'code-local'    = 'Claude Code in VS Code, on this machine (you work at this PC)'
         'desktop'       = 'Claude Desktop, on this machine'
-        'code-remote'   = "Claude Code here, reached by VS Code Remote-SSH from another PC$remoteNote"
+        'code-remote'   = 'Claude Code here, reached by VS Code Remote-SSH from another PC'
         'code-headless' = "Claude Code here, driven from a plain SSH terminal$headlessNote"
-        'workstation'   = 'None here: this device views or drives an agent running somewhere else'
+        'workstation'   = 'None here: this device uses a remote AI Agent on a different computer'
         'none'          = 'None yet: just put the files in place'
     }))
     $roles = @(Resolve-Roles -Chosen $roles)
@@ -1986,36 +2146,16 @@ function Get-MachineRole {
     if ($screenHere) {
         if (-not (Confirm-Action -Message 'Do you take screenshots on this machine?' -Default 'Yes')) {
             $vscodeArgs += @('-SkipPowerToys', '-SkipSnippingTool')
-            $advice = 'Screenshots are taken elsewhere: run this script on that PC and answer "None here".'
+            $advice = 'Screenshots are taken elsewhere: run this script on that PC and choose "None here".'
         }
     } elseif ($codeRoles.Count -gt 0) {
         # Nobody looks at a screen on a machine reached only over SSH.
         $vscodeArgs += @('-SkipPowerToys', '-SkipSnippingTool')
-        $advice = 'Screenshots are taken on the PC you drive this from: run this there and answer "None here".'
+        $advice = ''
     }
     if ($roles -contains 'desktop') {
         if (Confirm-Action -Message 'Register the nightly backup of the Claude Desktop profile?' -Default 'Yes') {
             $desktopArgs += '-RegisterBackupTask'
-        }
-    }
-    $remoteHostname = $RemoteHostname
-    # Offered only where there is a session to drive. What the tunnel reaches is aicleaner's own
-    # pages and the session page, which runs the Claude Code CLI; it does not reach Claude Desktop,
-    # because that is a local window rather than something served. On a machine with only the
-    # desktop app there is nothing on the other end worth opening a tunnel for, so it is not asked.
-    # -RemoteHostname still works for anyone who wants the pages reachable anyway.
-    if (@($roles | Where-Object { $_ -like 'code-*' }).Count -gt 0 -and -not $remoteHostname) {
-        Write-Status 'Remote control, through a Cloudflare tunnel:' -Level Detail
-        Write-Status '  reach aicleaner''s pages on THIS device (mappings, review, evidence) from a phone' -Level Detail
-        Write-Status '  or another PC, and drive a Claude Code session running here.' -Level Detail
-        Write-Status 'You need a domain you own, with its DNS run by Cloudflare: the address is a new' -Level Detail
-        Write-Status 'name under it (claude-thismachine.yourdomain.com), and only the domain owner can' -Level Detail
-        Write-Status 'create that. Without one, skip this and set it up later.' -Level Detail
-        Write-Status 'Cloudflare terminates TLS at its edge, so it could see what crosses it in clear.' -Level Detail
-        # The name is not asked for here. Enable-RemoteControl.ps1 asks it once it has a token and
-        # can list the domains Cloudflare runs for you, so the question comes with an answer in it.
-        if (Confirm-Action -Message 'Set that up now (it will ask for the details)?' -Default 'No') {
-            $remoteHostname = 'ask'
         }
     }
     $targets = New-Object System.Collections.Generic.List[string]
@@ -2024,9 +2164,12 @@ function Get-MachineRole {
     if ($roles -contains 'workstation') { $targets.Add('Workstation') }
     $targets = @($targets)
     if ($nothingToDo) { $targets = @() }
+    # Reached from another PC and nobody looks at this screen: the final steps say what that means
+    # for screenshots (feature 109).
+    $fromElsewhere = $codeRoles.Count -gt 0 -and -not $screenHere
     return [pscustomobject]@{ Targets = $targets; VSCode = $vscodeArgs; Desktop = $desktopArgs
                               Workstation = $WorkstationArguments; Advice = $advice
-                              RemoteHostname = $remoteHostname; NothingToDo = $nothingToDo }
+                              FromElsewhere = $fromElsewhere; NothingToDo = $nothingToDo }
 }
 
 function Resolve-Folders {
@@ -2273,71 +2416,6 @@ function Assert-TargetsFree {
     }
 }
 
-function Resolve-ExistingRemote {
-    <#
-    .SYNOPSIS
-        A remote connection left by an earlier install: keep it, or take it down and set up afresh.
-    .DESCRIPTION
-        The configuration survives an uninstall, so a reinstall used to adopt whatever remote
-        connection it named without saying so. Now it is shown and asked about: keep (the default -
-        nothing is changed, and no new setup runs) or replace (the uninstaller's -RemoteOnly takes it
-        down - the tunnel here, and at Cloudflare its tunnel, DNS record and Access application - then
-        remote access is set up afresh). Sets the role's RemoteHostname accordingly, in place.
-
-        It returns nothing, so it is never captured: a captured call would turn the uninstaller's
-        console into a pipe (see test_a_function_that_starts_processes_is_never_captured).
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)]$Role)
-    $config = Read-JsonFile -Path (Join-Path $AppRoot 'aicleaner-config.json')
-    $remote = if ($config -and $config.PSObject.Properties['remote']) { $config.remote } else { $null }
-    $hostname = if ($remote -and $remote.PSObject.Properties['hostname']) { [string]$remote.hostname } else { '' }
-    if (-not $hostname) { return }
-    $choice = Read-Choice -Message "Remote access is already set up from an earlier install: https://$hostname" -Default 'keep' -Options ([ordered]@{
-        'keep'    = 'Keep it as it is'
-        'replace' = 'Take it down and set it up again (a new tunnel, DNS record and sign-in rule)'
-    })
-    if ($choice -eq 'keep') {
-        Write-Status "Remote access kept: https://$hostname" -Level Detail
-        $Role | Add-Member -NotePropertyName 'RemoteHostname' -NotePropertyValue '' -Force
-        return
-    }
-    Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Uninstall-AiCleaner.ps1') -Arguments @('-RemoteOnly')
-    $Role | Add-Member -NotePropertyName 'RemoteHostname' -NotePropertyValue 'ask' -Force
-}
-
-function Invoke-RemoteSetup {
-    <#
-    .SYNOPSIS
-        Runs Enable-RemoteControl.ps1 when this run was asked to, from a first install or a later one.
-    .DESCRIPTION
-        "Set that up now?" is asked before the script knows whether this folder is already deployed,
-        so a yes has to be honoured on every path, not only the first install's.
-    #>
-    [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)]$Role,
-          [string]$Url = '', [string]$Ref = '')
-    if (-not $Role.RemoteHostname) { return }
-    if (Restore-RepoFile -AppRoot $AppRoot -Relative 'Enable-RemoteControl.ps1' -Url $Url -Ref $Ref) {
-        # 'ask' means nobody has named it yet: the tunnel script asks, with the zones in front of it.
-        $remoteArgs = if ($Role.RemoteHostname -eq 'ask') { @() } else { @('-Hostname', $Role.RemoteHostname) }
-        # Asked here, beside the hostname, rather than left to the tunnel script's default (D44):
-        # that default is the one-time PIN, the weakest of the three and the only one that
-        # authenticates an address rather than an account. The PIN is still what answering
-        # nothing gives, so an unattended run behaves as it always did - but now it is said.
-        $identity = [string]$script:Identity
-        if (-not $identity) {
-            $identity = Read-Choice -Message 'How should the remote page be signed in to?' -Default 'OneTimePin' -Options ([ordered]@{
-                OneTimePin = 'Email me a one-time PIN (anyone who reads that mailbox is in)'
-                Google     = 'A Google account (Google sign-in and its MFA in front)'
-                Microsoft  = 'A Microsoft account or work ID (Microsoft sign-in and its MFA in front)' })
-        }
-        Write-Status "Remote sign-in: $identity" -Level Detail
-        $remoteArgs += @('-Identity', $identity)
-        Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Enable-RemoteControl.ps1') -Arguments $remoteArgs
-    }
-}
-
 function Add-Target {
     <#
     .SYNOPSIS
@@ -2382,12 +2460,10 @@ function Add-Target {
         # The answers from this run decide it: "do you use the VS Code window on this machine"
         # gives different wiring for a VS Code server and the PC in front of you.
         $checkRole = [pscustomobject]@{ Targets = $already; VSCode = $Role.VSCode; Desktop = $Role.Desktop
-                                        Workstation = $Role.Workstation; Advice = ''
-                                        RemoteHostname = $Role.RemoteHostname }
+                                        Workstation = $Role.Workstation; Advice = '' }
         Invoke-Wiring -AppRoot $appRoot -Targets $already -Role $checkRole -Url ([string]$Record.repo_url) -Ref ([string]$Record.ref)
         Write-Status ("Checked: {0} wiring is in place" -f ($already -join ' + ')) -Level Done
         Write-Status 'Anything that had drifted was put back; what was already right was left alone.' -Level Detail
-        Invoke-RemoteSetup -AppRoot $appRoot -Role $Role -Url ([string]$Record.repo_url) -Ref ([string]$Record.ref)
         return
     }
     Write-Status ("Already deployed here for {0}; adding {1}" -f (($already -join ', ')), (($new -join ', ')))
@@ -2421,7 +2497,7 @@ function Add-Target {
         Set-DataLocation -AppRoot $appRoot -ClientsPath $clients
     }
     $addRole = [pscustomobject]@{ Targets = $new; VSCode = $Role.VSCode; Desktop = $Role.Desktop
-                                  Workstation = $Role.Workstation; Advice = ''; RemoteHostname = $Role.RemoteHostname }
+                                  Workstation = $Role.Workstation; Advice = '' }
     Invoke-Wiring -AppRoot $appRoot -Targets $new -Role $addRole -Url ([string]$Record.repo_url) -Ref ([string]$Record.ref)
     $merged = @($already + $new | Select-Object -Unique)
     Save-Deployment -Record ([pscustomobject][ordered]@{
@@ -2432,15 +2508,19 @@ function Add-Target {
         updated_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     })
     Write-Status ("This machine is now wired for {0}" -f ($merged -join ', ')) -Level Done
-    Invoke-RemoteSetup -AppRoot $appRoot -Role $Role -Url ([string]$Record.repo_url) -Ref ([string]$Record.ref)
-    Write-NextSteps -AppRoot $appRoot -Targets $merged -ClientsPath $clients -RemoteHostname ([string]$Role.RemoteHostname)
+    Write-NextSteps -AppRoot $appRoot -Targets $merged -ClientsPath $clients -FromElsewhere:([bool]$Role.FromElsewhere)
 }
 
 function Invoke-Install {
     [CmdletBinding(SupportsShouldProcess)]
     param()
-    # Six framed steps a person can follow (feature 104); the questions inside them are unchanged.
-    Write-StepBanner -Number 1 -Of 6 -Title 'What this device is for' -Unattended:$script:Unattended
+    # Framed steps a person can follow (feature 104), counted once here, never written as a literal.
+    # Remote access is no longer one of them: it is set up in the app's wizard (feature 109).
+    $steps = 5
+    Write-StepBanner -Number 1 -Of $steps -Title 'What this device is for' -Unattended:$script:Unattended
+    if ($script:RemoteHostnameGiven -or $script:Identity) {
+        Write-Status 'Remote access is set up in the app now (the setup wizard, or Settings); -RemoteHostname and -Identity are ignored.' -Level Warn
+    }
     $role = Get-MachineRole
     $targets = @($role.Targets)
     if ($role.PSObject.Properties['NothingToDo'] -and $role.NothingToDo) {
@@ -2449,7 +2529,7 @@ function Invoke-Install {
     }
     # The client PC holds no client files: it runs no proxy and reads no mapping.
     $workstationOnly = $targets.Count -eq 1 -and $targets[0] -eq 'Workstation'
-    Write-StepBanner -Number 2 -Of 6 -Title 'Where to put it' -Unattended:$script:Unattended
+    Write-StepBanner -Number 2 -Of $steps -Title 'Where to put it' -Unattended:$script:Unattended
     $folders = Resolve-Folders -SkipClients:$workstationOnly
     $existing = @(Get-DeploymentRecords | Where-Object { Test-SameFolder -Left ([string]$_.install_path) -Right $folders.App })
     if ($existing.Count -gt 0) {
@@ -2468,7 +2548,7 @@ function Invoke-Install {
     }
     $url = ''
     $release = $null
-    Write-StepBanner -Number 3 -Of 6 -Title 'Getting aicleaner' -Unattended:$script:Unattended
+    Write-StepBanner -Number 3 -Of $steps -Title 'Getting aicleaner' -Unattended:$script:Unattended
     if ($FromWorkingCopy) {
         $url = $script:ScriptFolder
         $release = [pscustomobject]@{ Ref = 'working-copy'; Commit = '' }
@@ -2513,28 +2593,33 @@ function Invoke-Install {
         # The release key this install trusts from now on (H16); '' for an unsigned or working-copy install.
         signing_key = if ($fetched.PSObject.Properties['SigningKey']) { [string]$fetched.SigningKey } else { '' }
     })
-    Write-StepBanner -Number 4 -Of 6 -Title 'Connecting your AI tools' -Unattended:$script:Unattended
+    Write-StepBanner -Number 4 -Of $steps -Title 'Connecting your AI tools' -Unattended:$script:Unattended
     Invoke-Wiring -AppRoot $folders.App -Targets $targets -Role $role -Url $url -Ref $release.Ref
-    Write-StepBanner -Number 5 -Of 6 -Title 'Remote access (optional)' -Unattended:$script:Unattended
-    Resolve-ExistingRemote -AppRoot $folders.App -Role $role
-    Invoke-RemoteSetup -AppRoot $folders.App -Role $role -Url $url -Ref $release.Ref
-    Write-StepBanner -Number 6 -Of 6 -Title 'Ready' -Unattended:$script:Unattended
+    Write-StepBanner -Number 5 -Of $steps -Title 'Final Steps' -Unattended:$script:Unattended
     Write-Status "aicleaner $($release.Ref) deployed to $($folders.App)" -Level Done
     if ($role.Advice) { Write-Status $role.Advice -Level Detail }
-    Write-NextSteps -AppRoot $folders.App -Targets $targets -ClientsPath $folders.Clients `
-        -RemoteHostname $role.RemoteHostname
+    Write-NextSteps -AppRoot $folders.App -Targets $targets -ClientsPath $folders.Clients -FromElsewhere:([bool]$role.FromElsewhere)
+    # A statement, never captured: it runs Enable-AiCleaner.ps1, whose output belongs on the console.
     Invoke-Activation -AppRoot $folders.App -Targets $targets
+    $port = Get-ConfiguredPort -AppRoot $folders.App
+    $setupUrl = "http://127.0.0.1:$port/#/setup"
     Write-SummaryBox -Title "aicleaner $($release.Ref) is installed" -Lines @(
         "Program:      $($folders.App)",
         $(if ($workstationOnly) { 'Client files: none on this device' } else { "Client files: $($folders.Clients)" }),
         "AI tools:     $(if ($targets) { $targets -join ', ' } else { 'none yet' })",
         '',
-        'Next: the setup page, http://127.0.0.1:8787/#/setup')
-    # The rest of the setup happens in the browser (feature 106) - only when a person is here and a
-    # proxy runs on this machine to show it.
-    if (-not $script:Unattended -and -not $env:SSH_CONNECTION -and -not $workstationOnly -and -not $WhatIfPreference) {
-        $port = Get-ConfiguredPort -AppRoot $folders.App
-        if (Wait-ProxyHealth -Port $port -Seconds 20) { Start-Process "http://127.0.0.1:$port/#/setup" }
+        "Next: the setup wizard, $setupUrl")
+    # The rest of the setup happens in the browser (features 106, 109): whenever the tools were not
+    # switched over here, and a proxy runs on this machine to show it. Whoever installs is at this
+    # machine or signed in to it (the user, 2026-10-10), so it opens for every role.
+    if ($script:Activated -or $script:Unattended -or $workstationOnly -or $WhatIfPreference) { return }
+    Write-Status "I'm about to open the setup wizard in your browser: $setupUrl" -Level Step
+    if ($env:SSH_CONNECTION) {
+        Write-Status 'This is an SSH session, so there is no browser here: open the address on this machine, or through VS Code''s forwarded port.' -Level Detail
+    } elseif (Wait-ProxyHealth -Port $port -Seconds 20) {
+        Start-Process $setupUrl
+    } else {
+        Write-Status 'The proxy has not answered yet; open the address above once it does.' -Level Warn
     }
 }
 

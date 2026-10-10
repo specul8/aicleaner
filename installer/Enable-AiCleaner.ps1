@@ -106,7 +106,7 @@ function Test-ProxyUp {
         return [pscustomobject]@{ Ok = $true; Why = "clients=$($health.clients -join ',') forms=$($health.forms)"; Health = $health }
     } catch {
         return [pscustomobject]@{ Ok = $false; Health = $null
-            Why = "nothing answered http://127.0.0.1:$ProxyPort/healthz. Start it with .\Start-AiCleaner.ps1 -Detach" }
+            Why = "nothing answered http://127.0.0.1:$ProxyPort/healthz. Start it with $(Join-Path $PSScriptRoot 'Start-AiCleaner.ps1') -Detach" }
     }
 }
 
@@ -329,7 +329,8 @@ try {
     } else {
         Write-Status "Routing was already on ($baseUrl); nothing to change." -Level Done
     }
-    Write-Status 'Switch it off again at any time with .\Disable-AiCleaner.ps1 - it takes a few seconds and leaves everything installed.' -Level Detail
+    # Fully pathed (feature 109), so it can be pasted into any window, from any folder.
+    Write-Status "Switch it off again at any time with $(Join-Path $PSScriptRoot 'Disable-AiCleaner.ps1') - it takes a few seconds and leaves everything installed." -Level Detail
 }
 catch {
     Write-Status "Could not switch routing on: $($_.Exception.Message)" -Level Error

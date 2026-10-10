@@ -23,10 +23,11 @@ offers to fetch through winget, asking first. Windows 11 already has winget.
 
 The quickest way: download **`aicleaner-setup.zip`** from the
 [latest release](https://github.com/specul8/aicleaner/releases/latest), extract it anywhere, and
-double-click **`Install aicleaner.cmd`**. It runs the installer below for you, step by step, and at
-the end opens the **setup page** in your browser (`http://127.0.0.1:8787/#/setup`), which walks you
-through routing your AI tools, adding your first client and - if you want it - remote access,
-including what moving your domain's DNS to Cloudflare would involve. The setup page is in
+double-click **`Install aicleaner.cmd`**. It runs the installer below for you, step by step, and -
+unless you switch your AI tools over at its last question - opens the **setup wizard** in your
+browser (`http://127.0.0.1:8787/#/setup`), which walks you through adding your first client, remote
+access if you want it (including what moving your domain's DNS to Cloudflare would involve), and
+routing your AI tools last. The setup page is in
 Settings too ([Set up](Settings.md#card-setup)), on this machine only.
 
 By hand: copy `Deploy-AiCleaner.ps1` and a `contact-<audience>.json` (its `repo_url` names the
@@ -36,26 +37,36 @@ repository) into one folder and run, with no parameters:
 .\Deploy-AiCleaner.ps1
 ```
 
-The first question is which agent this machine is for. A machine is often more than one, so give
-every number that applies (for example `1 3`):
+The first question is **which AI agent** this is for. Only Claude is supported today; ChatGPT and
+Copilot are listed as coming soon, and choosing one shows where to ask for it (a feature request in
+the repository you installed from) and installs nothing.
+
+The second is **how you use Claude**. A machine is often more than one, so give every number that
+applies (for example `1 3`). The default - marked `*`, and what Enter chooses - is what was found on
+this machine, shown in green (for example "VS Code Server IS here"):
 
 | Answer | Meaning |
 |---|---|
 | 1 | Claude Code in VS Code, and you work at this PC |
-| 2 | Claude Desktop on this PC (needs an elevated PowerShell) |
+| 2 | Claude Desktop on this PC (needs an elevated PowerShell for one step) |
 | 3 | Claude Code here, reached from another PC over SSH (VS Code Remote) |
-| 4 | Claude Code here, driven headless over SSH |
-| 5 | Nothing runs here; this PC only shows the VS Code window over SSH (screenshot tooling only) |
-| 6 | Nothing runs here; you drive a session on another machine from a browser |
-| 7 | Just put the files in place |
+| 4 | Claude Code here, driven from a plain SSH terminal |
+| 5 | None here: this device uses a remote AI agent on a different computer (screenshot tooling only) |
+| 6 | None yet: just put the files in place |
+
+Every question says what Enter chooses. Yes/no questions show `[Y/n]`; a choice between two shows
+the letter to type in colour, for example `(Y)es / (N)o`. Folders are typed in full, the suggestion
+in brackets.
 
 ### What a run does, in order
 
-An interactive run **ends with filtering on**, once you have set a client up and said yes at the
-switch-over pause (step 11). Everything before that pause is safe to re-run and cannot stop you
-working, because Claude Code is still talking to the AI service directly until then.
+An interactive run has five framed steps and ends either with **filtering on** - you set a client
+up and said yes at the last question - or with the **setup wizard** open in your browser, where you
+add a client, set up remote access if you want it, and switch your AI tools over last. Everything
+before that is safe to re-run and cannot stop you working, because Claude Code is still talking to
+the AI service directly until then.
 
-1. **Which roles this machine has** - the question above.
+1. **Which agent, and which roles this machine has** - the two questions above.
 2. **Where things go.** The code always goes to `%USERPROFILE%\.aicleaner\app` (`-InstallPath` to
    override); you are asked where the client files go - `<OneDrive>\aicleaner\clients` is suggested,
    so clients can be shared with a team (see [Sharing a client with a team](Sharing.md)).
@@ -86,26 +97,26 @@ working, because Claude Code is still talking to the AI service directly until t
      missing;
    - checks `/healthz`.
 
-   It does **not** point Claude Code at the proxy - that is step 11. Claude Desktop (answer 2) and
+   It does **not** point Claude Code at the proxy - that is step 9. Claude Desktop (answer 2) and
    the screenshot-only role (answer 5) have installers of their own; see Claude Desktop below.
-8. **Remote access**, if you asked for it: `Enable-RemoteControl.ps1` sets up the tunnel (see
-   [Remote access](Remote-access.md)).
-9. Says the release is deployed.
-10. **Prints the next steps** as commands to paste, so they are on screen whatever happens next.
-11. **The switch-over pause - "Ready to switch over".** The proxy is running but not in the path. It
-    prints the set-up steps (open the UI, add a client with the phrases that name it, add the
-    identifiers you know, scan a repository, work through Review - section 2 below) and waits for as
-    long as you need. Do them in the browser, then answer **"Ready to switch Claude Code and VS Code
-    over?"**:
-    - **Yes** (the default): it runs `Enable-AiCleaner.ps1`, which makes five checks and, when all
-      pass, points Claude Code and VS Code at the proxy (section 3). The run ends with **"Filtering
-      is on"** - a session already running follows the change without a restart.
-    - **No**: everything is installed and running, filtering is left off; run
-      `Enable-AiCleaner.ps1` when the filter is ready.
-    - **A check fails**: nothing is switched over; it names what to fix, and the rest of the install
-      stands.
+8. **Final Steps**: says the release is deployed and prints what is left to do - only what applies
+   here: open the app's Client Filters page and click **Add Client**. Reached from another PC
+   (answers 3, 4), it also says what that means for screenshots and how to fix it on that PC.
+9. **"Ready to activate AI Cleaner?"** The proxy is running but not in the path:
+   - **(Y)es** (the default) - you have set up at least one client: it runs `Enable-AiCleaner.ps1`,
+     which makes five checks (one refuses until a client has at least one entry) and, when all pass,
+     points your AI tools at the proxy (section 3). The run ends with **"Filtering is on"** - a
+     session already running follows the change without a restart.
+   - **(N)o** - you still need to set a client up: the **setup wizard** opens in your browser
+     (`http://127.0.0.1:8787/#/setup`). Add the client there and switch the tools over in its last
+     step.
+   - **A check fails**: nothing is switched over; it names what to fix, and the wizard opens.
 
-An **unattended** run (`-AssumeDefaults`) stops at step 11 with "provisioned but not switched
+**Remote access is set up in the app**, not by the installer: in the setup wizard or in Settings
+(see [Remote access](Remote-access.md)). `-RemoteHostname` and `-Identity` are accepted, for an old
+command line, and ignored.
+
+An **unattended** run (`-AssumeDefaults`) stops at step 9 with "provisioned but not switched
 over": nobody is there to set a client up, and answering the question with its default would route
 traffic through an empty filter. Every other answer has a parameter for scripted runs (`-Target`,
 `-ClientsPath`, `-Ref` and so on); `-WhatIf` shows the plan. Later:
@@ -126,8 +137,8 @@ logs and sessions are kept.
 
 `-RemoveRemote` offers to take remote access down: the tunnel on this machine, and - with the stored
 Cloudflare API token - its tunnel, DNS record and Access application in your account; the
-configuration forgets it. Without it, remote access is kept, and the next install asks whether to
-**keep** it or **replace** it with a fresh one. To take remote access down without uninstalling:
+configuration forgets it. Without it, remote access is kept (the app's Remote Access step offers to
+keep or replace it). To take remote access down without uninstalling:
 `.\installer\Uninstall-AiCleaner.ps1 -RemoteOnly`.
 
 ## 2. Set the filter up (during the pause)

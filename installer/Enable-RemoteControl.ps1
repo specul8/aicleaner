@@ -1381,7 +1381,7 @@ try {
     Write-Status 'while you do them, then carries on. Nothing is asked twice.' -Level Detail
     if (-not (Confirm-Action -Message 'Do you already have a Cloudflare account with Zero Trust turned on?' -Default 'Yes')) {
         Show-CloudflarePrerequisites -PublicHostname $Hostname
-        if (-not (Wait-ForCloudflare -Resume '.\Enable-RemoteControl.ps1')) { return }
+        if (-not (Wait-ForCloudflare -Resume $PSCommandPath)) { return }
     }
     $choice = $Setup
     if (-not $choice) {
