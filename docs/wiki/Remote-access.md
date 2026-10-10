@@ -26,6 +26,11 @@ aicleaner exists to avoid (and it does not work behind a gateway). This is the r
 
 ## Setting it up
 
+The easy way is the setup wizard's **Remote access** step ([Set up](Settings.md#card-setup) in Settings): it checks your
+Cloudflare account, looks at your domain, asks how you want to sign in, and runs the script below
+for you. Deciding whether to? [Cloudflare tunnel](Cloudflare-Tunnel.md) is the short version.
+
+
 ```powershell
 .\installer\Enable-RemoteControl.ps1 -Hostname claude.example.com
 ```
@@ -45,7 +50,7 @@ points the hostname at the proxy's port and runs the tunnel as a service. It ask
 |---|---|
 | `-Hostname` | The public name for the UI |
 | `-Email` | The address allowed to sign in (and where a one-time PIN goes) |
-| `-Identity OneTimePin \| Google \| Microsoft` | The sign-in provider (default one-time PIN) |
+| `-Identity OneTimePin \| Cloudflare \| Google \| Microsoft \| GitHub` | The sign-in provider (default one-time PIN here; the setup wizard defaults to Cloudflare, your Cloudflare account) |
 | `-Setup api \| manual`, `-ApiToken` | Answer the questions up front |
 | `-Rename -Hostname <new>` | Give this machine's address a new name, keeping the tunnel and Access application |
 | `-Remove` | Stop and remove the service, delete the tunnel, turn remote access off |

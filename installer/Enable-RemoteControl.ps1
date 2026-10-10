@@ -95,7 +95,16 @@ param(
     # is what this has always done: Cloudflare emails a code to an address on the policy. Google and
     # Microsoft each need an OAuth client created in their own console first - browser work this
     # script cannot do - so it prints the steps, waits, and does the Cloudflare side over the API.
-    [ValidateSet('OneTimePin', 'Google', 'Microsoft')][string]$Identity = 'OneTimePin',
+    # Cloudflare (feature 110): Cloudflare itself as the identity provider - the account this was set
+    # up with, its own MFA, nothing to register anywhere. GitHub needs an OAuth app, like Google.
+    [ValidateSet('OneTimePin', 'Cloudflare', 'Google', 'Microsoft', 'GitHub')][string]$Identity = 'OneTimePin',
+    # The provider's OAuth client, for an unattended run (the setup wizard). The secret never goes on a
+    # command line: it arrives in AICLEANER_IDP_SECRET and leaves the environment at once.
+    [string]$IdpClientId = '',
+    [ValidateSet('', 'personal', 'work')][string]$IdpAccountKind = '',
+    [string]$IdpDirectory = '',
+    # Use the token Save-CloudflareToken kept from an earlier setup on this machine (one per device).
+    [switch]$UseStoredToken,
     # Go straight to the provider instead of showing a sign-in button. Saves a click and tells
     # anyone who opens the address which account guards it, because the provider names it.
     [switch]$SkipTheChooser,
@@ -261,7 +270,6 @@ function Read-PublicHostname {
     [CmdletBinding()]
     [OutputType([string])]
     param([string[]]$Zones = @())
-    $machine = $env:COMPUTERNAME.ToLower()
     Write-Host ''
     Write-Status 'The name these pages will answer on' -Level Step
     Write-Status 'It is a NEW name in a domain Cloudflare runs your DNS for, created as a record' -Level Detail
@@ -271,12 +279,32 @@ function Read-PublicHostname {
     }
     # A hostname is public: Cloudflare issues a certificate for it, and certificate transparency
     # makes that name searchable by anyone. A client's name does not belong in it.
-    Write-Status 'Name it after the machine, not a client: the name ends up in public certificate' -Level Warn
-    Write-Status 'transparency logs, so "acme-project.example.com" tells the world who you work for.' -Level Detail
-    $suggested = if ($Zones.Count -gt 0) { "claude-$machine.$($Zones[0])" } else { "claude-$machine.example.com" }
-    $answer = Read-Value -Message 'Public name for these pages' -Default $suggested
-    if (-not $answer) { throw 'A hostname is needed' }
-    return ($answer -replace '^https?://', '').Trim('/')
+    Write-Status 'Give the subdomain a name you will recognise, but others will not: it ends up in public' -Level Warn
+    Write-Status 'certificate transparency logs. "cld-bsdq8" tells people nothing; "ACME-Claude" tells them' -Level Detail
+    Write-Status 'that you are associated with ACME and are using Claude.' -Level Detail
+    # Only the label is asked for (feedback item 11): the domain is already known. A short random one
+    # is offered, because the machine's name or the agent's says more than it needs to.
+    $zone = if ($Zones.Count -gt 0) { $Zones[0] } else { '' }
+    $label = Get-RandomSubdomainLabel
+    if (-not $zone) {
+        $answer = Read-Value -Message 'Public name for these pages (subdomain and domain)' -Default "$label.example.com"
+        return ($answer -replace '^https?://', '').Trim('/')
+    }
+    $answer = Read-Value -Message "Subdomain for these pages (.$zone)" -Default $label
+    $answer = ($answer -replace '^https?://', '').Trim('/').Trim('.')
+    if ($answer -like "*.$zone") { return $answer }
+    return "$answer.$zone"
+}
+
+function Get-RandomSubdomainLabel {
+    <# Six lower-case letters and digits, fresh each time: a name that says nothing about anyone. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $alphabet = 'abcdefghijkmnpqrstuvwxyz23456789'
+    $bytes = New-Object byte[] 6
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    return -join ($bytes | ForEach-Object { $alphabet[$_ % $alphabet.Length] })
 }
 
 function Wait-ForCloudflare {
@@ -392,7 +420,10 @@ function Invoke-ApiSetup {
     if (-not $script:ApiTokenSecure -or $script:ApiTokenSecure.Length -eq 0) { throw 'No token given' }
     $emails = @($script:Emails | Where-Object { $_ })
     if ($emails.Count -eq 0) {
-        $address = Read-Value -Message 'Which email address may sign in (the one-time PIN goes there)' -Default ''
+        # Worded for the sign-in chosen (feedback item 10): only the PIN is sent to the address.
+        $question = if ($Identity -eq 'OneTimePin') { 'Which email address may sign in (the one-time PIN goes there)' }
+                    else { "Which account may sign in (the email address of your $Identity account)" }
+        $address = Read-Value -Message $question -Default ''
         if (-not $address) { throw 'An email address is needed: without one, nobody could sign in' }
         $emails = @($address)
     }
@@ -424,7 +455,8 @@ function Invoke-ApiSetup {
         # After the application exists, because pinning needs something to pin to. The allow policy
         # is unchanged either way: it matches the address the provider asserts, whoever asserts it.
         $idp = New-IdentityProvider -Token $token -AccountId $targets.AccountId `
-            -Provider $Identity -TeamDomain $teamDomain
+            -Provider $Identity -TeamDomain $teamDomain -ClientId $script:IdpClientId -ClientSecret $script:IdpSecret `
+            -AccountKind $script:IdpAccountKind -Directory $script:IdpDirectory
         if ($idp) {
             Set-ApplicationIdentity -Token $token -AccountId $targets.AccountId `
                 -AppId $script:AccessAppId -IdpId $idp -SkipTheChooser:$SkipTheChooser
@@ -856,7 +888,7 @@ function Show-IdentityPrerequisites {
         what to make, what to tick, and what to bring back.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][ValidateSet('Google', 'Microsoft')][string]$Provider,
+    param([Parameter(Mandatory)][ValidateSet('Google', 'Microsoft', 'GitHub')][string]$Provider,
           [Parameter(Mandatory)][string]$TeamDomain)
     # Get-TeamDomain returns the organisation's auth_domain, which is ALREADY
     # <team>.cloudflareaccess.com - appending the suffix again produced
@@ -869,7 +901,13 @@ function Show-IdentityPrerequisites {
     Write-Host ''
     Write-Status "Setting up $Provider sign-in needs one thing made in $Provider's own console first"
     Write-Host ''
-    if ($Provider -eq 'Google') {
+    if ($Provider -eq 'GitHub') {
+        Write-Host '   1. Open https://github.com/settings/developers > OAuth Apps > New OAuth App'
+        Write-Host "   2. Homepage URL: https://$auth"
+        Write-Host '   3. Authorization callback URL, exactly:'
+        Write-Host "         $callback" -ForegroundColor Cyan
+        Write-Host '   4. Register application, then Generate a new client secret, and copy it and the Client ID'
+    } elseif ($Provider -eq 'Google') {
         Write-Host '   1. Open https://console.cloud.google.com/apis/credentials'
         Write-Host '   2. Create credentials > OAuth client ID > Web application'
         Write-Host '   3. Under "Authorised redirect URIs" add exactly:'
@@ -923,16 +961,29 @@ function New-IdentityProvider {
         # unattended re-run needs. Absent, it prints the console steps and prompts, as before.
         [string]$ClientId = '',
         [System.Security.SecureString]$ClientSecret,
-        [ValidateSet('', 'personal', 'work')][string]$AccountKind = ''
+        [ValidateSet('', 'personal', 'work')][string]$AccountKind = '',
+        [string]$Directory = ''
     )
     if ($Provider -eq 'OneTimePin') { return '' }
     $needs = 'Account | Access: Organizations, Identity Providers and Groups | Edit'
-    $wanted = if ($Provider -eq 'Google') { 'google' } else { 'azureAD' }
+    $wanted = switch ($Provider) { 'Google' { 'google' } 'GitHub' { 'github' } 'Cloudflare' { 'cloudflare' } default { 'azureAD' } }
     $existing = @(Invoke-CloudflareApi -Token $Token -Path "/accounts/$AccountId/access/identity_providers" -Needs $needs |
         Where-Object { $_.type -eq $wanted })
     if ($existing.Count -gt 0) {
         Write-Status "A $Provider identity provider already exists at Cloudflare; using it" -Level Detail
         $script:IdpId = [string]$existing[0].id
+        return $script:IdpId
+    }
+    if ($Provider -eq 'Cloudflare') {
+        # Nothing to register elsewhere: the Cloudflare account is the sign-in, with its own MFA, and
+        # only members of this account may use it - the allow policy then names who (feature 110).
+        if (-not $PSCmdlet.ShouldProcess($Provider, 'Register the identity provider')) { return '' }
+        $idp = Invoke-CloudflareApi -Token $Token -Path "/accounts/$AccountId/access/identity_providers" `
+            -Method 'POST' -Needs $needs -Body @{ name = 'aicleaner (Cloudflare)'; type = 'cloudflare'
+                                                  config = @{ restrict_to_account_members = $true } }
+        $script:IdpId = [string]$idp.id
+        $script:IdpMine = [bool]$script:IdpId
+        Write-Status 'Cloudflare sign-in registered (members of this Cloudflare account only)' -Level Done
         return $script:IdpId
     }
 
@@ -964,7 +1015,7 @@ function New-IdentityProvider {
         if (-not $AccountKind) {
             $AccountKind = if (Confirm-Action -Message 'Will you sign in with a personal Microsoft account (outlook.com, hotmail.com)?' -Default 'Yes') { 'personal' } else { 'work' }
         }
-        $directory = if ($AccountKind -eq 'personal') { 'common' } else { Read-Value -Message 'Entra directory (tenant) ID' -Default '' }
+        $directory = if ($AccountKind -eq 'personal') { 'common' } elseif ($Directory) { $Directory } else { Read-Value -Message 'Entra directory (tenant) ID' -Default '' }
         if (-not $directory) { throw 'A directory ID is needed for a work-account-only registration' }
         $config['directory_id'] = $directory
         $config['support_groups'] = $false
@@ -1341,6 +1392,19 @@ try {
     if (-not $script:ApiTokenSecure -and $env:AICLEANER_CLOUDFLARE_TOKEN) {
         $script:ApiTokenSecure = ConvertTo-SecureString -String $env:AICLEANER_CLOUDFLARE_TOKEN -AsPlainText -Force
         Remove-Item Env:\AICLEANER_CLOUDFLARE_TOKEN -ErrorAction SilentlyContinue
+    }
+    if (-not $script:ApiTokenSecure -and $UseStoredToken) {
+        $script:ApiTokenSecure = Read-StoredCloudflareToken
+        if (-not $script:ApiTokenSecure) { throw 'No stored Cloudflare token could be read on this machine: give a new one' }
+        Write-Status 'Using the Cloudflare token stored on this machine' -Level Detail
+    }
+    $script:IdpClientId = $IdpClientId
+    $script:IdpAccountKind = $IdpAccountKind
+    $script:IdpDirectory = $IdpDirectory
+    $script:IdpSecret = $null
+    if ($env:AICLEANER_IDP_SECRET) {
+        $script:IdpSecret = ConvertTo-SecureString -String $env:AICLEANER_IDP_SECRET -AsPlainText -Force
+        Remove-Item Env:\AICLEANER_IDP_SECRET -ErrorAction SilentlyContinue
     }
     $script:Hostname = $Hostname
     $script:Emails = @($Email | Where-Object { $_ })

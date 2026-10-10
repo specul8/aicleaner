@@ -19,6 +19,8 @@ This wiki describes what aicleaner does today (v0.9.165). The registers in the r
 | [Review](Review.md) | Identifiers the mapping does not know yet, and what to do with them |
 | [Project Sessions](Project-Sessions.md) | Driving Claude Code from the browser: profiles, sessions, files |
 | [Settings](Settings.md) | What each setting does |
+| [Cloudflare tunnel](Cloudflare-Tunnel.md) | Deciding about remote access: what you get, why it is safe, what it needs |
+| [Moving DNS from cPanel](Repoint-DNS-cPanel.md) | Pointing a domain's DNS at Cloudflare without disturbing email or the website |
 | [Remote access](Remote-access.md) | Using aicleaner from another device, and the encrypted tunnel |
 | [Sharing a client with a team](Sharing.md) | One client folder per engagement, in OneDrive |
 | [Security model](Security-model.md) | What is protected, what is not, and why |

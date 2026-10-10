@@ -9,7 +9,7 @@ import { getJSON, postJSON, sayError } from '../api.js';
 import { h, setChildren } from '../dom.js';
 
 const STEPS = ['What happens', 'Your first client', 'Remote access', 'Your AI tools', 'Done'];
-const view = { step: 0, main: null, ctx: null, dns: null };
+const view = { step: 0, main: null, ctx: null, dns: null, remote: null };
 
 export async function render(main, ctx) {
   view.main = main;
@@ -106,7 +106,101 @@ function firstClient(status) {
   ];
 }
 
+// ---- Remote access (feature 110; feedback items 7-11) --------------------------------------------
+//
+// In stages, so each screen asks one thing: should I (or tell me more), do you have the Cloudflare
+// account it needs, API or by hand, then the details. What is already set up here is shown first,
+// with Keep or Replace. Everything runs on this machine: POST /api/setup/remote starts
+// Enable-RemoteControl.ps1 unattended, and its log is read until it says it is done.
+
+const SIGN_IN = [
+  { id: 'Cloudflare', label: 'Your Cloudflare account', note: 'Cloudflare\'s own sign-in and its MFA - nothing to register anywhere. Recommended.' },
+  { id: 'OneTimePin', label: 'Email me a one-time PIN', note: 'Anyone who can read emails sent to the address below can sign in.' },
+  { id: 'Google', label: 'A Google account', note: 'Google sign-in, with MFA on your phone. Needs an OAuth client made in Google Cloud first.' },
+  { id: 'Microsoft', label: 'A Microsoft account or work ID', note: 'Microsoft sign-in and its MFA. Needs an app registration in Entra first.' },
+  { id: 'GitHub', label: 'A GitHub account', note: 'GitHub sign-in and its MFA. Needs an OAuth app made in GitHub first.' },
+];
+const COMING_SOON = ['Facebook', 'LinkedIn', 'Okta', 'OneLogin', 'PingOne', 'JumpCloud', 'Any SAML provider', 'Any OpenID Connect provider'];
+const NEEDS_CLIENT = new Set(['Google', 'Microsoft', 'GitHub']);
+const CLIENT_STEPS = {
+  Google: 'console.cloud.google.com > APIs & Services > Credentials > Create credentials > OAuth client ID > Web application.',
+  Microsoft: 'entra.microsoft.com > Applications > App registrations > New registration (Web). For a personal account choose "Accounts in any organizational directory and personal Microsoft accounts".',
+  GitHub: 'github.com/settings/developers > OAuth Apps > New OAuth App.',
+};
+
+function randomLabel() {
+  const alphabet = 'abcdefghijkmnpqrstuvwxyz23456789';
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return [...bytes].map((b) => alphabet[b % alphabet.length]).join('');
+}
+
+function remoteState() {
+  if (!view.remote) view.remote = { stage: 'intro', state: null, account: '', zeroTrust: '', label: randomLabel(), identity: 'Cloudflare' };
+  return view.remote;
+}
+
+function goRemote(stage) {
+  remoteState().stage = stage;
+  paint();
+}
+
 function remote() {
+  const r = remoteState();
+  if (!r.state) {
+    getJSON('/api/setup/remote/state').then((state) => { r.state = state; paint(); })
+      .catch(() => { r.state = { hostname: '', token_stored: false, feature_url: '' }; paint(); });
+    return [h('h2', {}, 'Remote access (optional)'), h('p', { class: 'hint' }, 'Looking at what is set up here...')];
+  }
+  const body = { intro: remoteIntro, info: remoteInfo, account: remoteAccount, how: remoteHow, api: remoteApi }[r.stage] || remoteIntro;
+  return [h('h2', {}, 'Remote access (optional)'), h('div', { class: 'setup-remote-stage', dataset: { stage: r.stage } }, ...body(r))];
+}
+
+function remoteIntro(r) {
+  if (r.state.hostname) {
+    const keep = h('button', { type: 'button', class: 'primary setup-remote-keep' }, 'Keep it');
+    const replace = h('button', { type: 'button', class: 'setup-remote-replace' }, 'Replace it');
+    const said = h('p', { class: 'setup-remote-said', role: 'status' });
+    keep.addEventListener('click', () => { said.textContent = 'Kept as it is. Next goes on to your AI tools.'; });
+    replace.addEventListener('click', async () => {
+      replace.disabled = true;
+      said.textContent = 'Taking it down - the tunnel, its DNS record and the sign-in rule...';
+      try {
+        const answer = await postJSON('/api/setup/remote/replace', {});
+        if (!answer.ok) { said.textContent = 'It could not be taken down - see the output below.'; replace.disabled = false; return; }
+        r.state = null;
+        r.stage = 'intro';
+        paint();
+      } catch (error) { replace.disabled = false; sayError(error); }
+    });
+    return [
+      h('p', { class: 'callout ok' }, `Remote access is already set up: https://${r.state.hostname}`
+        + (r.state.sign_in ? ` (sign in with ${r.state.sign_in})` : '') + '.'),
+      h('p', {}, 'Keep it as it is, or take it down and set it up again - a new tunnel, DNS record and sign-in rule.'),
+      h('div', { class: 'form-row' }, keep, replace), said];
+  }
+  const setUp = h('button', { type: 'button', class: 'primary setup-remote-start' }, 'Set it up');
+  const more = h('button', { type: 'button', class: 'setup-remote-more' }, 'More info, decide later');
+  setUp.addEventListener('click', () => goRemote('account'));
+  more.addEventListener('click', () => goRemote('info'));
+  return [
+    h('p', {}, 'If you own a domain and you can change where its DNS is run, you can create a private access connection through '
+      + 'Cloudflare\'s free service and securely use aicleaner from any browser - even on your phone - signing in with your '
+      + 'Cloudflare account, any email address, or your Google, Microsoft or GitHub login. ',
+    h('a', { href: '#/wiki/Cloudflare-Tunnel' }, 'How it works, and why it is safe'), '.'),
+    h('h3', {}, 'You will need'),
+    h('ul', {},
+      h('li', {}, 'A domain you own.'),
+      h('li', {}, 'The ability to point its DNS at Cloudflare (', h('a', { href: '#/wiki/Repoint-DNS-cPanel' }, 'instructions for cPanel'),
+        ') - completely reversible, and it does not disrupt email or your website.')),
+    h('h3', {}, 'You will get'),
+    h('ul', {},
+      h('li', {}, 'A private address at your domain (https://anynameyouwant.yourdomain.com) with MFA sign-in in front of it.'),
+      h('li', {}, 'Your AI sessions, reachable from anywhere you can sign in - and with the encrypted tunnel on, unreadable to anyone else, Cloudflare included.')),
+    h('p', {}, 'No domain? No problem: choose More info and you will find how to get one, and how to come back to this later.'),
+    h('div', { class: 'form-row' }, setUp, more)];
+}
+
+function remoteInfo(r) {
   const box = h('input', { type: 'text', class: 'setup-domain', placeholder: 'example.com', 'aria-label': 'Your domain',
     value: view.dns ? view.dns.domain : '', 'data-unsaved-ignore': '' });
   const look = h('button', { type: 'button', class: 'setup-lookup' }, 'Look it up');
@@ -115,26 +209,94 @@ function remote() {
   look.addEventListener('click', async () => {
     look.disabled = true;
     look.textContent = 'Looking...';
-    try {
-      view.dns = await getJSON(`/api/setup/dns?domain=${encodeURIComponent(box.value)}`);
-      show();
-    } catch (error) { sayError(error); }
+    try { view.dns = await getJSON(`/api/setup/dns?domain=${encodeURIComponent(box.value)}`); show(); } catch (error) { sayError(error); }
     look.disabled = false;
     look.textContent = 'Look it up';
   });
   box.addEventListener('keydown', (event) => { if (event.key === 'Enter') look.click(); });
   if (view.dns) show();
+  const now = h('button', { type: 'button', class: 'primary setup-remote-start' }, 'Set it up now');
+  now.addEventListener('click', () => goRemote('account'));
   return [
-    h('h2', {}, 'Remote access (optional)'),
-    h('p', {}, 'To use aicleaner from your phone or another computer, it is reached through a Cloudflare tunnel at an address '
-      + 'on a domain you own, behind Cloudflare\'s sign-in. Nothing is opened on this machine: the tunnel dials out. '
-      + 'Skip this if you only work at this PC.'),
-    h('p', {}, 'Which domain would you use? aicleaner looks at its DNS (read-only) to tell you what setting it up involves.'),
+    h('p', {}, 'Remote access needs a domain whose DNS Cloudflare runs. No domain yet? Cloudflare sells them at cost '
+      + '(Domain Registration > Register Domains, about US$10 a year), and one bought there is ready at once. '
+      + 'Already have one elsewhere? Type it below: aicleaner looks at its DNS (read-only) and says what moving it involves.'),
     h('div', { class: 'form-row' }, box, look), report,
-  ];
+    h('p', { class: 'hint' }, 'Whenever you are ready: this step is in Settings too (Set up).'),
+    h('div', { class: 'form-row' }, now)];
 }
 
-// What the lookup found, and what to do next, in plain steps.
+function yesNo(name, value, onChange) {
+  const pick = (answer) => h('label', { class: 'check' },
+    h('input', { type: 'radio', name, value: answer, checked: value === answer }), ` ${answer === 'yes' ? 'Yes' : 'No'}`);
+  const group = h('div', { class: 'form-row setup-yesno', dataset: { question: name } }, pick('yes'), pick('no'));
+  group.addEventListener('change', (event) => onChange(event.target.value));
+  return group;
+}
+
+function remoteAccount(r) {
+  const again = h('button', { type: 'button', class: 'setup-remote-recheck' }, 'Done - check again');
+  again.addEventListener('click', () => { r.account = ''; r.zeroTrust = ''; paint(); });
+  const next = h('button', { type: 'button', class: 'primary setup-remote-continue', disabled: !(r.account === 'yes' && r.zeroTrust === 'yes') }, 'Continue');
+  next.addEventListener('click', () => goRemote('how'));
+  const missing = r.account === 'no' || r.zeroTrust === 'no';
+  return [
+    h('h3', {}, 'A Cloudflare account with Zero Trust on?'),
+    h('p', {}, 'How to check: open https://dash.cloudflare.com and click Zero Trust in the left-hand menu. If you are asked to '
+      + 'choose a team name or a plan, Zero Trust is off. If a dashboard opens and Settings shows a team domain like '
+      + '<team>.cloudflareaccess.com, it is on.'),
+    h('p', {}, 'Do you have a Cloudflare account?'), yesNo('cf-account', r.account, (v) => { r.account = v; paint(); }),
+    h('p', {}, 'Is Zero Trust on?'), yesNo('cf-zerotrust', r.zeroTrust, (v) => { r.zeroTrust = v; paint(); }),
+    missing ? h('div', { class: 'callout warn setup-remote-guide' },
+      h('ol', {},
+        r.account === 'no' ? h('li', {}, 'Sign up for a free account at https://dash.cloudflare.com/sign-up.') : null,
+        h('li', {}, 'In the dashboard click Zero Trust, choose a team name (it becomes <team>.cloudflareaccess.com), and pick the Free plan - it asks for a payment method but charges nothing.'),
+        h('li', {}, 'Come back here and check again.')),
+      h('div', { class: 'form-row' }, again)) : null,
+    h('div', { class: 'form-row' }, next)];
+}
+
+function remoteHow(r) {
+  const api = h('button', { type: 'button', class: 'primary setup-remote-api' }, 'Set it up for me (API token)');
+  const manual = h('button', { type: 'button', class: 'setup-remote-manual' }, 'I will do it by hand');
+  const steps = h('div', { class: 'setup-remote-manual-steps', hidden: r.how !== 'manual' },
+    h('ol', {},
+      h('li', {}, 'Zero Trust > Networks > Tunnels > Create a tunnel (Cloudflared), named for this machine.'),
+      h('li', {}, 'Choose Windows, copy the token from the install command, and keep it for step 5.'),
+      h('li', {}, 'Public hostname: a new subdomain of your domain, service HTTP, URL 127.0.0.1:8787.'),
+      h('li', {}, 'Zero Trust > Access > Applications > Add (Self-hosted) for that hostname, with a policy allowing your email address.'),
+      h('li', {}, 'On this machine run installer\\Enable-RemoteControl.ps1 -Setup manual, which asks for the tunnel token and starts it at every sign-in.')),
+    h('p', {}, h('a', { href: '#/wiki/Remote-access' }, 'Remote access, in full'), '.'));
+  api.addEventListener('click', () => goRemote('api'));
+  manual.addEventListener('click', () => { r.how = 'manual'; paint(); });
+  return [
+    h('h3', {}, 'There are two ways to set up the tunnel'),
+    h('ul', {},
+      h('li', {}, 'With an API token: you create a Cloudflare API token, and aicleaner uses it to set up the tunnel on your behalf. '
+        + 'The token can only touch what this needs; other Cloudflare settings are not affected.'),
+      h('li', {}, 'By hand: you follow the steps on the Cloudflare website.')),
+    h('div', { class: 'form-row' }, api, manual), steps];
+}
+
+function remoteApi(r) {
+  const box = h('input', { type: 'text', class: 'setup-domain', placeholder: 'example.com', 'aria-label': 'Your domain',
+    value: view.dns ? view.dns.domain : '', 'data-unsaved-ignore': '' });
+  const look = h('button', { type: 'button', class: 'setup-lookup' }, 'Look it up');
+  const report = h('div', { class: 'setup-dns' });
+  const show = () => setChildren(report, ...dnsAdvice(view.dns), ...(view.dns && view.dns.on_cloudflare && !view.dns.error ? [remoteForm(r, view.dns.domain)] : []));
+  look.addEventListener('click', async () => {
+    look.disabled = true;
+    look.textContent = 'Looking...';
+    try { view.dns = await getJSON(`/api/setup/dns?domain=${encodeURIComponent(box.value)}`); show(); } catch (error) { sayError(error); }
+    look.disabled = false;
+    look.textContent = 'Look it up';
+  });
+  box.addEventListener('keydown', (event) => { if (event.key === 'Enter') look.click(); });
+  if (view.dns) show();
+  return [h('p', {}, 'Which domain? aicleaner looks at its DNS (read-only) first.'), h('div', { class: 'form-row' }, box, look), report];
+}
+
+// What the lookup found, and - when the domain is not on Cloudflare yet - what to do about it.
 export function dnsAdvice(dns) {
   if (!dns) return [];
   if (dns.error) return [h('p', { class: 'callout bad' }, dns.error)];
@@ -143,22 +305,15 @@ export function dnsAdvice(dns) {
     h('dt', {}, 'Email'), h('dd', {}, dns.mail.length ? dns.mail.join(', ') : 'no mail records'),
     h('dt', {}, 'Mail protection'), h('dd', {}, [dns.spf ? 'SPF' : '', dns.dmarc ? 'DMARC' : ''].filter(Boolean).join(' and ') || 'none found'),
     h('dt', {}, 'Website'), h('dd', {}, dns.apex.length || dns.www.length ? [...new Set([...dns.apex, ...dns.www])].join(', ') : 'none found'));
-  const address = `ai.${dns.domain}`;
-  const token = h('div', {},
-    h('h3', {}, 'Then: a Cloudflare API token'),
-    h('ol', {},
-      h('li', {}, 'In the Cloudflare dashboard, open My Profile > API Tokens > Create Token > Create Custom Token.'),
-      h('li', {}, `Permissions: Account - Cloudflare Tunnel - Edit; Account - Access: Apps and Policies - Edit; Account - Account Settings - Read; Zone - DNS - Edit. Zone resources: ${dns.domain}.`),
-      h('li', {}, 'Create it and copy the token (Cloudflare shows it once), then fill this in:')),
-    remoteForm(address));
   if (dns.on_cloudflare) {
-    return [facts, h('p', { class: 'callout ok' }, `${dns.domain} is already on Cloudflare - nothing to move. aicleaner would be at ${address}.`), token];
+    return [facts, h('p', { class: 'callout ok' }, `${dns.domain} is already on Cloudflare - nothing to move.`)];
   }
   const keep = dns.mail.length ? h('p', { class: 'callout warn' },
     `${dns.domain} carries email (${dns.mail[0]}${dns.mail.length > 1 ? ' and more' : ''}). Moving its DNS must keep every mail record - `
     + 'a missed one stops your email. If you are not sure, use a separate domain (option B).') : null;
   const cpanel = dns.kind === 'cpanel' ? h('li', {}, 'Your host uses cPanel: sign in, open Zone Editor, choose the domain, and Export the zone file '
-    + '(or copy every record down). Cloudflare can import that file under DNS > Records > Import and Export.') : null;
+    + '(or copy every record down). Cloudflare can import that file under DNS > Records > Import and Export. ',
+  h('a', { href: '#/wiki/Repoint-DNS-cPanel' }, 'Step by step'), '.') : null;
   return [facts, keep,
     h('h3', {}, 'Option A: move this domain\'s DNS to Cloudflare (free)'),
     h('ol', {},
@@ -172,26 +327,65 @@ export function dnsAdvice(dns) {
     h('h3', {}, 'Option B: a separate domain just for aicleaner (about US$10 a year)'),
     h('ol', {},
       h('li', {}, 'In the Cloudflare dashboard, open Domain Registration > Register Domains, and buy a short domain you do not use for anything else.'),
-      h('li', {}, 'It is on Cloudflare from the start - nothing about your main domain changes. Look the new domain up here.')),
-    token];
+      h('li', {}, 'It is on Cloudflare from the start - nothing about your main domain changes. Look the new domain up here.'))];
 }
 
-// The token, the address and who may sign in; then Enable-RemoteControl.ps1 runs on this machine
-// (POST /api/setup/remote). It restarts the proxy at the end, so its log is read until it says it is
-// done, through the restart.
-function remoteForm(address) {
-  const where = h('input', { type: 'text', class: 'setup-remote-host', value: address, 'aria-label': 'Address for aicleaner', 'data-unsaved-ignore': '' });
+// The details, then Enable-RemoteControl.ps1 runs on this machine. It restarts the proxy at the end,
+// so its log is read until it says it is done, through the restart.
+function remoteForm(r, domain) {
+  const featureUrl = (r.state && r.state.feature_url) || 'https://github.com/specul8/aicleaner/issues/new';
+  const methods = h('fieldset', { class: 'setup-sign-in' }, h('legend', {}, 'How would you like to sign in to the remote page?'),
+    ...SIGN_IN.map((m) => h('label', { class: 'check setup-sign-in-option' },
+      h('input', { type: 'radio', name: 'sign-in', value: m.id, checked: r.identity === m.id }),
+      ` ${m.label}`, h('span', { class: 'hint' }, ` - ${m.note}`))),
+    ...COMING_SOON.map((name) => h('label', { class: 'check setup-sign-in-soon' },
+      h('input', { type: 'radio', name: 'sign-in', disabled: true }), ` ${name} (coming soon) `,
+      h('a', { href: `${featureUrl}?title=${encodeURIComponent(`Remote sign-in with ${name}`)}`, target: '_blank', rel: 'noopener' }, 'ask for it'))));
+  methods.addEventListener('change', (event) => { if (event.target.name === 'sign-in') { r.identity = event.target.value; paint(); } });
+  const pin = r.identity === 'OneTimePin';
   const who = h('input', { type: 'email', class: 'setup-remote-email', placeholder: 'you@example.com', 'aria-label': 'Who may sign in', 'data-unsaved-ignore': '' });
+  const whoLabel = pin ? 'Which email address may sign in (the one-time PIN goes there)'
+    : `Which account may sign in (the email address of your ${SIGN_IN.find((m) => m.id === r.identity).label.replace(/^(A|An|Your) /, '')})`;
+  const clientId = h('input', { type: 'text', class: 'setup-idp-client', 'aria-label': 'Client ID', 'data-unsaved-ignore': '' });
+  const clientSecret = h('input', { type: 'password', class: 'setup-idp-secret', autocomplete: 'off', 'aria-label': 'Client secret', 'data-unsaved-ignore': '' });
+  const kind = h('select', { class: 'setup-idp-kind', 'aria-label': 'Which Microsoft accounts' },
+    h('option', { value: 'personal' }, 'a personal account (outlook.com, hotmail.com) - or any'),
+    h('option', { value: 'work' }, 'work accounts in one directory only'));
+  const directory = h('input', { type: 'text', class: 'setup-idp-directory', placeholder: 'Entra directory (tenant) ID', 'aria-label': 'Directory ID', 'data-unsaved-ignore': '' });
+  const team = 'https://<team>.cloudflareaccess.com/cdn-cgi/access/callback';
+  const client = NEEDS_CLIENT.has(r.identity) ? h('div', { class: 'setup-idp' },
+    h('p', {}, `First make the ${r.identity} side: ${CLIENT_STEPS[r.identity]} Its redirect (callback) URL is ${team}, with your team name.`),
+    h('label', { class: 'field' }, 'Client ID', clientId),
+    h('label', { class: 'field' }, 'Client secret', clientSecret),
+    r.identity === 'Microsoft' ? h('label', { class: 'field' }, 'Who signs in', kind) : null,
+    r.identity === 'Microsoft' ? h('label', { class: 'field' }, 'Directory ID (work accounts only)', directory) : null) : null;
+  const label = h('input', { type: 'text', class: 'setup-remote-label', value: r.label, 'aria-label': 'Subdomain', 'data-unsaved-ignore': '' });
+  label.addEventListener('input', () => { r.label = label.value.trim().toLowerCase(); });
+  const stored = r.state && r.state.token_stored;
+  const useStored = h('input', { type: 'checkbox', class: 'setup-remote-use-stored', checked: Boolean(stored) });
   const secret = h('input', { type: 'password', class: 'setup-remote-token', autocomplete: 'off', 'aria-label': 'Cloudflare API token', 'data-unsaved-ignore': '' });
+  const idpAccess = pin ? 'Read' : 'Edit';
+  const tokenSteps = h('ol', { class: 'setup-token-steps' },
+    h('li', {}, 'In the Cloudflare dashboard, open My Profile > API Tokens > Create Token > Create Custom Token.'),
+    h('li', {}, `Permissions: Account - Cloudflare Tunnel - Edit; Account - Access: Apps and Policies - Edit; Account - Access: Organizations, Identity Providers and Groups - ${idpAccess}; Zone - DNS - Edit. Zone resources: ${domain}.`),
+    h('li', {}, 'Create it and copy the token (Cloudflare shows it once).'));
   const go = h('button', { type: 'button', class: 'primary setup-remote-go' }, 'Set up remote access');
   const out = h('pre', { class: 'setup-output setup-remote-log', hidden: true });
   const said = h('p', { class: 'setup-remote-said', role: 'status' });
   go.addEventListener('click', async () => {
+    const host = `${(r.label || '').replace(/\.+$/, '')}.${domain}`;
+    const body = { hostname: host, email: who.value, identity: r.identity };
+    if (stored && useStored.checked) body.use_stored = true; else body.token = secret.value;
+    if (NEEDS_CLIENT.has(r.identity)) {
+      Object.assign(body, { client_id: clientId.value, client_secret: clientSecret.value });
+      if (r.identity === 'Microsoft') Object.assign(body, { account_kind: kind.value, directory: directory.value });
+    }
     go.disabled = true;
     try {
-      await postJSON('/api/setup/remote', { hostname: where.value, email: who.value, token: secret.value });
+      await postJSON('/api/setup/remote', body);
     } catch (error) { go.disabled = false; sayError(error); return; }
-    secret.value = '';                                  // not kept in the page once sent
+    secret.value = '';                                  // neither is kept in the page once sent
+    clientSecret.value = '';
     out.hidden = false;
     said.textContent = 'Setting up - the tunnel, its DNS record and the sign-in rule. The proxy restarts at the end.';
     for (let i = 0; i < 150; i += 1) {
@@ -201,7 +395,7 @@ function remoteForm(address) {
       out.textContent = log.text;
       out.scrollTop = out.scrollHeight;
       if (log.done) {
-        said.textContent = log.ok ? `Remote access is on: https://${where.value} - sign in with ${who.value}.`
+        said.textContent = log.ok ? `Remote access is on: https://${host} - sign in as ${who.value}.`
           : 'It stopped with an error - the log above says where. Fix that and try again.';
         go.disabled = false;
         return;
@@ -211,9 +405,15 @@ function remoteForm(address) {
     go.disabled = false;
   });
   return h('div', { class: 'setup-remote' },
-    h('label', { class: 'field' }, 'Address for aicleaner', where),
-    h('label', { class: 'field' }, 'Email that may sign in (Cloudflare sends it a one-time code)', who),
-    h('label', { class: 'field' }, 'Cloudflare API token', secret),
+    methods, client,
+    h('label', { class: 'field' }, whoLabel, who),
+    h('p', { class: 'callout warn' }, 'Give the subdomain a name you will recognise, but others will not: it is published in certificate '
+      + 'transparency logs. "cld-bsdq8" tells people nothing; "ACME-Claude" tells them you are associated with ACME and use Claude.'),
+    h('label', { class: 'field' }, 'Subdomain', h('span', { class: 'setup-host' }, label, h('span', { class: 'setup-zone' }, `.${domain}`))),
+    h('h3', {}, 'A Cloudflare API token'),
+    stored ? h('label', { class: 'check' }, useStored, ' Use the token stored on this machine (from an earlier setup)') : null,
+    tokenSteps,
+    h('label', { class: 'field' }, stored ? 'Or a new token (replaces the stored one)' : 'Cloudflare API token', secret),
     h('div', { class: 'form-row' }, go), said, out);
 }
 

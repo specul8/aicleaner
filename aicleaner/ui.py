@@ -155,18 +155,51 @@ log = logging.getLogger("aicleaner.ui")
 model_list = ModelList()
 
 
-# The sign-in methods the wizard can set up unattended (D177; part D of the 2026-10-10 spec adds more).
-REMOTE_IDENTITIES = ("OneTimePin",)
+# The sign-in methods the wizard sets up (D177, feature 110), the first the default: Cloudflare's own
+# sign-in needs nothing registered anywhere. The last three need an OAuth client of their own.
+REMOTE_IDENTITIES = ("Cloudflare", "OneTimePin", "Google", "Microsoft", "GitHub")
+REMOTE_NEEDS_CLIENT = ("Google", "Microsoft", "GitHub")
 
 
-def remote_setup_command(shell: str, script: Path | str, hostname: str, email: str,
-                         identity: str = "OneTimePin") -> list[str]:
+def remote_setup_command(shell: str, script: Path | str, hostname: str, email: str, identity: str = "OneTimePin",
+                         client_id: str = "", account_kind: str = "", directory: str = "",
+                         use_stored: bool = False) -> list[str]:
     """How the setup wizard runs Enable-RemoteControl.ps1 (D177). Only parameters the script has -
     it was passed -LogPath, which it never had, so the run stopped before it started - and
-    -AssumeDefaults, so no question is read from a closed input. The token travels in the
-    environment, never here."""
-    return [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(script),
-            "-Setup", "api", "-Hostname", hostname, "-Email", email, "-Identity", identity, "-AssumeDefaults"]
+    -AssumeDefaults, so no question is read from a closed input. The token and a provider's client
+    secret travel in the environment, never here."""
+    command = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(script),
+               "-Setup", "api", "-Hostname", hostname, "-Email", email, "-Identity", identity, "-AssumeDefaults"]
+    if client_id:
+        command += ["-IdpClientId", client_id]
+    if account_kind:
+        command += ["-IdpAccountKind", account_kind]
+    if directory:
+        command += ["-IdpDirectory", directory]
+    if use_stored:
+        command.append("-UseStoredToken")
+    return command
+
+
+def stored_cloudflare_token() -> Path:
+    """Where Enable-RemoteControl.ps1 keeps the API token (DPAPI, this Windows account): one per device."""
+    return Path.home() / ".aicleaner" / "cloudflare-token.dpapi"
+
+
+def feature_request_url(title: str = "") -> str:
+    """The issues of the repository this install came from - public or -dev (feature 110)."""
+    repo = "https://github.com/specul8/aicleaner"
+    try:
+        record = json.loads((Path.home() / ".aicleaner" / "deployment.json").read_text(encoding="utf-8-sig"))
+        for deployment in record.get("deployments") or []:
+            url = str(deployment.get("repo_url") or "")
+            if re.match(r"^https://github\.com/[^/\s]+/[^/\s]+", url):
+                repo = url
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    repo = re.sub(r"\.git$", "", repo).rstrip("/")
+    return f"{repo}/issues/new" + (f"?title={urllib.parse.quote(title)}" if title else "")
 
 
 def _health_state(cfg) -> dict | None:
@@ -2029,16 +2062,29 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         hostname = str(body.get("hostname") or "").strip().lower()
         email = str(body.get("email") or "").strip()
         token = str(body.get("token") or "").strip()
+        use_stored = bool(body.get("use_stored")) and not token
         from .dnsguide import DOMAIN_RE
         if not DOMAIN_RE.match(hostname) or hostname.count(".") < 2:
             return err(ValueError("give the full address for aicleaner, for example ai.example.com"))
         if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
             return err(ValueError("give the email address that may sign in"))
-        if not re.fullmatch(r"[A-Za-z0-9_-]{30,}", token):
+        if use_stored and not stored_cloudflare_token().exists():
+            return err(ValueError("no Cloudflare token is stored on this machine: give a new one"))
+        if not use_stored and not re.fullmatch(r"[A-Za-z0-9_-]{30,}", token):
             return err(ValueError("that does not look like a Cloudflare API token"))
         identity = str(body.get("identity") or "OneTimePin")
         if identity not in REMOTE_IDENTITIES:
             return err(ValueError(f"sign-in method must be one of: {', '.join(REMOTE_IDENTITIES)}"))
+        client_id = str(body.get("client_id") or "").strip()
+        client_secret = str(body.get("client_secret") or "").strip()
+        account_kind = str(body.get("account_kind") or "").strip()
+        directory = str(body.get("directory") or "").strip()
+        if identity in REMOTE_NEEDS_CLIENT and not (client_id and client_secret):
+            return err(ValueError(f"{identity} sign-in needs the client ID and secret of the OAuth app made for it"))
+        if account_kind not in ("", "personal", "work"):
+            return err(ValueError("account kind is personal or work"))
+        if identity == "Microsoft" and account_kind == "work" and not re.fullmatch(r"[0-9a-fA-F-]{36}", directory):
+            return err(ValueError("a work-only Microsoft sign-in needs the Entra directory (tenant) ID"))
         root = proxy.cfg.path.parent
         script = root / "installer" / "Enable-RemoteControl.ps1"
         from .restart import RestartError, powershell, spawn_detached
@@ -2046,11 +2092,57 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text("", encoding="utf-8")                    # this run's log only
         try:
-            spawn_detached(remote_setup_command(powershell(), script, hostname, email, identity), root, log_path,
-                           env={"AICLEANER_CLOUDFLARE_TOKEN": token})
+            env = {"AICLEANER_CLOUDFLARE_TOKEN": token} if token else {}
+            if client_secret:
+                env["AICLEANER_IDP_SECRET"] = client_secret
+            spawn_detached(remote_setup_command(powershell(), script, hostname, email, identity,
+                                                client_id=client_id if identity in REMOTE_NEEDS_CLIENT else "",
+                                                account_kind=account_kind if identity == "Microsoft" else "",
+                                                directory=directory if identity == "Microsoft" else "",
+                                                use_stored=use_stored), root, log_path, env=env)
         except RestartError as exc:
             return err(exc, status=409)
         return web.json_response({"ok": True})
+
+    async def setup_remote_state(request: web.Request) -> web.Response:
+        """What the Remote Access step starts from (feature 110): remote access already set up here,
+        a token stored on this machine, and where to ask for a sign-in method that is not offered."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        remote = {}
+        try:
+            config = json.loads(Path(proxy.cfg.path).read_text(encoding="utf-8-sig")) if proxy.cfg.path else {}
+            remote = config.get("remote") if isinstance(config.get("remote"), dict) else {}
+        except (OSError, ValueError):
+            remote = {}
+        return web.json_response({
+            "hostname": str(remote.get("hostname") or ""),
+            "sign_in": str(remote.get("identity") or remote.get("sign_in_with") or ""),
+            "token_stored": stored_cloudflare_token().exists(),
+            "identities": list(REMOTE_IDENTITIES),
+            "feature_url": feature_request_url(),
+        })
+
+    async def setup_remote_replace(request: web.Request) -> web.Response:
+        """Replace: take the remote access set up here down - the tunnel, its DNS record and Access
+        application, and the config's remote block - so the step can set it up afresh (feature 110).
+        The uninstaller's -RemoteOnly does it; with nobody to answer, its questions take their
+        defaults."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Uninstall-AiCleaner.ps1"
+        from .restart import powershell
+        child = await asyncio.create_subprocess_exec(
+            powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-RemoteOnly",
+            cwd=str(root), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(child.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            child.kill()
+            return err(ValueError("taking remote access down did not finish within three minutes"), status=504)
+        return web.json_response({"ok": child.returncode == 0, "output": out.decode("utf-8", errors="replace")[-6000:]})
 
     async def setup_remote_log(request: web.Request) -> web.Response:
         """What the remote-access run has said so far."""
@@ -2538,6 +2630,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/setup/dns", setup_dns)
     app.router.add_post("/api/setup/enable", setup_enable)
     app.router.add_post("/api/setup/remote", setup_remote)
+    app.router.add_get("/api/setup/remote/state", setup_remote_state)
+    app.router.add_post("/api/setup/remote/replace", setup_remote_replace)
     app.router.add_get("/api/setup/remote/log", setup_remote_log)
     app.router.add_get("/api/export/client/{cid}", export_client)
     app.router.add_get("/api/export/all", export_all)

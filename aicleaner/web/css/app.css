@@ -1236,3 +1236,10 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
   border-radius: .4rem; background: var(--warn-bg); color: var(--warn-text); font-size: .9em; }
 .queue-chip .queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queue-chip.held { border-style: dotted; }
+
+/* Feature 110: the Remote Access step's sign-in list and its subdomain + domain row. */
+.setup-sign-in { border: 1px solid var(--border); border-radius: .4rem; padding: .5rem .75rem; display: grid; gap: .25rem; }
+.setup-sign-in-soon { opacity: .6; }
+.setup-host { display: inline-flex; align-items: center; gap: .2rem; }
+.setup-host .setup-zone { color: var(--muted); }
+.setup-remote-guide ol { margin: .25rem 0 .5rem; }
