@@ -109,6 +109,17 @@ ollback\, so a code drop that will not start can be undone
 .PARAMETER RemoveData
     Uninstall only: also delete the data (after typed confirmation) and the stored secrets.
 
+.PARAMETER RemoveAppFiles
+    Uninstall only: also remove the application itself beyond its recorded files - the Python
+    environment, rollback copies, backups and anything left in the app folder that is not data -
+    so the next install deploys everything afresh. Client files, Global, the configuration, contact,
+    profiles, the ignore list, the review queue, logs, sessions and stored keys are kept.
+
+.PARAMETER RemoveRemote
+    Uninstall only: offer to take remote access down - the tunnel here, and its tunnel, DNS record and
+    Access application at Cloudflare - and forget it in the config. Without it remote access is kept,
+    and a later install asks whether to keep it or replace it.
+
 .PARAMETER AssumeDefaults
     Take the default answer at every yes/no question (unattended runs). Typed confirmations for
     deleting data are still asked.
@@ -169,6 +180,8 @@ param(
     [string]$RemoteHostname = '',
     [ValidateSet('', 'OneTimePin', 'Google', 'Microsoft')][string]$Identity = '',
     [switch]$RemoveData,
+    [switch]$RemoveAppFiles,
+    [switch]$RemoveRemote,
     [switch]$AssumeDefaults,
     [string]$StateRoot = (Join-Path $env:USERPROFILE '.aicleaner'),
     [AllowEmptyString()][string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) 'Deploy-AiCleaner.log')
@@ -711,7 +724,8 @@ function Resolve-Release {
 # and the data a deployment makes for itself. Everything else is the source.
 $script:CopyExcludedFolders = @('.git', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache',
                                 '.ruff_cache', 'node_modules', '.serena', '.claude', '.vscode', '.idea',
-                                'logs', 'clients', 'lastgood', 'stage', '.aicleaner')
+                                'logs', 'clients', 'lastgood', 'stage', '.aicleaner',
+                                '.pytest-tmp', '.remember', '.superpowers')
 $script:CopyExcludedFiles = @('aicleaner-config.json', 'deployment.json', '.gitignore', '.gitattributes')
 $script:CopyExcludedSuffixes = @('.pyc', '.pyo', '.log', '.bak', '.tmp', '.zip')
 
@@ -729,17 +743,45 @@ function Get-PlainCopyFiles {
     param([Parameter(Mandatory)][string]$Folder)
     $root = [IO.Path]::GetFullPath($Folder).TrimEnd('\')
     $found = New-Object System.Collections.Generic.List[string]
-    foreach ($item in @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue)) {
-        $relative = $item.FullName.Substring($root.Length).TrimStart('\')
-        $parts = $relative.Split('\')
-        $skip = $false
-        foreach ($part in $parts[0..([Math]::Max(0, $parts.Count - 2))]) {
-            if ($parts.Count -gt 1 -and $script:CopyExcludedFolders -contains $part) { $skip = $true; break }
+    foreach ($item in @(Get-SourceFile -Folder $root)) {
+        $found.Add($item.FullName.Substring($root.Length).TrimStart('\').Replace('\', '/'))
+    }
+    return $found.ToArray()
+}
+
+function Get-SourceFile {
+    <#
+    .SYNOPSIS
+        The files under a source folder that a copy would take, as FileInfo.
+    .DESCRIPTION
+        An excluded folder is never entered, rather than walked and filtered out afterwards: beside a
+        working copy, .venv and .git are 140,000-odd files and the walk alone took twelve seconds
+        before the first question. A junction or symbolic link to a folder is not followed, so a
+        link back up the tree cannot loop. Only those two: OneDrive's own folders are reparse points
+        as well (its cloud-files tag), and they are exactly what this walk exists to look inside.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Folder)
+    $root = [IO.Path]::GetFullPath($Folder).TrimEnd('\')
+    $found = New-Object System.Collections.Generic.List[IO.FileInfo]
+    if (-not (Test-Path -LiteralPath $root -PathType Container)) { return $found.ToArray() }
+    $folders = New-Object System.Collections.Generic.Stack[string]
+    $folders.Push($root)
+    while ($folders.Count -gt 0) {
+        # .NET rather than Get-ChildItem: one provider call per folder is several times slower, and
+        # this runs before anything is printed. A folder that cannot be read is skipped, as before.
+        $items = @()
+        try { $items = ([IO.DirectoryInfo]$folders.Pop()).GetFileSystemInfos() } catch { $items = @() }
+        foreach ($item in $items) {
+            if ($item -is [IO.DirectoryInfo]) {
+                $linked = $item.PSObject.Properties['LinkType'] -and [string]$item.LinkType -in 'Junction', 'SymbolicLink'
+                if (-not $linked -and $script:CopyExcludedFolders -notcontains $item.Name) { $folders.Push($item.FullName) }
+                continue
+            }
+            if ($script:CopyExcludedFiles -contains $item.Name) { continue }
+            if ($script:CopyExcludedSuffixes -contains $item.Extension.ToLowerInvariant()) { continue }
+            $found.Add($item)
         }
-        if ($skip) { continue }
-        if ($script:CopyExcludedFiles -contains $item.Name) { continue }
-        if ($script:CopyExcludedSuffixes -contains $item.Extension.ToLowerInvariant()) { continue }
-        $found.Add($relative.Replace('\', '/'))
     }
     return $found.ToArray()
 }
@@ -1030,27 +1072,6 @@ function Restore-RepoFile {
 # data access. Reading the attributes does not fetch anything, which is what makes the check cheap.
 $script:CloudOnlyAttributes = 0x441000
 
-function Test-CopyExcluded {
-    <#
-    .SYNOPSIS
-        Whether a path relative to the source root is one a copy would never take.
-    .DESCRIPTION
-        The same three lists the copy itself uses, in one place, so nothing can wait on a file it
-        is not going to read.
-    #>
-    [CmdletBinding()]
-    [OutputType([bool])]
-    param([Parameter(Mandatory)][string]$Relative)
-    $parts = $Relative.Split('\')
-    if ($parts.Count -gt 1) {
-        foreach ($part in $parts[0..($parts.Count - 2)]) {
-            if ($script:CopyExcludedFolders -contains $part) { return $true }
-        }
-    }
-    $leaf = $parts[$parts.Count - 1]
-    if ($script:CopyExcludedFiles -contains $leaf) { return $true }
-    return ($script:CopyExcludedSuffixes -contains ([IO.Path]::GetExtension($leaf).ToLowerInvariant()))
-}
 
 function Get-CloudOnlyFile {
     <#
@@ -1066,10 +1087,7 @@ function Get-CloudOnlyFile {
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Folder)
-    $root = [IO.Path]::GetFullPath($Folder).TrimEnd('\')
-    return @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Where-Object { ([int]$_.Attributes -band $script:CloudOnlyAttributes) -ne 0 } |
-        Where-Object { -not (Test-CopyExcluded -Relative $_.FullName.Substring($root.Length).TrimStart('\')) })
+    return @(Get-SourceFile -Folder $Folder | Where-Object { ([int]$_.Attributes -band $script:CloudOnlyAttributes) -ne 0 })
 }
 
 function Restore-CloudFiles {
@@ -2255,6 +2273,39 @@ function Assert-TargetsFree {
     }
 }
 
+function Resolve-ExistingRemote {
+    <#
+    .SYNOPSIS
+        A remote connection left by an earlier install: keep it, or take it down and set up afresh.
+    .DESCRIPTION
+        The configuration survives an uninstall, so a reinstall used to adopt whatever remote
+        connection it named without saying so. Now it is shown and asked about: keep (the default -
+        nothing is changed, and no new setup runs) or replace (the uninstaller's -RemoteOnly takes it
+        down - the tunnel here, and at Cloudflare its tunnel, DNS record and Access application - then
+        remote access is set up afresh). Sets the role's RemoteHostname accordingly, in place.
+
+        It returns nothing, so it is never captured: a captured call would turn the uninstaller's
+        console into a pipe (see test_a_function_that_starts_processes_is_never_captured).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)]$Role)
+    $config = Read-JsonFile -Path (Join-Path $AppRoot 'aicleaner-config.json')
+    $remote = if ($config -and $config.PSObject.Properties['remote']) { $config.remote } else { $null }
+    $hostname = if ($remote -and $remote.PSObject.Properties['hostname']) { [string]$remote.hostname } else { '' }
+    if (-not $hostname) { return }
+    $choice = Read-Choice -Message "Remote access is already set up from an earlier install: https://$hostname" -Default 'keep' -Options ([ordered]@{
+        'keep'    = 'Keep it as it is'
+        'replace' = 'Take it down and set it up again (a new tunnel, DNS record and sign-in rule)'
+    })
+    if ($choice -eq 'keep') {
+        Write-Status "Remote access kept: https://$hostname" -Level Detail
+        $Role | Add-Member -NotePropertyName 'RemoteHostname' -NotePropertyValue '' -Force
+        return
+    }
+    Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Uninstall-AiCleaner.ps1') -Arguments @('-RemoteOnly')
+    $Role | Add-Member -NotePropertyName 'RemoteHostname' -NotePropertyValue 'ask' -Force
+}
+
 function Invoke-RemoteSetup {
     <#
     .SYNOPSIS
@@ -2465,6 +2516,7 @@ function Invoke-Install {
     Write-StepBanner -Number 4 -Of 6 -Title 'Connecting your AI tools' -Unattended:$script:Unattended
     Invoke-Wiring -AppRoot $folders.App -Targets $targets -Role $role -Url $url -Ref $release.Ref
     Write-StepBanner -Number 5 -Of 6 -Title 'Remote access (optional)' -Unattended:$script:Unattended
+    Resolve-ExistingRemote -AppRoot $folders.App -Role $role
     Invoke-RemoteSetup -AppRoot $folders.App -Role $role -Url $url -Ref $release.Ref
     Write-StepBanner -Number 6 -Of 6 -Title 'Ready' -Unattended:$script:Unattended
     Write-Status "aicleaner $($release.Ref) deployed to $($folders.App)" -Level Done
@@ -2646,6 +2698,9 @@ function Update-TaskPath {
         one would start nothing at the next sign-in. Each aicleaner task whose action names a script
         at the root that now sits in installer\ is changed to name the new path; nothing else is
         touched, and a task that cannot be changed is reported, not fatal.
+
+        It also starts every aicleaner task through conhost.exe --headless (D175): a task registered
+        before that showed its console wherever Windows Terminal is the default terminal.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param([Parameter(Mandatory)][string]$AppRoot)
@@ -2659,24 +2714,55 @@ function Update-TaskPath {
             $old = Join-Path $AppRoot $name
             if (@($task.Actions | Where-Object { $_.Arguments -and $_.Arguments.Contains($old) }).Count) { $name }
         })
-        if (-not $named.Count -or -not $PSCmdlet.ShouldProcess($task.TaskName, 'point at installer\')) { continue }
+        $hidden = @($task.Actions | Where-Object { $_.PSObject.Properties['Execute'] -and (Split-Path -Leaf ([string]$_.Execute)) -eq 'powershell.exe' }).Count -gt 0
+        if (-not ($named.Count -or $hidden) -or -not $PSCmdlet.ShouldProcess($task.TaskName, 'point at installer\ and hide its console')) { continue }
         foreach ($action in @($task.Actions)) {
             foreach ($name in $named) {
                 if ($action.Arguments) { $action.Arguments = $action.Arguments.Replace((Join-Path $AppRoot $name), (Join-Path $folder $name)) }
             }
+            [void](Convert-TaskActionToHidden -Action $action)
         }
-        if ($named.Count) {
-            try {
-                Set-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Action $task.Actions -ErrorAction Stop | Out-Null
-                Write-Status "Scheduled task $($task.TaskName) now runs the script from installer\" -Level Detail
-            } catch {
-                # A task registered elevated cannot be changed from a normal session (Access is
-                # denied). It keeps working through a forwarder at the path it names.
-                foreach ($name in $named) { Write-TaskForwarder -AppRoot $AppRoot -Name $name }
+        try {
+            Set-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -Action $task.Actions -ErrorAction Stop | Out-Null
+            if ($named.Count) { Write-Status "Scheduled task $($task.TaskName) now runs the script from installer\" -Level Detail }
+            if ($hidden) { Write-Status "Scheduled task $($task.TaskName) now runs without a window" -Level Detail }
+        } catch {
+            # A task registered elevated cannot be changed from a normal session (Access is
+            # denied). It keeps working through a forwarder at the path it names.
+            foreach ($name in $named) { Write-TaskForwarder -AppRoot $AppRoot -Name $name }
+            if ($named.Count) {
                 Write-Status "Scheduled task $($task.TaskName) could not be changed ($($_.Exception.Message)); it runs the script through a forwarder at its old path. Re-run Deploy from an elevated PowerShell to point it at installer\ directly." -Level Warn
+            } else {
+                Write-Status "Scheduled task $($task.TaskName) could not be changed ($($_.Exception.Message)), so it may still show a window. Re-run Deploy from an elevated PowerShell to fix it." -Level Warn
             }
         }
     }
+}
+
+function Convert-TaskActionToHidden {
+    <#
+    .SYNOPSIS
+        Changes a task action that runs powershell.exe directly into one through conhost.exe --headless.
+    .DESCRIPTION
+        A task registered before D175 runs powershell.exe -WindowStyle Hidden, which Windows
+        Terminal ignores. The same command, run through conhost.exe --headless, has no console
+        anyone can see. Returns whether the action was changed: one that runs anything else, or
+        already runs through conhost, is left as it is, and so is every action on Windows without
+        --headless (before 10 1809).
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)]$Action)
+    if (-not $Action.PSObject.Properties['Execute']) { return $false }
+    $exe = [string]$Action.Execute
+    if (-not $exe -or (Split-Path -Leaf $exe) -ne 'powershell.exe') { return $false }
+    $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+    if ([Environment]::OSVersion.Version.Build -lt 17763 -or -not (Test-Path -LiteralPath $conhost)) { return $false }
+    # A bare powershell.exe was found on PATH; conhost needs the whole path.
+    $powershell = if ([IO.Path]::IsPathRooted($exe)) { $exe } else { Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+    $Action.Execute = $conhost
+    $Action.Arguments = ("--headless `"$powershell`" " + [string]$Action.Arguments).TrimEnd()
+    return $true
 }
 
 function Write-TaskForwarder {
@@ -2779,6 +2865,51 @@ function Invoke-RollbackAction {
     [void](Invoke-Rollback -AppRoot $appRoot -StateFolder $StateFolder)
 }
 
+function Remove-AppCode {
+    <#
+    .SYNOPSIS
+        -RemoveAppFiles: the application itself, so the next install deploys every file afresh.
+    .DESCRIPTION
+        The Python environment, rollback copies and backups in the state folder, and everything in the
+        app folder that is not data. Kept: client files, Global (_global.json), aicleaner-config.json,
+        contact files, profiles, the ignore list, the review queue (candidates), tab and tree state,
+        logs - every .json and .jsonl, logs\ and a clients folder inside it - and, in the state folder,
+        sessions, stored keys and lastgood. aicleaner's own Python processes are stopped first so the
+        environment is not held open; anything still in use is listed rather than stopping the run.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$StateFolder, [string]$Clients = '')
+    $doomed = @()
+    foreach ($name in 'venv', 'rollback', 'backups') {
+        $path = Join-Path $StateFolder $name
+        if (Test-Path -LiteralPath $path) { $doomed += Get-Item -LiteralPath $path -Force }
+    }
+    if (Test-Path -LiteralPath $AppRoot) {
+        $doomed += @(Get-ChildItem -LiteralPath $AppRoot -Force | Where-Object {
+            $keepFile = -not $_.PSIsContainer -and $_.Extension -in '.json', '.jsonl'
+            $keepDir = $_.PSIsContainer -and ($_.Name -eq 'logs' -or ($Clients -and (Test-SameFolder -Left $_.FullName -Right $Clients)))
+            -not ($keepFile -or $keepDir)
+        })
+    }
+    if (-not $doomed.Count) { Write-Status 'No application files were left to remove' -Level Detail; return }
+    if (-not (Confirm-Action -Message "Remove the application files too ($($doomed.Count) item(s): the Python environment, rollback copies, backups, leftover program files)? Your clients, Global and settings are kept." -Default 'Yes')) {
+        Write-Status 'Application files kept' -Level Detail
+        return
+    }
+    if (-not $PSCmdlet.ShouldProcess($AppRoot, 'Remove the application files')) { return }
+    $venv = Join-Path $StateFolder 'venv'
+    Get-Process -Name 'python', 'pythonw' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -and $_.Path.StartsWith($venv, [StringComparison]::OrdinalIgnoreCase) } |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    $left = @()
+    foreach ($item in $doomed) {
+        try { Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop }
+        catch { $left += $item.Name }
+    }
+    if ($left.Count) { Write-Status "Could not remove (in use?): $($left -join ', ') - delete them after a restart" -Level Warn }
+    else { Write-Status 'Application files removed; clients, Global and settings kept' -Level Detail }
+}
+
 function Invoke-Uninstall {
     [CmdletBinding(SupportsShouldProcess)]
     param()
@@ -2786,9 +2917,11 @@ function Invoke-Uninstall {
     if (-not $record) { throw "No deployment record at $script:RecordPath; nothing was deployed by this script" }
     $appRoot = [string]$record.install_path
     if (-not (Confirm-Action -Message "Remove aicleaner from ${appRoot}?" -Default 'Yes')) { throw 'Stopped at your request' }
-    if (@($record.targets).Count -gt 0) {
+    # The uninstaller also runs for -RemoveRemote alone: a remote connection outlives the wiring.
+    if (@($record.targets).Count -gt 0 -or $script:RemoveRemote) {
         $uninstallArgs = @('-Port', [string](Get-ConfiguredPort -AppRoot $appRoot))
         if ($RemoveData) { $uninstallArgs += '-RemoveSecrets' }
+        if ($script:RemoveRemote) { $uninstallArgs += '-RemoveRemote' }
         $have = Restore-RepoFile -AppRoot $appRoot -Relative 'Uninstall-AiCleaner.ps1' `
             -Url ([string]$record.repo_url) -Ref ([string]$record.ref)
         if ($have) { Invoke-AppScript -Path (Get-AppFile -AppRoot $appRoot -Name 'Uninstall-AiCleaner.ps1') -Arguments $uninstallArgs }
@@ -2804,6 +2937,7 @@ function Invoke-Uninstall {
     if ($RemoveData) { Remove-DeploymentData -AppRoot $appRoot -Clients ([string]$record.clients_path) }
     else { Write-Status "Data kept: $appRoot (config, Global, contact, logs) and $($record.clients_path) (client files)" -Level Detail }
     Remove-DeploymentRecord -AppRoot $appRoot
+    if ($script:RemoveAppFiles) { Remove-AppCode -AppRoot $appRoot -StateFolder $StateRoot -Clients ([string]$record.clients_path) }
     if ((Test-Path -LiteralPath $StateRoot) -and -not (Get-ChildItem -LiteralPath $StateRoot -Force | Select-Object -First 1)) {
         if ($PSCmdlet.ShouldProcess($StateRoot, 'Remove the empty state folder')) {
             Remove-Item -LiteralPath $StateRoot -Force
@@ -2827,8 +2961,12 @@ if ($LogPath -and -not $WhatIfPreference) {
 try {
     Write-Status "aicleaner deployment: $Action"
     # Whatever is beside this script (a contact file, a copied-out tree, a working copy) may be a
-    # OneDrive placeholder; fetch it all before anything reads or copies it.
-    Restore-CloudFiles -Folder $script:ScriptFolder | Out-Null
+    # OneDrive placeholder; fetch it all before anything reads or copies it. An uninstall copies
+    # nothing from here, so it does not wait on the walk.
+    if ($Action -ne 'Uninstall') {
+        Write-Status 'Checking the files beside this script - Please wait...'
+        Restore-CloudFiles -Folder $script:ScriptFolder | Out-Null
+    }
     switch ($Action) {
         'Install'   { Invoke-Install }
         'Update'    { Invoke-Update }

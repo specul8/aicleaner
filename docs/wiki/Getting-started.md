@@ -114,7 +114,21 @@ traffic through an empty filter. Every other answer has a parameter for scripted
 .\installer\Deploy-AiCleaner.ps1 -Action Update                  # newest release, data untouched
 .\installer\Deploy-AiCleaner.ps1 -Action Rollback                # the previous build back
 .\installer\Deploy-AiCleaner.ps1 -Action Uninstall               # wiring and code removed, data kept
+.\installer\Deploy-AiCleaner.ps1 -Action Uninstall -RemoveData   # the data too, after typing REMOVE
+.\installer\Deploy-AiCleaner.ps1 -Action Uninstall -RemoveAppFiles   # and the app itself, data kept
+.\installer\Deploy-AiCleaner.ps1 -Action Uninstall -RemoveRemote     # and offer to take remote access down
 ```
+
+`-RemoveAppFiles` takes the machine back to where an install deploys every file afresh: it also
+removes the Python environment, rollback copies, backups and anything left in the app folder that is
+not data. Your client files, Global, the configuration, contact, profiles, ignore list, review queue,
+logs and sessions are kept.
+
+`-RemoveRemote` offers to take remote access down: the tunnel on this machine, and - with the stored
+Cloudflare API token - its tunnel, DNS record and Access application in your account; the
+configuration forgets it. Without it, remote access is kept, and the next install asks whether to
+**keep** it or **replace** it with a fresh one. To take remote access down without uninstalling:
+`.\installer\Uninstall-AiCleaner.ps1 -RemoteOnly`.
 
 ## 2. Set the filter up (during the pause)
 

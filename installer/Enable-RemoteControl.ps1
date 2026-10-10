@@ -601,6 +601,31 @@ function Show-TokenSteps {
     Write-Status 'at the same screen as soon as this finishes; nothing here keeps it.' -Level Detail
 }
 
+function Get-HiddenTaskAction {
+    <#
+    .SYNOPSIS
+        A scheduled-task action that runs a PowerShell script with no window anyone can see (D175).
+    .DESCRIPTION
+        -WindowStyle Hidden is not enough: where Windows Terminal is the default terminal it ignores
+        the request, so the window stays on the desktop showing the script's output - and closing
+        it stops the task. conhost.exe --headless gives the script a console nobody can see, and
+        Windows Terminal is never handed it. Windows before 10 1809 has no --headless; there the
+        old action is used. The same function is in every script that registers a task, because
+        each one runs on its own.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Script, [string]$Arguments = '',
+          [Parameter(Mandatory)][string]$WorkingDirectory)
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $run = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Script`""
+    if ($Arguments) { $run += " $Arguments" }
+    $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+    if ([Environment]::OSVersion.Version.Build -ge 17763 -and (Test-Path -LiteralPath $conhost)) {
+        return New-ScheduledTaskAction -Execute $conhost -Argument "--headless `"$powershell`" $run" -WorkingDirectory $WorkingDirectory
+    }
+    return New-ScheduledTaskAction -Execute $powershell -Argument $run -WorkingDirectory $WorkingDirectory
+}
+
 function Install-TunnelTask {
     <#
     .SYNOPSIS
@@ -624,8 +649,7 @@ function Install-TunnelTask {
         [IO.File]::WriteAllBytes($tokenPath, [Security.Cryptography.ProtectedData]::Protect($bytes, $null, 'CurrentUser'))
     } finally { [Array]::Clear($bytes, 0, $bytes.Length) }
     & icacls $tokenPath /inheritance:r /grant:r "$($env:USERNAME):(R,W)" | Out-Null
-    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcher`"" -WorkingDirectory $AppRoot
+    $action = Get-HiddenTaskAction -Script $launcher -WorkingDirectory $AppRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) `
         -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)

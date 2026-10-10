@@ -404,6 +404,31 @@ function Save-LedgerPrevious {
     Write-JsonFile -Path $path -Object $doc
 }
 
+function Get-HiddenTaskAction {
+    <#
+    .SYNOPSIS
+        A scheduled-task action that runs a PowerShell script with no window anyone can see (D175).
+    .DESCRIPTION
+        -WindowStyle Hidden is not enough: where Windows Terminal is the default terminal it ignores
+        the request, so the window stays on the desktop showing the script's output - and closing
+        it stops the task. conhost.exe --headless gives the script a console nobody can see, and
+        Windows Terminal is never handed it. Windows before 10 1809 has no --headless; there the
+        old action is used. The same function is in every script that registers a task, because
+        each one runs on its own.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Script, [string]$Arguments = '',
+          [Parameter(Mandatory)][string]$WorkingDirectory)
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $run = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$Script`""
+    if ($Arguments) { $run += " $Arguments" }
+    $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+    if ([Environment]::OSVersion.Version.Build -ge 17763 -and (Test-Path -LiteralPath $conhost)) {
+        return New-ScheduledTaskAction -Execute $conhost -Argument "--headless `"$powershell`" $run" -WorkingDirectory $WorkingDirectory
+    }
+    return New-ScheduledTaskAction -Execute $powershell -Argument $run -WorkingDirectory $WorkingDirectory
+}
+
 function Confirm-TaskFromSyncedFolder {
     <#
     .SYNOPSIS
@@ -1327,9 +1352,7 @@ try {
         Write-Status "Registering logon task '$taskName'"
         $existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         $startScript = Join-Path $PSScriptRoot 'Start-AiCleaner.ps1'
-        $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-            -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$startScript`" -Detach" `
-            -WorkingDirectory $root
+        $action = Get-HiddenTaskAction -Script $startScript -Arguments '-Detach' -WorkingDirectory $root
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
         $taskSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 `
             -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable

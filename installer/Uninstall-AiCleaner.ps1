@@ -48,6 +48,15 @@
 .PARAMETER RemoveSecrets
     Also delete %USERPROFILE%\.aicleaner\secrets (gateway token and DPAPI-encrypted API key).
 
+.PARAMETER RemoveRemote
+    Also offer to take remote access down: the tunnel task (or service) and stored tokens here, and -
+    with the stored Cloudflare API token - the tunnel, its DNS record and the Access application in
+    the account; the config's remote block is cleared. Without it remote access is left as it is, and
+    a later install offers to keep it or replace it.
+
+.PARAMETER RemoteOnly
+    Take remote access down (as -RemoveRemote) and nothing else: aicleaner stays installed.
+
 .PARAMETER RemovePowerToys
     Also uninstall PowerToys (winget). Default: leave it installed, only the remap is removed.
 
@@ -76,6 +85,8 @@
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
     [switch]$RemoveSecrets,
+    [switch]$RemoveRemote,
+    [switch]$RemoteOnly,
     [switch]$RemovePowerToys,
     [ValidateRange(1024, 65535)][int]$Port = 8787,
     [AllowEmptyString()][string]$LogPath = $(
@@ -159,6 +170,49 @@ function Show-ManualTunnelSteps {
         Write-Status "  Zero Trust > Networks > Tunnels: delete the tunnel$named" -Level Detail
     }
     Write-Status '  https://dash.cloudflare.com/profile/api-tokens: delete the aicleaner API token' -Level Detail
+}
+
+function Clear-RemoteConfig {
+    <#
+    .SYNOPSIS
+        Forgets the remote connection in aicleaner-config.json once it has been taken down.
+    .DESCRIPTION
+        The config is the owner's data and survives an uninstall; left holding the old hostname and
+        tunnel ids, a reinstall adopted a connection that no longer existed. Remote access is turned
+        off and the ids and hostname removed; the rest of the config is untouched (backed up first).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$Root)
+    $path = Join-Path $Root 'aicleaner-config.json'
+    $config = Read-JsonFile -Path $path
+    if (-not $config -or -not $config.PSObject.Properties['remote']) { return }
+    if (-not $PSCmdlet.ShouldProcess($path, 'Forget the remote connection')) { return }
+    Backup-File -Path $path
+    foreach ($name in 'hostname', 'tunnel_id', 'tunnel_name', 'account_id', 'zone_id', 'access_app_id', 'dns_record_id',
+                      'access_app_mine', 'dns_record_mine', 'audience', 'team_domain', 'idp_id') {
+        $config.remote.PSObject.Properties.Remove($name)
+    }
+    Set-JsonProperty -Object $config.remote -Name 'enabled' -Value $false
+    Write-JsonFile -Path $path -Object $config
+    Write-Status 'The remote connection is forgotten in aicleaner-config.json' -Level Detail
+}
+
+function Invoke-RemoteRemoval {
+    <# Offers to take remote access down when asked; says what is left when not. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Root, [switch]$Asked)
+    $config = Read-JsonFile -Path (Join-Path $Root 'aicleaner-config.json')
+    $hostname = if ($config -and $config.PSObject.Properties['remote'] -and $config.remote.PSObject.Properties['hostname']) { [string]$config.remote.hostname } else { '' }
+    $here = $hostname -or (Get-ScheduledTask -TaskName 'aicleaner-tunnel' -ErrorAction SilentlyContinue) -or (Get-Service -Name 'Cloudflared' -ErrorAction SilentlyContinue)
+    if (-not $here) { return }
+    $name = if ($hostname) { "https://$hostname" } else { 'the remote connection' }
+    if (-not $Asked) {
+        Write-Status "Remote access kept ($name); -RemoveRemote takes it down" -Level Detail
+        return
+    }
+    if (Confirm-Action -Message "Take remote access down ($name): the tunnel here, and its tunnel, DNS record and Access application at Cloudflare?" -Default 'Yes') {
+        Remove-RemoteControl -Root $Root
+    } else { Write-Status "Remote access kept ($name)" -Level Detail }
 }
 
 function Remove-RemoteControl {
@@ -304,6 +358,7 @@ function Remove-RemoteControl {
         Show-ManualTunnelSteps -PublicHostname $hostname -TunnelName $tunnelName
     } else {
         Write-Status 'Tunnel, DNS and Access application removed from your Cloudflare account' -Level Done
+        Clear-RemoteConfig -Root $Root
         Write-Status 'The API token itself cannot delete itself (that needs a far broader permission):' -Level Warn
         Show-ManualTunnelSteps -TokenOnly
     }
@@ -675,6 +730,12 @@ if ($LogPath) {
 
 try {
     $root = $script:AppFolder
+    if ($RemoteOnly) {
+        # Remote access alone (a reinstall's "replace", or by hand): aicleaner stays as it is.
+        Invoke-RemoteRemoval -Root $root -Asked
+        Write-Status 'Remote access handled; nothing else was changed' -Level Done
+        return
+    }
     Write-Status "aicleaner uninstall (data files are kept) from $root"
     $isCheckout = Test-SourceCheckout -Folder $root
     if ($isCheckout) {
@@ -799,7 +860,9 @@ try {
     $proxyStopped = Stop-AiCleanerProcess -ProxyPort $Port -VenvFolders $venvFolders
 
     # --- 2b. Remote control: the connector here, and the tunnel in the account --------
-    Remove-RemoteControl -Root $root
+    # Only when asked (-RemoveRemote), and offered then: otherwise it is left for a later install to
+    # keep or replace.
+    Invoke-RemoteRemoval -Root $root -Asked:($RemoveRemote -or $RemoteOnly)
 
     # --- 4. CLAUDE.md block -------------------------------------------------------------
     $claudeMd = Join-Path $env:USERPROFILE '.claude\CLAUDE.md'
