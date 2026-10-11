@@ -775,9 +775,24 @@ def carries_token(value: str, mapper: Mapper | None) -> bool:
     return bool(pattern and pattern.search(value))
 
 
+# The shapes the placeholders above take (pending-1a2b3c, pending-1a2b3c.invalid, ...@pending.invalid,
+# Pending 1A2B3C). Reserved: a placeholder whose review entry has gone - ignored, added, removed -
+# still sits in the conversation history Claude Code resends (thinking is never rehydrated, D8), and
+# the detectors queued it as a new identifier with a placeholder of its own (D180).
+PLACEHOLDER_SHAPE = re.compile(
+    r"(?i)^(?:pending-[0-9a-f]{6,16}(?:@pending\.invalid|\.onmicrosoft\.invalid|\.sharepoint\.invalid|\.invalid)?"
+    r"|pending [0-9a-f]{6,16})$")
+
+
+def is_placeholder(value: str) -> bool:
+    """True for a string shaped like one of our own placeholders."""
+    return bool(PLACEHOLDER_SHAPE.match(str(value or "").strip()))
+
+
 def find_candidates(text: str, mapper: Mapper | None = None, resource_names: bool = False,
                     suppressed: list[tuple[str, str]] | None = None) -> Iterable[tuple[str, str, str, str]]:
-    """Every candidate the detectors find, less the ones built round one of our own tokens.
+    """Every candidate the detectors find, less the ones built round one of our own tokens, and our
+    own placeholders (D180).
 
     `suppressed`, when given, collects (value, kind) for each one the PUBLIC LIST took out - the
     same shape `scan_candidates` uses for what Policy C held back. The list has three times nearly
@@ -785,7 +800,7 @@ def find_candidates(text: str, mapper: Mapper | None = None, resource_names: boo
     back, not tokenised, not written anywhere a person looks (D13).
     """
     for found in _raw_candidates(text, mapper, resource_names, suppressed):
-        if not carries_token(found[0], mapper):
+        if not carries_token(found[0], mapper) and not is_placeholder(found[0]):
             yield found
 
 

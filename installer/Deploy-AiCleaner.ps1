@@ -2827,6 +2827,9 @@ function Update-Deployment {
         $fetched = Get-WorkingCopy -Folder $folder
         if ($fetched.Commit -and [string]$fetched.Commit -eq [string]$Record.commit) {
             Write-Status "Up to date: working copy ($(([string]$fetched.Commit).Substring(0, 12)))" -Level Done
+            # Still worth doing when nothing is new: an elevated re-run is how a task this account
+            # could not change gets converted (D175), and it used to stop before reaching it.
+            Update-TaskPath -AppRoot $appRoot
             $script:UpdateOutcome = 'current'; return
         }
         if (-not (Confirm-Action -Message "Update $appRoot from the working copy at ${folder}?" -Default 'Yes')) {
@@ -2853,7 +2856,7 @@ function Update-Deployment {
         $short = $release.Commit.Substring(0, 12)
         # The same commit from a different source is still a change of source: the record has to
         # move, or the next update goes back to the working copy.
-        if ($release.Commit -eq $Record.commit -and [string]$Record.ref -ne 'working-copy') { Write-Status "Up to date: $($Record.ref) ($short)" -Level Done; $script:UpdateOutcome = 'current'; return }
+        if ($release.Commit -eq $Record.commit -and [string]$Record.ref -ne 'working-copy') { Write-Status "Up to date: $($Record.ref) ($short)" -Level Done; Update-TaskPath -AppRoot $appRoot; $script:UpdateOutcome = 'current'; return }
         $installed = if ([string]$Record.commit) { ([string]$Record.commit).Substring(0, 12) } else { 'unknown' }
         if (-not (Confirm-Action -Message "Newer code is available: update $appRoot from $($Record.ref) ($installed) to $($release.Ref) ($short)?" -Default 'Yes')) {
             $script:UpdateOutcome = 'declined'; return
