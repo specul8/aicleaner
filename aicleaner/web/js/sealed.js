@@ -155,6 +155,14 @@ function askForCode(params, connect) {
   });
 }
 
+// Compressed answers (D178): opened with the browser's own DecompressionStream, where there is one.
+const CAN_GUNZIP = typeof DecompressionStream === 'function';
+
+async function gunzip(bytes) {
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
 function wrapFetch(longTerm, first, connect) {
   const plain = window.fetch.bind(window);
   let session = first;
@@ -181,7 +189,8 @@ function wrapFetch(longTerm, first, connect) {
     }
     const method = String(init.method || (typeof input === 'string' ? 'GET' : input.method) || 'GET').toUpperCase();
     const body = init.body == null ? null : String(init.body);
-    const inner = JSON.stringify({ method, path: url.pathname + url.search, body });
+    // `gzip`: this page can open a compressed answer (D178); a page from before it gets plain ones.
+    const inner = JSON.stringify({ method, path: url.pathname + url.search, body, gzip: CAN_GUNZIP });
     const started = performance.now();          // Diagnostics (feature 91): trip, then decryption
     let { response, mine } = await send(inner);
     if (response.status === 401) {
@@ -198,7 +207,7 @@ function wrapFetch(longTerm, first, connect) {
     const envelope = await response.json();
     const arrived = performance.now();
     const answer = JSON.parse(await openReply(mine, envelope));
-    const bytes = fromB64(answer.body || '');
+    const bytes = answer.encoding === 'gzip' ? await gunzip(fromB64(answer.body || '')) : fromB64(answer.body || '');
     if (url.pathname !== '/api/debug/timings') {
       note('sealed', performance.now() - started, { path: (url.pathname + url.search).slice(0, 300),
         trip: Math.round(arrived - started), decrypt: Math.round(performance.now() - arrived), bytes: bytes.length });

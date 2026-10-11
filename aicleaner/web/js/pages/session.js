@@ -532,6 +532,21 @@ function mergeEvents(held, newer) {
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq).slice(-KEPT_ON_PAGE);
 }
 
+// One session's state, asking only for what this page has not seen (D140): each session's last
+// answer is kept, and the server is told how far it covered (`through`) and which buffer it was; it
+// answers with the newer events (`delta`), or the whole list when there could be a gap. Used by the
+// poll AND by opening the page (D178): a switch that went through the address - the menu, a notice,
+// coming back from Settings - fetched the whole transcript again, 1.6 MB through the tunnel each time.
+async function fetchSessionState(name) {
+  if (!view.known) view.known = new Map();
+  const known = name ? view.known.get(name) : null;
+  const since = known && known.epoch ? `&since=${Number(known.through) || 0}&epoch=${encodeURIComponent(known.epoch)}` : '';
+  const answer = await getJSON(name ? `/api/session?name=${encodeURIComponent(name)}${since}` : '/api/session');
+  if (answer.delta) answer.events = mergeEvents(known ? known.events : [], answer.events || []);
+  if (answer.selected) view.known.set(answer.selected, answer);
+  return answer;
+}
+
 function sinceText(at) {
   if (!at) return '';
   const seconds = Math.max(0, Date.now() / 1000 - at);
@@ -1866,7 +1881,7 @@ export async function render(main, context = {}) {
   const toChat = Boolean(context.route && context.route.chat);
   let state;
   try {
-    state = await getJSON(asked ? `/api/session?name=${encodeURIComponent(asked)}` : '/api/session');
+    state = await fetchSessionState(asked);
   } catch (error) {
     main.replaceChildren(h('p', { class: 'muted' }, 'Driving a session is switched off (session.enabled in the config).'));
     return;
@@ -2110,17 +2125,10 @@ export async function render(main, context = {}) {
     const asked = view.name;
     const wasRunning = view.state && asked ? Boolean(current().running) : null;
     const timing = begin('refresh', { session: asked });
-    // Only what this page has not seen (D140): each session's last answer is kept, and the server
-    // is told how far that answer covered (`through`) and which buffer it was. Not the newest event
-    // the page holds: the stream adds only what it draws, so a notice can be missing below that.
-    // The server answers with the newer events (`delta`), or the whole list when there could be a
-    // gap. A switch back to a session seen before is a few bytes rather than its whole conversation.
-    if (!view.known) view.known = new Map();
-    const known = asked ? view.known.get(asked) : null;
-    const last = known ? Number(known.through) || 0 : 0;
-    const since = known && known.epoch ? `&since=${last}&epoch=${encodeURIComponent(known.epoch)}` : '';
-    const answer = await getJSON(`/api/session?name=${encodeURIComponent(view.name)}${since}`);
-    if (answer.delta) answer.events = mergeEvents(known ? known.events : [], answer.events || []);
+    // Only what this page has not seen (D140, fetchSessionState). `through` is how far the last
+    // answer covered, not the newest event the page holds: the stream adds only what it draws, so a
+    // notice can be missing below that. A switch back to a session seen before is a few bytes.
+    const answer = await fetchSessionState(view.name);
     timing.lap('fetch');
     // A poll answered before an event the stream has already drawn must not take that event away
     // (D111): the log redrew without it, then put it back on the next poll - lines vanished for a

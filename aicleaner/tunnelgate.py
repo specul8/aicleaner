@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,16 @@ MAX_SEALED_FILE = 50 * 1024 * 1024
 # Set on the inner request of a sealed envelope, so a handler that would stream answers in one piece.
 INSIDE_TUNNEL = web.RequestKey("aicleaner_inside_tunnel", bool)
 LOCKED = "locked: through the tunnel this page talks only in sealed requests. Enter the code."
+# Compressed before sealing (D178), for a page that says it can open gzip: an encrypted body is noise,
+# so nothing on the way - Cloudflare included - can compress it. Not what is already compressed.
+COMPRESS_FROM = 2048
+ALREADY_COMPRESSED = ("image/", "video/", "audio/", "application/pdf", "application/zip", "application/gzip",
+                      "application/x-7z", "font/")
+# An answer this large is logged with what asked for it (D178): a page once fetched 13.7 MB answers
+# again and again through the tunnel, and which request they were could not be told afterwards.
+LARGE_ANSWER = 4 * 1024 * 1024
+
+log = logging.getLogger("aicleaner.tunnelgate")
 
 
 def make_tunnel_gate(proxy: Any) -> Any:
@@ -60,6 +72,10 @@ def make_tunnel_gate(proxy: Any) -> Any:
         except (SealError, ValueError):
             return web.json_response({"error": "the sealed request did not open"}, status=400)
         answer = json.dumps(await _dispatch(request, inner)).encode("utf-8")
+        if len(answer) > LARGE_ANSWER:
+            target = str(inner.get("path") or "")[:200] if isinstance(inner, dict) else ""
+            log.warning("a sealed answer of %d bytes for %s %s", len(answer),
+                        inner.get("method", "GET") if isinstance(inner, dict) else "?", target)
         try:
             return web.json_response(proxy.tunnel_sessions.seal_reply(sid, seq, answer))
         except UnknownSession:
@@ -105,6 +121,7 @@ async def _dispatch(request: web.Request, inner: Any) -> dict[str, Any]:
     match.add_app(request.app)
     match.freeze()
     clone._match_info = match
+    gzip_ok = bool(inner.get("gzip"))
     try:
         response = await match.handler(clone)
     except web.HTTPException as exc:
@@ -113,13 +130,28 @@ async def _dispatch(request: web.Request, inner: Any) -> dict[str, Any]:
     if isinstance(response, web.FileResponse):
         # A file (a download, an image or PDF in a tab) has not been sent yet: read and sealed whole
         # (D168), up to a size the browser can hold while it decrypts.
-        return await asyncio.to_thread(_file_answer, response)
+        answer = await asyncio.to_thread(_file_answer, response)
+        return _compressed(answer, gzip_ok)
     if not isinstance(response, web.Response):
         return _answer(403, {"error": "this answer cannot be sealed: open it on the machine"})
     raw = response.body if isinstance(response.body, (bytes, bytearray)) else b""
-    return {"status": response.status, "type": response.content_type,
-            "disposition": response.headers.get("Content-Disposition", ""),
-            "body": base64.b64encode(bytes(raw)).decode("ascii")}
+    return _compressed({"status": response.status, "type": response.content_type,
+                        "disposition": response.headers.get("Content-Disposition", ""),
+                        "body": base64.b64encode(bytes(raw)).decode("ascii")}, gzip_ok)
+
+
+def _compressed(answer: dict[str, Any], gzip_ok: bool) -> dict[str, Any]:
+    """The answer with its body gzipped, for a page that can open it (D178). A transcript is mostly
+    repeated JSON and shrinks several times over; an image or a zip does not, so it is left."""
+    if not gzip_ok or str(answer.get("type", "")).startswith(ALREADY_COMPRESSED):
+        return answer
+    raw = base64.b64decode(answer.get("body") or "")
+    if len(raw) < COMPRESS_FROM:
+        return answer
+    packed = gzip.compress(raw, compresslevel=6)
+    if len(packed) >= len(raw):
+        return answer
+    return {**answer, "body": base64.b64encode(packed).decode("ascii"), "encoding": "gzip"}
 
 
 def _file_answer(response: web.FileResponse) -> dict[str, Any]:
