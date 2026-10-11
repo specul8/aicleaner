@@ -117,8 +117,12 @@ body { display: grid; grid-template-columns: 228px minmax(0, 1fr); }
 .tunnel-state.open { color: #d29922; border-color: #d29922; background: rgba(210, 153, 34, .12); }
 .tunnel-state .tunnel-lock-icon { display: inline-flex; }
 .tunnel-state .tunnel-lock-icon svg { width: 16px; height: 16px; }
-.tunnel-states { margin: 0 0 .6rem; display: grid; gap: .3rem .6rem; grid-template-columns: max-content 1fr; align-items: start; }
-.tunnel-states dt { margin: 0; white-space: nowrap; }
+/* Each state above its description, not beside it (the user, 2026-10-12): a max-content column of
+   unbreakable badges took the card's width and pushed the descriptions - and the page - sideways. */
+.tunnel-states { margin: 0 0 .6rem; display: grid; gap: .3rem; grid-template-columns: minmax(0, 1fr); }
+.tunnel-states dt { justify-self: start; max-width: 100%; }
+.tunnel-states dd + dt { margin-top: .4rem; }
+.tunnel-states dt { margin: 0; }
 .tunnel-states dd { margin: 0; font-size: 13px; }
 :root[data-nav="rail"] .tunnel-state { justify-content: center; padding: 5px; }
 :root[data-nav="rail"] .tunnel-state .tunnel-lock-text { display: none; }
@@ -691,7 +695,7 @@ form.rename { margin: 0; }
 .tree-row[data-depth="5"] { padding-left: 5rem; }
 .tree-row[data-depth="6"] { padding-left: 6rem; }
 .tree-row .tree-name { background: none; border: 0; color: inherit; font: inherit; text-align: left;
-                       padding: .1rem .2rem; cursor: default; flex: 1 0 auto;
+                       padding: .1rem .2rem; cursor: default; flex: 1 1 auto; min-width: 0;
                        display: inline-flex; align-items: baseline; gap: .3rem; }
 /* The triangle now means only open-or-closed, and the folder/file mark says which it is (39).
    A fixed width on the chevron keeps names aligned whether a row is a folder or a file. */
@@ -708,6 +712,8 @@ form.rename { margin: 0; }
   font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
   font-size: 13px; line-height: 1; }
 .tree-text { min-width: 0; }
+/* A root's name is its whole path: it breaks rather than widening the panel (2026-10-12). */
+.tree-root-name .tree-text { white-space: normal; overflow-wrap: anywhere; }
 .tree-row button.tree-name { cursor: pointer; }
 /* A folder that cannot be read (or a link out of the project): shown, marked, not usable. */
 .tree-row button.tree-name.blocked { cursor: not-allowed; opacity: .6; }
@@ -790,7 +796,8 @@ form.rename { margin: 0; }
 /* Workspace files: the list with the create question beside it, the browse button with Yes beside
    that (the user, 2026-10-05). An empty side column takes no room. */
 .p-ws { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
-.p-ws-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem .75rem; align-items: start; }
+.p-ws-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, max-content); gap: .4rem .75rem; align-items: start; }
+.p-ws-grid .create-offer, .p-ws-grid .create-offer p { overflow-wrap: anywhere; }
 .p-slot-create-ask, .p-slot-create-yes { max-width: 22rem; }
 .create-offer p { margin: 0 0 .2rem; }
 .p-tab-add { font-weight: 600; padding-inline: .7rem; }
@@ -1257,3 +1264,9 @@ dialog.wizard { width: min(46rem, 94vw); }
 .wizard-suggestions, .wizard-finds fieldset { display: grid; gap: .2rem; border: 1px solid var(--border); border-radius: .4rem; padding: .4rem .7rem; margin: .5rem 0; }
 .wizard-nav { margin-top: .8rem; }
 .wizard-counts { margin: .3rem 0 .6rem; }
+
+/* A long path with no spaces breaks inside the card instead of widening it - and the page - past the
+   screen (the user, 2026-10-12): the Folders card's list, and its box. */
+.in-use-folders li, .card .mono { overflow-wrap: anywhere; }
+.card textarea { max-width: 100%; box-sizing: border-box; }
+.card .form-row > textarea { flex: 1 1 18rem; min-width: 0; }
