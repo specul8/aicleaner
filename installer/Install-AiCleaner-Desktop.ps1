@@ -77,8 +77,12 @@
     wants the better reader.
 
 .PARAMETER AcceptDefaults
-    Take the default answer to every yes/no question without asking (what the deploy's "(A)ccept the
-    defaults" passes). A question with no default - an API key to paste - is still asked.
+    Take the default answer to every yes/no question without asking, except those about the topics in
+    -AskAbout. A question with no default - an API key to paste - is still asked.
+
+.PARAMETER AskAbout
+    With -AcceptDefaults: the topics still asked about (comma-separated or several), e.g.
+    claude-md,telemetry-vars. What the deploy passes for the numbers chosen from its list.
 
 .PARAMETER PythonExe
     Explicit Python executable for the venv. Default: auto-detect (py -3.13, then python).
@@ -125,8 +129,10 @@ param(
     [switch]$WithTesseract,
     [switch]$SkipSnippingTool,
     [string]$PythonExe = '',
-    # Take every Confirm-Action's default without asking (the deploy's "(A)ccept the defaults").
+    # Take every Confirm-Action's default without asking (the deploy's list of changes)...
     [switch]$AcceptDefaults,
+    # ...except the questions about these topics, which the person chose to change.
+    [string[]]$AskAbout = @(),
     [AllowEmptyString()][string]$LogPath = $(
         $base = if ($PSCommandPath) { [IO.Path]::GetFileNameWithoutExtension($PSCommandPath) } else { 'Install-AiCleaner-Desktop' }
         $dir = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
@@ -139,6 +145,7 @@ $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -L
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:AcceptDefaultsGiven = [bool]$AcceptDefaults
+$script:AskTopics = @($AskAbout | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 # --- Contact attribution (inlined per script so each script stays self-contained) ---------
 function Get-ContactInfo {
@@ -195,10 +202,15 @@ function Confirm-Action {
     [OutputType([bool])]
     param(
         [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('Yes', 'No')][string]$Default = 'No'
+        [ValidateSet('Yes', 'No')][string]$Default = 'No',
+        # Which change this question is about, so the deploy can ask about some and not others.
+        [string]$Topic = ''
     )
-    # -AcceptDefaults (the deploy's "(A)ccept the defaults", 2026-10-11): said, not asked.
-    if (Get-Variable -Name 'AcceptDefaultsGiven' -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+    # -AcceptDefaults (the deploy's list, 2026-10-11): every default is taken and said, except the
+    # topics the person chose to change (-AskAbout), which are asked.
+    $asked = @(Get-Variable -Name 'AskTopics' -Scope Script -ValueOnly -ErrorAction SilentlyContinue | ForEach-Object { $_ })
+    $accepting = Get-Variable -Name 'AcceptDefaultsGiven' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($accepting -and -not ($Topic -and $asked -contains $Topic)) {
         Write-Status "$Message -> $Default (the default)" -Level Detail
         return ($Default -eq 'Yes')
     }
@@ -446,7 +458,7 @@ function Confirm-TaskFromSyncedFolder {
         if ($full.StartsWith([IO.Path]::GetFullPath($oneDrive).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
             Write-Status "$Root is synced by OneDrive: a scheduled task would run code that anyone who can write to that folder can change." -Level Warn
             Write-Status 'Deploy with Deploy-AiCleaner.ps1 instead (code in %USERPROFILE%\.aicleaner\app).' -Level Detail
-            return (Confirm-Action -Message 'Register the scheduled task anyway?' -Default 'No')
+            return (Confirm-Action -Topic 'proxy-task' -Message 'Register the scheduled task anyway?' -Default 'No')
         }
     }
     return $true
@@ -563,7 +575,7 @@ function Install-Python {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $winget) { return $null }
     Write-Status 'No Python 3.11+ found on PATH (py launcher, python3, python).' -Level Warn
-    if (-not (Confirm-Action -Message 'Install Python 3.13 now with winget?' -Default 'Yes')) { return $null }
+    if (-not (Confirm-Action -Topic 'python' -Message 'Install Python 3.13 now with winget?' -Default 'Yes')) { return $null }
     if (-not $PSCmdlet.ShouldProcess('Python.Python.3.13', 'winget install')) { return $null }
     $savedEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -1145,7 +1157,7 @@ try {
     else {
         $changes | ForEach-Object { Write-Status $_ -Level Detail }
         Write-Status 'This puts Claude Desktop into gateway mode (separate Claude-3p profile) and makes its third-party settings window read-only.' -Level Warn
-        if (Confirm-Action -Message 'Write these policy values?' -Default 'Yes') {
+        if (Confirm-Action -Topic 'desktop-policy' -Message 'Write these policy values?' -Default 'Yes') {
             if ($current.Count -gt 0 -and $PSCmdlet.ShouldProcess($policyKey, 'Back up the existing values')) {
                 $backup = Backup-PolicyKey -KeyPath $policyKey
                 Write-Status "Existing policy saved to $backup (gateway token not included)" -Level Detail
@@ -1263,7 +1275,7 @@ try {
     # Credentials are read at proxy start, so a proxy that predates the key must be restarted once.
     $health = Test-Proxy -ProxyPort $Port
     $needsRestart = $health -and -not ($health.PSObject.Properties['credential_swap'] -and $health.credential_swap -contains 'anthropic')
-    if ($needsRestart -and (Confirm-Action -Message 'Proxy is running without the credential swap; restart it now?' -Default 'Yes')) {
+    if ($needsRestart -and (Confirm-Action -Topic 'proxy-task' -Message 'Proxy is running without the credential swap; restart it now?' -Default 'Yes')) {
         if ($PSCmdlet.ShouldProcess("port $Port", 'Stop proxy')) { Stop-Proxy -ProxyPort $Port | Out-Null }
         $health = $null
     }

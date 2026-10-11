@@ -1462,10 +1462,15 @@ function Invoke-Wiring {
         if ($desktopArgs -notcontains '-WithTesseract') { $desktopArgs += '-WithTesseract' }
     }
     $workstationArgs = if ($Role) { @($Role.Workstation) } else { $WorkstationArguments }
-    # One question for both installers' defaults, before either runs (the user, 2026-10-11).
-    if (Confirm-InstallerDefault -Targets $Targets -VSCodeArgs $vscodeArgs -DesktopArgs $desktopArgs) {
-        $vscodeArgs += '-AcceptDefaults'
-        $desktopArgs += '-AcceptDefaults'
+    # Both installers' changes listed before either runs; only the ones chosen are asked (2026-10-11).
+    $change = Select-InstallerChange -Targets $Targets -VSCodeArgs $vscodeArgs -DesktopArgs $desktopArgs
+    if ($change.Run) {
+        $vscodeArgs += @('-AcceptDefaults') + @($change.VSCodeArgs)
+        $desktopArgs += @('-AcceptDefaults') + @($change.DesktopArgs)
+        if ($change.Topics.Count) {
+            $vscodeArgs += @('-AskAbout', ($change.Topics -join ','))
+            $desktopArgs += @('-AskAbout', ($change.Topics -join ','))
+        }
     }
     if ($Targets -contains 'VSCode') {
         Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Install-AiCleaner-VSCode.ps1') -Arguments (@('-RegisterStartupTask') + $vscodeArgs)
@@ -1479,53 +1484,82 @@ function Invoke-Wiring {
     }
 }
 
-function Confirm-InstallerDefault {
+function Select-InstallerChange {
     <#
     .SYNOPSIS
-        Before the role installers run: their changes listed, and one either-or - accept the
-        defaults, or be asked each one (the user, 2026-10-11). Returns $true to accept.
+        Before the role installers run: their changes, numbered, each one its default - and which of
+        them to change (the user, 2026-10-11). Returns the installer topics to ask about and the switches
+        for the changes the deploy settles itself.
     .DESCRIPTION
-        The installers ask a yes/no before each change, and the answer is nearly always the default:
-        a long run of Enter presses for somebody new. Accepted, each installer is run with
-        -AcceptDefaults and takes every default without asking; the questions with no default (an API
-        key to paste) are still asked. Choosing asks each one as before - and answering one
-        differently can bring further questions.
+        The installers ask a yes/no before each change, and the answer is nearly always the default: a
+        long run of Enter presses for somebody new. Enter accepts the lot; numbers ("2 5") name the
+        changes to decide, and only their questions are asked - each installer runs with -AcceptDefaults
+        and -AskAbout those topics. A question with no default (an API key to paste) is still asked, and
+        answering one differently from its default may bring further questions.
     #>
     [CmdletBinding()]
-    [OutputType([bool])]
+    [OutputType([pscustomobject])]
     param([string[]]$Targets = @(), [string[]]$VSCodeArgs = @(), [string[]]$DesktopArgs = @())
-    $changes = New-Object System.Collections.Generic.List[string]
     $vscode = $Targets -contains 'VSCode'
     $desktop = $Targets -contains 'Desktop'
-    if (-not ($vscode -or $desktop)) { return $false }
-    $changes.Add("Python 3.13 (installed with winget if there is none) and aicleaner's Python environment")
-    if ($desktop) {
-        $changes.Add('Claude Desktop: its policy values, so it sends through aicleaner (third-party inference mode)')
-        $changes.Add('The Anthropic API key you paste, stored encrypted for this Windows account')
-        if ($DesktopArgs -contains '-RegisterBackupTask') { $changes.Add('A nightly backup of the Claude Desktop profile (03:00)') }
-    }
+    $result = [pscustomobject]@{ Run = ($vscode -or $desktop); Topics = @(); VSCodeArgs = @(); DesktopArgs = @() }
+    if (-not $result.Run) { return $result }
+    $items = New-Object System.Collections.Generic.List[pscustomobject]
+    $items.Add([pscustomobject]@{ Topic = 'python'; Text = "Install Python 3.13 with winget if there is none (aicleaner's Python environment is built either way)" })
     if ($vscode) {
-        $changes.Add('Claude Code settings: web-fetch preflight off, telemetry and error reporting off, MCP tool arguments kept tokenised')
+        $items.Add([pscustomobject]@{ Topic = 'claude-settings'; Text = 'Claude Code settings: web-fetch preflight off, telemetry and error reporting off' })
+        $items.Add([pscustomobject]@{ Topic = 'mcp-tokenise'; Text = "MCP servers' tool arguments kept tokenised" })
         $where = @()
         if ($VSCodeArgs -notcontains '-SkipVSCode') { $where += 'this PC' }
         if ($VSCodeArgs -notcontains '-SkipVSCodeServer') { $where += 'VS Code Server' }
-        if ($where.Count) { $changes.Add("VS Code telemetry off (settings for $($where -join ' and '))") }
-        $changes.Add('The aicleaner rules block in your CLAUDE.md (files converted locally, never sent)')
-        $changes.Add('Opt-out variables an earlier install set are removed; Desktop Commander telemetry off, if it is installed')
-        $changes.Add('User-scope telemetry variables are kept (removing them is a No by default)')
+        if ($where.Count) { $items.Add([pscustomobject]@{ Topic = 'vscode-telemetry'; Text = "VS Code telemetry off (settings for $($where -join ' and '))" }) }
+        $items.Add([pscustomobject]@{ Topic = 'claude-md'; Text = 'The aicleaner rules block in your CLAUDE.md (files converted locally, never sent)' })
+        $items.Add([pscustomobject]@{ Topic = 'desktop-commander'; Text = 'Desktop Commander telemetry off, if it is installed' })
+        $items.Add([pscustomobject]@{ Topic = 'telemetry-vars'; Text = 'User-scope telemetry variables kept (removing them is a No by default)' })
     }
-    $changes.Add('The aicleaner-proxy task at sign-in, and the proxy started now')
-    $screens = ($vscode -and $VSCodeArgs -notcontains '-SkipPowerToys') -or ($desktop -and $DesktopArgs -notcontains '-SkipPowerToys')
-    if ($screens) { $changes.Add('Screenshots: the Snipping Tool and PowerToys, your screenshot keys sending the text') }
-    $changes.Add('Document converters (pandoc, Poppler, the Office readers) and PSScriptAnalyzer, where missing')
+    if ($desktop) { $items.Add([pscustomobject]@{ Topic = 'desktop-policy'; Text = "Claude Desktop's policy values written, so it sends through aicleaner" }) }
+    $items.Add([pscustomobject]@{ Topic = 'proxy-task'; Text = 'The aicleaner-proxy task at sign-in, and the proxy started now' })
+    $items.Add([pscustomobject]@{ Topic = 'doc-tools'; Text = 'Document converters (pandoc, Poppler, the Office readers) installed where missing' })
+    if ($vscode) { $items.Add([pscustomobject]@{ Topic = 'script-analyzer'; Text = 'PSScriptAnalyzer installed, so the agent can check the PowerShell it writes' }) }
+
     Write-Host ''
     Write-Status 'The installer is about to make these changes, each one its default:' -Level Step
-    foreach ($change in $changes) { Write-Status "  - $change" -Level Detail }
-    $answer = Read-Either -Message 'Make them all, or decide each one?' -Default 'accept' -Options ([ordered]@{
-        'accept' = '(A)ccept the defaults - make all of these changes without asking each one'
-        'choose' = '(C)hoose each one - be asked before each change; answering one differently from its default may bring more questions'
-    })
-    return ($answer -eq 'accept')
+    for ($i = 0; $i -lt $items.Count; $i++) { Write-Host ("    {0,2}. {1}" -f ($i + 1), $items[$i].Text) }
+    $also = @('Opt-out variables an earlier install set are removed')
+    if ($desktop) { $also += 'You will be asked for the Anthropic API key Claude Desktop needs (stored encrypted)' }
+    foreach ($line in $also) { Write-Status "Also: $line" -Level Detail }
+    if ($script:Unattended) {
+        Write-Status 'All of them (default)' -Level Detail
+        return $result
+    }
+    $chosen = @()
+    for ($try = 0; $try -lt 3; $try++) {
+        $answer = ([string](Read-Host 'Type the numbers of any to change (e.g. 2 5), or just press Enter to accept them all')).Trim()
+        if (-not $answer) { break }
+        $numbers = @($answer -split '[\s,;]+' | Where-Object { $_ })
+        $bad = @($numbers | Where-Object { -not ($_ -match '^\d+$' -and [int]$_ -ge 1 -and [int]$_ -le $items.Count) })
+        if ($bad.Count -eq 0) { $chosen = @($numbers | ForEach-Object { $items[[int]$_ - 1] }); break }
+        Write-Status "Numbers from 1 to $($items.Count), separated by spaces - not $($bad -join ', ')" -Level Warn
+    }
+    if ($chosen.Count) {
+        Write-Status 'You will be asked about those; answering one differently from its default may bring more questions.' -Level Detail
+    }
+    # The two the deploy settles itself; the rest are the installers' own questions.
+    foreach ($item in $chosen) {
+        switch ($item.Topic) {
+            'doc-tools' {
+                if (-not (Confirm-Action -Message 'Install the document converters where missing?' -Default 'Yes')) {
+                    $result.VSCodeArgs += '-SkipDocToolsInstall'
+                    $result.DesktopArgs += '-SkipDocToolsInstall'
+                }
+            }
+            'script-analyzer' {
+                if (-not (Confirm-Action -Message 'Install PSScriptAnalyzer?' -Default 'Yes')) { $result.VSCodeArgs += '-SkipScriptAnalyzer' }
+            }
+            default { $result.Topics += $item.Topic }
+        }
+    }
+    return $result
 }
 
 function Get-ConfiguredPort {

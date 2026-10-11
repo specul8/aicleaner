@@ -101,8 +101,12 @@
     wants the better reader.
 
 .PARAMETER AcceptDefaults
-    Take the default answer to every yes/no question without asking (what the deploy's "(A)ccept the
-    defaults" passes). A question with no default - an API key to paste - is still asked.
+    Take the default answer to every yes/no question without asking, except those about the topics in
+    -AskAbout. A question with no default - an API key to paste - is still asked.
+
+.PARAMETER AskAbout
+    With -AcceptDefaults: the topics still asked about (comma-separated or several), e.g.
+    claude-md,telemetry-vars. What the deploy passes for the numbers chosen from its list.
 
 .PARAMETER PythonExe
     Explicit Python executable to use for the venv. Default: auto-detect (py -3.13, then python).
@@ -146,8 +150,10 @@ param(
     [switch]$WithTesseract,
     [switch]$SkipSnippingTool,
     [string]$PythonExe = '',
-    # Take every Confirm-Action's default without asking (the deploy's "(A)ccept the defaults").
+    # Take every Confirm-Action's default without asking (the deploy's list of changes)...
     [switch]$AcceptDefaults,
+    # ...except the questions about these topics, which the person chose to change.
+    [string[]]$AskAbout = @(),
     [AllowEmptyString()][string]$LogPath = $(
         $base = if ($PSCommandPath) { [IO.Path]::GetFileNameWithoutExtension($PSCommandPath) } else { 'Install-AiCleaner-VSCode' }
         $dir = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
@@ -160,6 +166,7 @@ $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -L
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:AcceptDefaultsGiven = [bool]$AcceptDefaults
+$script:AskTopics = @($AskAbout | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 
 # --- Contact attribution (inlined per script so each script stays self-contained) ---------
 function Get-ContactInfo {
@@ -216,10 +223,15 @@ function Confirm-Action {
     [OutputType([bool])]
     param(
         [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('Yes', 'No')][string]$Default = 'No'
+        [ValidateSet('Yes', 'No')][string]$Default = 'No',
+        # Which change this question is about, so the deploy can ask about some and not others.
+        [string]$Topic = ''
     )
-    # -AcceptDefaults (the deploy's "(A)ccept the defaults", 2026-10-11): said, not asked.
-    if (Get-Variable -Name 'AcceptDefaultsGiven' -Scope Script -ValueOnly -ErrorAction SilentlyContinue) {
+    # -AcceptDefaults (the deploy's list, 2026-10-11): every default is taken and said, except the
+    # topics the person chose to change (-AskAbout), which are asked.
+    $asked = @(Get-Variable -Name 'AskTopics' -Scope Script -ValueOnly -ErrorAction SilentlyContinue | ForEach-Object { $_ })
+    $accepting = Get-Variable -Name 'AcceptDefaultsGiven' -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($accepting -and -not ($Topic -and $asked -contains $Topic)) {
         Write-Status "$Message -> $Default (the default)" -Level Detail
         return ($Default -eq 'Yes')
     }
@@ -456,7 +468,7 @@ function Confirm-TaskFromSyncedFolder {
         if ($full.StartsWith([IO.Path]::GetFullPath($oneDrive).TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
             Write-Status "$Root is synced by OneDrive: a scheduled task would run code that anyone who can write to that folder can change." -Level Warn
             Write-Status 'Deploy with Deploy-AiCleaner.ps1 instead (code in %USERPROFILE%\.aicleaner\app).' -Level Detail
-            return (Confirm-Action -Message 'Register the scheduled task anyway?' -Default 'No')
+            return (Confirm-Action -Topic 'proxy-task' -Message 'Register the scheduled task anyway?' -Default 'No')
         }
     }
     return $true
@@ -553,7 +565,7 @@ function Install-Python {
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if (-not $winget) { return $null }
     Write-Status 'No Python 3.11+ found on PATH (py launcher, python3, python).' -Level Warn
-    if (-not (Confirm-Action -Message 'Install Python 3.13 now with winget?' -Default 'Yes')) { return $null }
+    if (-not (Confirm-Action -Topic 'python' -Message 'Install Python 3.13 now with winget?' -Default 'Yes')) { return $null }
     if (-not $PSCmdlet.ShouldProcess('Python.Python.3.13', 'winget install')) { return $null }
     $savedEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -625,7 +637,7 @@ function Merge-VSCodeSettings {
         Write-Status "$Label telemetry is already off" -Level Detail
         return $true
     }
-    if (-not (Confirm-Action -Message "Set telemetry.telemetryLevel=off in ${Label}?" -Default 'Yes')) {
+    if (-not (Confirm-Action -Topic 'vscode-telemetry' -Message "Set telemetry.telemetryLevel=off in ${Label}?" -Default 'Yes')) {
         return $false
     }
     Backup-File -Path $Path | Out-Null
@@ -1217,7 +1229,7 @@ try {
         Write-Status 'Claude Code settings already correct' -Level Detail
     } else {
         $changes | ForEach-Object { Write-Status $_ -Level Detail }
-        if (Confirm-Action -Message 'Apply these Claude Code settings changes?' -Default 'Yes') {
+        if (Confirm-Action -Topic 'claude-settings' -Message 'Apply these Claude Code settings changes?' -Default 'Yes') {
             Backup-File -Path $ClaudeSettingsPath | Out-Null
             Set-JsonProperty -Object $settings -Name 'skipWebFetchPreflight' -Value $true
             Write-JsonFile -Path $ClaudeSettingsPath -Object $settings
@@ -1233,7 +1245,7 @@ try {
     if ((Test-Path -LiteralPath $venvPython) -and (Test-Path -LiteralPath $cfgPath)) {
         $audited = Invoke-AiCleanerCli -Python $venvPython -AppRoot $root -Arguments @('mcp-audit', '--config', $cfgPath)
         if ($audited -ne 0) {
-            if (Confirm-Action -Message 'Keep those servers'' tool arguments tokenised (recommended)?' -Default 'Yes') {
+            if (Confirm-Action -Topic 'mcp-tokenise' -Message 'Keep those servers'' tool arguments tokenised (recommended)?' -Default 'Yes') {
                 [void](Invoke-AiCleanerCli -Python $venvPython -AppRoot $root `
                     -Arguments @('mcp-audit', '--config', $cfgPath, '--write'))
             } else {
@@ -1277,7 +1289,7 @@ try {
                   else { $existing.TrimEnd() + "`n`n" + $block + "`n" }
         if ($merged -eq $existing) {
             Write-Status 'CLAUDE.md rules block already current' -Level Detail
-        } elseif (Confirm-Action -Message "Write the aicleaner rules block to ${claudeMd}?" -Default 'Yes') {
+        } elseif (Confirm-Action -Topic 'claude-md' -Message "Write the aicleaner rules block to ${claudeMd}?" -Default 'Yes') {
             Backup-File -Path $claudeMd | Out-Null
             if ($PSCmdlet.ShouldProcess($claudeMd, 'Write CLAUDE.md')) {
                 $dir = Split-Path -Parent $claudeMd
@@ -1317,7 +1329,7 @@ try {
             $dc = Read-JsonFile -Path $dcConfig
             if ($dc.PSObject.Properties['telemetryEnabled'] -and -not [bool]$dc.telemetryEnabled) {
                 Write-Status 'Desktop Commander telemetry already off' -Level Detail
-            } elseif (Confirm-Action -Message 'Turn Desktop Commander telemetry off?' -Default 'Yes') {
+            } elseif (Confirm-Action -Topic 'desktop-commander' -Message 'Turn Desktop Commander telemetry off?' -Default 'Yes') {
                 Backup-File -Path $dcConfig | Out-Null
                 $telemetryBefore = if ($dc.PSObject.Properties['telemetryEnabled']) { $dc.telemetryEnabled } else { $null }
                 Save-LedgerPrevious -Section 'desktop_commander' -Name 'telemetryEnabled' -Value $telemetryBefore
@@ -1342,7 +1354,7 @@ try {
         Write-Status 'None set; nothing exports content around the proxy' -Level Detail
     } else {
         Write-Status 'OpenTelemetry exporters record tool output before hooks run and outside the proxy path' -Level Warn
-        if (Confirm-Action -Message 'Remove these user-scope variables?' -Default 'No') {
+        if (Confirm-Action -Topic 'telemetry-vars' -Message 'Remove these user-scope variables?' -Default 'No') {
             foreach ($v in $setVars) {
                 if ($PSCmdlet.ShouldProcess($v, 'Remove user environment variable')) {
                     # Names only: the values can be credentials, so they are not kept for a restore.
@@ -1377,7 +1389,7 @@ try {
             Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $taskSettings `
                 -Description 'aicleaner: local tokenise/rehydrate proxy for Claude Code' | Out-Null
         }
-        if ((Confirm-Action -Message 'Start the task now?' -Default 'Yes') -and $PSCmdlet.ShouldProcess($taskName, 'Start scheduled task')) {
+        if ((Confirm-Action -Topic 'proxy-task' -Message 'Start the task now?' -Default 'Yes') -and $PSCmdlet.ShouldProcess($taskName, 'Start scheduled task')) {
             Start-ScheduledTask -TaskName $taskName
             Start-Sleep -Seconds 3
         }

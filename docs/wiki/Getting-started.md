@@ -56,8 +56,9 @@ this machine, shown in green (for example "VS Code Server IS here"):
 
 If you take screenshots on the machine, the next question is which keys you press to take one; the
 installer makes them send the screenshot's text instead. Before the installers run, the changes they
-will make are listed with one choice: **(A)ccept the defaults** (no further questions, except an API
-key to paste for Claude Desktop) or **(C)hoose each one** (a yes/no before each change).
+will make are listed and numbered, each one its default. Press Enter to accept them all, or type the
+numbers of the ones you want to change (for example `2 5`): only those questions are asked, and
+answering one differently may bring a follow-up. Claude Desktop still asks for its API key.
 
 Every question says what Enter chooses. Yes/no questions show `[Y/n]`; a choice between two shows
 the letter to type in colour, for example `(Y)es / (N)o`. Folders are typed in full, the suggestion

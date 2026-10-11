@@ -91,6 +91,12 @@ class _BrokerStdin:
         asyncio.ensure_future(self._child.post("/eof"))
 
 
+# Fed into a re-attached session's output once the broker has replayed everything it kept, so the
+# session knows the rest is live (D179): a turn that ended during the replay is history, one that
+# ends after it is now.
+REPLAY_DONE = '{"type":"aicleaner_replay_done"}'
+
+
 class BrokerChild:
     """Claude Code as seen through its broker. Lines the broker has kept are replayed first, then
     new ones follow; `on_input` hears the prompts that were sent before this proxy started, so a
@@ -112,6 +118,7 @@ class BrokerChild:
         self._http: Any = None
         self._pump: asyncio.Task | None = None
         self._detached = False
+        self._replay_marked = False
 
     def _headers(self) -> dict[str, str]:
         from .broker import TOKEN_HEADER
@@ -126,7 +133,14 @@ class BrokerChild:
                 await self._http.close()
                 raise SessionError(f"the session broker refused this proxy ({r.status})")
             self.replay_upto = int((await r.json()).get("seq", 0))
+        if self.replay_upto == 0:
+            self._mark_replay_done()          # nothing to replay: everything from here is live
         self._pump = asyncio.ensure_future(self._read())
+
+    def _mark_replay_done(self) -> None:
+        if not self._replay_marked:
+            self._replay_marked = True
+            self.stdout.feed_data((REPLAY_DONE + "\n").encode("utf-8"))
 
     async def _read(self) -> None:
         buffer = b""
@@ -166,6 +180,8 @@ class BrokerChild:
             self.stderr.feed_data((line + "\n").encode("utf-8"))
         elif stream == "in" and self.on_input is not None and int(record.get("seq", 0)) <= self.replay_upto:
             self.on_input(line, at)
+        if int(record.get("seq", 0)) >= self.replay_upto:
+            self._mark_replay_done()
         return False
 
     async def post(self, path: str, data: bytes = b"") -> None:
@@ -625,6 +641,9 @@ class Session:
         # and are sent only when someone says so.
         self.queued: list[dict[str, Any]] = []
         self._flushing: asyncio.Task | None = None
+        # True while a re-attached broker replays what it kept (D179): a turn ending in the replay is
+        # history, so it sends nothing; the end of the replay decides.
+        self._replaying = False
 
     # ---- what the UI asks for ---------------------------------------------------------
 
@@ -761,6 +780,7 @@ class Session:
         self.session_id = ""
         self.last_error = ""
         self._briefed = False
+        self._replaying = False
         self.project = str(folder)
         self.started_at = time.time()
         command = self._command(folder, resume, model)
@@ -830,6 +850,9 @@ class Session:
         text = " ".join(b.get("text", "") for b in (message.get("message") or {}).get("content") or []
                         if isinstance(b, dict) and b.get("type") == "text")
         if text:
+            # A turn was asked for before the restart; a replayed result after it means it ended.
+            # Whatever is left when the replay ends is whether a turn is still running (D179).
+            self.busy = True
             self._emit({"type": "prompt", "text": text, "at": at})
 
     async def reattach(self, folder: Path, launch: dict[str, Any], published: dict[str, Any]) -> None:
@@ -845,6 +868,7 @@ class Session:
         self.last_error = ""
         self._briefed = True           # the brief went with the first prompt, before the restart
         self._load_queue()
+        self._replaying = True
         resume = str(launch.get("resume") or "")
         if resume and self.project:
             # Only what came before this sitting: the resumed conversation writes to the file the
@@ -1125,8 +1149,9 @@ class Session:
             log.warning("could not keep the waiting prompts in %s: %s", path, exc)
 
     def _load_queue(self) -> None:
-        """Waiting prompts from before a proxy restart come back held: the turn they waited on may
-        have ended unseen, so they wait for a person to send them rather than going on their own."""
+        """Waiting prompts from before a proxy restart come back, and go when the turn they waited
+        on ends - or, if it ended while the proxy was down, as soon as the replay shows it (D179).
+        They came back held at first, which stranded a prompt across every deploy made mid-turn."""
         path = self._queue_file()
         self.queued = []
         if path is None or not path.is_file():
@@ -1139,7 +1164,7 @@ class Session:
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("id"):
                 self.queued.append({"id": str(item["id"]), "text": item["text"],
-                                    "at": float(item.get("at") or 0), "held": True})
+                                    "at": float(item.get("at") or 0), "held": bool(item.get("held"))})
 
     async def cancel_queued(self, item_id: str) -> None:
         """Drop one waiting prompt."""
@@ -1383,6 +1408,11 @@ class Session:
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text:
                     continue
+                if text == REPLAY_DONE:
+                    # Live from here (D179): idle now means the prompts that waited can go.
+                    self._replaying = False
+                    self._flush_soon()
+                    continue
                 try:
                     event = json.loads(text)
                 except json.JSONDecodeError:
@@ -1446,7 +1476,8 @@ class Session:
         if event.get("type") == "result":
             self.turns += 1
             self.busy = False
-            self._flush_soon()                 # the next waiting prompt, if any (D176)
+            if not self._replaying:
+                self._flush_soon()             # the next waiting prompt, if any (D176)
         elif event.get("type") in ("exited", "stopped"):
             self.busy = False
         # Everything is broadcast; only what the page draws or reads back is kept (KEPT_EVENTS).
