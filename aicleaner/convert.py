@@ -175,8 +175,8 @@ def windows_powershell() -> str | None:
     """Windows PowerShell 5.1 by its full path, or None off Windows.
 
     It has to be 5.1: the WinRT projections were taken out of PowerShell 7, so the OCR type
-    cannot be loaded there at all. This is the same reason Capture-TextFromScreen.ps1 refuses
-    PS7, and the full System32 path is the same idiom restart.py uses.
+    cannot be loaded there at all; Read-ImageText.ps1 refuses PS7 for the same reason. The full
+    System32 path is the same idiom restart.py uses.
     """
     if os.name != "nt":
         return None

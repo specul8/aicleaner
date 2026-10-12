@@ -1161,15 +1161,9 @@ function Restore-CloudFiles {
 # What a client PC actually runs. Everything else - the proxy, its package, the UI, the public
 # identifier list, the other installers - belongs on a machine with an agent on it.
 $script:WorkstationFiles = @(
-    'Install-AiCleaner-Workstation.ps1',   # the wiring
-    'Capture-TextFromScreen.ps1',          # what the shortcut points at, so it needs a settled home
-    'Read-ImageText.ps1',                  # the OCR and the column rebuild - Capture cannot read without it
-    # Capture-TextFromScreen.ps1 is the one script here that is not standalone: the OCR and the
-    # column rebuild live in the reader, shared so the proxy and the shortcut cannot give
-    # different answers for the same image. Leaving it out is D51 - the deploy reported success
-    # and the first press of Win+Shift+T failed with the missing-companion message the capture
-    # script raises itself, on the machine whose entire purpose is that shortcut.
-    'Read-ImageText.ps1',
+    'Install-AiCleaner-Workstation.ps1',   # the wiring (the screenshot keys -> Snipping Tool's extractor)
+    # No screen-capture script or OCR reader: aicleaner's own capture was withdrawn (2026-10-13); the
+    # reader stays with the proxy, which reads images inside requests, and a client PC runs no proxy.
     'Uninstall-AiCleaner.ps1',             # and a way back out
     'Remove-WorkstationSetup.ps1'
 )
@@ -1452,7 +1446,7 @@ function Invoke-Wiring {
     $needed = @{
         VSCode      = @('Install-AiCleaner-VSCode.ps1')
         Desktop     = @('Install-AiCleaner-Desktop.ps1')
-        Workstation = @('Install-AiCleaner-Workstation.ps1', 'Capture-TextFromScreen.ps1')
+        Workstation = @('Install-AiCleaner-Workstation.ps1')
     }
     foreach ($target in $Targets) {
         foreach ($file in $needed[$target]) {
@@ -1848,7 +1842,7 @@ function Write-NextSteps {
     $steps = New-Object System.Collections.Generic.List[string]
 
     if ($Targets -contains 'Workstation') {
-        $steps.Add("Take a screenshot with your screenshot keys (or CTRL+ALT+T): the text lands on the clipboard, spacing kept, ready to paste.")
+        $steps.Add("Paste text, not screenshots: Win+Shift+T (or your remapped screenshot keys) copies the text from part of the screen.")
         $steps.Add("Run this script on the machine where the agent runs, if you have not already.")
     }
     if ($proxyHere) {
@@ -2088,8 +2082,9 @@ function Read-ScreenshotShortcut {
         Which keys this person presses to take a screenshot, asked straight after "do you take
         screenshots" (the user, 2026-10-11) and handed to the installer as -ScreenshotKeys.
     .DESCRIPTION
-        The installer remaps those keys to aicleaner's screen capture. It used to ask this
-        itself, steps later, in a prompt of its own style; asked here, the subject is asked once.
+        The installer offers to remap those keys to Snipping Tool's text extractor (Win+Shift+T), or
+        leaves them alone ('none', and no PowerToys; the user, 2026-10-13). It used to ask this itself,
+        steps later, in a prompt of its own style; asked here, the subject is asked once.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -2100,8 +2095,9 @@ function Read-ScreenshotShortcut {
         'ctrl+prtsc'  = 'Ctrl+PrtSc'
         'alt+prtsc'   = 'Alt+PrtSc'
         'other'       = 'Something else (type the keys)'
+        'none'        = 'Leave my screenshot key alone (no remap, no PowerToys)'
     })
-    if ($keys -ne 'other') { return $keys }
+    if ($keys -ne 'other') { return $keys }      # 'none' included: the installer reads it as leave alone
     for ($try = 0; $try -lt 3; $try++) {
         $typed = (Read-Value -Message 'Type them, e.g. ctrl+alt+p' -Default 'win+shift+s').ToLowerInvariant()
         if ($typed -match '^[a-z0-9]+([+ ,-][a-z0-9]+)*$') { return $typed }

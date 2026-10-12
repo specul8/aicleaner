@@ -7,13 +7,10 @@
     machine needs neither. What it does need is the screenshot habit, because screenshots are taken
     here and pasted into the window here. This script:
       - makes sure Snipping Tool is present and new enough for its text extractor
-      - installs PowerToys (user scope) and remaps the screenshot keys to aicleaner's screen capture,
-        so the screenshot reflex puts text on the clipboard with its spacing kept, which the proxy
-        can filter, rather than an image, which it cannot
-      - adds a Start Menu shortcut (Ctrl+Alt+T) for Capture-TextFromScreen.ps1, which reads the text
-        off part of the screen with columns intact, for tables that Snipping Tool flattens
-      - installs Tesseract (an administrator prompt, once), which the capture reads with as well as
-        Windows' own engine, keeping the better reading of each word
+      - offers to remap the keys you press for a screenshot to Win+Shift+T, Snipping Tool's text
+        extractor, and installs PowerToys (user scope) to do it, so what reaches the clipboard is
+        text, which the proxy can filter, rather than an image, which it cannot. Declined, neither
+        happens.
       - turns VS Code's own telemetry off (a setting on this machine, not the VM)
     It deliberately does NOT set ANTHROPIC_BASE_URL here: a base URL on this machine would also
     apply to any local Claude Code session, where no proxy is listening, and fail it closed.
@@ -21,22 +18,15 @@
     What it changes outside its own folder is recorded in
     %USERPROFILE%\.aicleaner\install-changes.json, so Uninstall-AiCleaner.ps1 puts it back.
 
-.PARAMETER SkipCaptureShortcut
-    Skip the Start Menu shortcut for the screen-text tool.
-
 .PARAMETER ScreenshotKeys
-    The keys you press now for a screenshot, e.g. 'win+shift+s' or 'ctrl+prtsc'. Asked for when not
-    given: the point is to remap the shortcut you already use.
+    The keys you press now for a screenshot, e.g. 'win+shift+s' or 'ctrl+prtsc', or 'none' to leave them
+    alone (and skip PowerToys). Asked for when not given: the point is to remap the shortcut you already use.
 
 .PARAMETER SkipPowerToys
     Skip PowerToys and the Keyboard Manager remap.
 
 .PARAMETER SkipSnippingTool
     Skip checking and installing Snipping Tool (Microsoft.ScreenSketch 11.2503.29.0+).
-
-.PARAMETER SkipTesseract
-    Skip installing Tesseract. With it, the screen capture reads with Tesseract as well as Windows'
-    own engine and keeps the better reading of each word; without it, Windows' engine alone.
 
 .PARAMETER VSCodeSettingsPath
     VS Code user settings on this machine. Default %APPDATA%\Code\User\settings.json. Pass '' to
@@ -64,11 +54,9 @@
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
 param(
-    [switch]$SkipCaptureShortcut,
     [switch]$SkipPowerToys,
     [string]$ScreenshotKeys = '',
     [switch]$SkipSnippingTool,
-    [switch]$SkipTesseract,
     [AllowEmptyString()][string]$VSCodeSettingsPath = (Join-Path $env:APPDATA 'Code\User\settings.json'),
     [AllowEmptyString()][string]$LogPath = $(
         $base = if ($PSCommandPath) { [IO.Path]::GetFileNameWithoutExtension($PSCommandPath) } else { 'Install-AiCleaner-Workstation' }
@@ -286,11 +274,14 @@ function ConvertFrom-KeyCodes {
 function Get-ScreenshotKeys {
     <#
     .SYNOPSIS
-        The keys this person presses for a screenshot, as PowerToys key codes.
+        The keys this person presses for a screenshot, as PowerToys key codes, or '' when they want
+        them left alone.
     .DESCRIPTION
         Remapping the shortcut somebody already uses is the point: the habit stays, and what it
         does changes. Assuming everyone presses Win+Shift+S would leave most people's habit
-        untouched and the remap useless to them.
+        untouched and the remap useless to them. The remap is offered, not imposed: "Leave my
+        screenshot key alone" skips it, and PowerToys with it (the user, 2026-10-13). -ScreenshotKeys
+        'none' says the same without asking.
 
         The question is asked with Read-Host rather than the bootstrap's helpers: this script is
         copied to machines on its own, so anything it calls has to be defined in it. Answering
@@ -299,6 +290,7 @@ function Get-ScreenshotKeys {
     [CmdletBinding()]
     [OutputType([string])]
     param([string]$Preferred = '')
+    if ($Preferred -eq 'none') { return '' }
     if ($Preferred) { return (ConvertTo-KeyCodes -Keys $Preferred) }
     $options = [ordered]@{
         '1' = @{ Codes = '91;16;83'; Label = 'Win+Shift+S (the Snipping Tool shortcut)' }
@@ -306,9 +298,11 @@ function Get-ScreenshotKeys {
         '3' = @{ Codes = '162;44';   Label = 'Ctrl+PrtSc' }
         '4' = @{ Codes = '164;44';   Label = 'Alt+PrtSc' }
         '5' = @{ Codes = '';         Label = 'Something else (type the keys)' }
+        '6' = @{ Codes = 'none';     Label = 'Leave my screenshot key alone (no remap, no PowerToys)' }
     }
     Write-Host ''
-    Write-Host 'Which keys do you press now to take a screenshot?' -ForegroundColor Cyan
+    Write-Host 'Which keys do you press now to take a screenshot? They can be remapped to Win+Shift+T,' -ForegroundColor Cyan
+    Write-Host "Snipping Tool's text extractor, so what you paste is text the proxy can filter." -ForegroundColor Cyan
     foreach ($number in $options.Keys) {
         $marker = if ($number -eq '1') { '*' } else { ' ' }
         Write-Host ("  {0}{1}. {2}" -f $marker, $number, $options[$number].Label)
@@ -317,6 +311,7 @@ function Get-ScreenshotKeys {
     if (-not $answer) { $answer = '1' }
     if (-not $options.Contains($answer)) { throw "Not one of the choices: $answer" }
     $codes = [string]$options[$answer].Codes
+    if ($codes -eq 'none') { return '' }
     if ($codes) { return $codes }
     $typed = ([string](Read-Host 'Type them, e.g. ctrl+alt+p')).Trim()
     if (-not $typed) { throw 'No keys given' }
@@ -326,13 +321,13 @@ function Get-ScreenshotKeys {
 function Install-PowerToysTextExtractor {
     <#
     Installs PowerToys (winget, per user), enables Keyboard Manager and remaps the screenshot keys
-    this person already presses so they start aicleaner's screen capture (New-CaptureRemap), which
-    keeps the text's rows, columns and spacing. PowerToys' own Text Extractor is switched OFF so it
-    never claims Win+Shift+T ahead of Snipping Tool. Idempotent: existing settings are merged, not replaced.
-    Returns $true when ready.
+    (FromKeys, from Get-ScreenshotKeys) to Win+Shift+T, so the screenshot reflex lands on Snipping
+    Tool's text extractor. PowerToys' own Text Extractor is switched OFF so it never claims Win+Shift+T
+    ahead of Snipping Tool. Idempotent: existing settings are merged, not replaced. Returns $true when
+    ready. (2026-10-13: back to this after aicleaner's own screen capture was withdrawn, D181-D190.)
     #>
     [CmdletBinding(SupportsShouldProcess)]
-    param()
+    param([Parameter(Mandatory)][string]$FromKeys)
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     $exe = @("$env:LOCALAPPDATA\PowerToys\PowerToys.exe", "$env:ProgramFiles\PowerToys\PowerToys.exe") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
     if (-not $exe) {
@@ -371,11 +366,12 @@ function Install-PowerToysTextExtractor {
     Set-JsonProperty -Object $rootCfg.enabled -Name 'TextExtractor' -Value $false
     Set-JsonProperty -Object $rootCfg -Name 'startup' -Value $true
     Write-JsonFile -Path $rootPath -Object $rootCfg
-    # Keyboard Manager: whatever this person presses for a screenshot -> aicleaner's capture,
-    # global, merged into the default profile.
-    $fromKeys = Get-ScreenshotKeys -Preferred $ScreenshotKeys
-    $fromLabel = ConvertFrom-KeyCodes -Codes $fromKeys
-    $ourRemap = Get-CaptureRemap -FromKeys $fromKeys
+    # Keyboard Manager: the screenshot keys -> Win+Shift+T (91;16;84), global, merged into the default profile.
+    $fromLabel = ConvertFrom-KeyCodes -Codes $FromKeys
+    if ($FromKeys -eq '91;16;84') {
+        Write-Status 'That is already the Snipping Tool text extractor shortcut; no remap needed' -Level Done
+        return $true
+    }
     $kbmSettings = Join-Path $settingsDir 'Keyboard Manager\settings.json'
     if (-not (Test-Path -LiteralPath $kbmSettings)) {
         Write-JsonFile -Path $kbmSettings -Object ([pscustomobject]@{ name = 'Keyboard Manager'; version = '1'; properties = [pscustomobject]@{
@@ -391,17 +387,17 @@ function Install-PowerToysTextExtractor {
     if (-not $kbm.PSObject.Properties['remapShortcuts']) { Set-JsonProperty -Object $kbm -Name 'remapShortcuts' -Value ([pscustomobject]@{ global = @(); appSpecific = @() }) }
     # Whatever that shortcut did before this: theirs to have back, and without this line the
     # uninstaller has no way of knowing there was anything.
-    $previousRemap = @($kbm.remapShortcuts.global | Where-Object { [string]$_.originalKeys -eq $fromKeys } |
+    $previousRemap = @($kbm.remapShortcuts.global | Where-Object { [string]$_.originalKeys -eq $FromKeys } |
         Select-Object -First 1)
     $previousKeys = if ($previousRemap.Count -gt 0 -and $previousRemap[0].PSObject.Properties['newRemapKeys']) { [string]$previousRemap[0].newRemapKeys } else { '' }
-    Save-LedgerPrevious -Section 'powertoys_remap' -Name $fromKeys -Value $(if ($previousKeys) { $previousKeys } else { $null })
-    $global_ = @($kbm.remapShortcuts.global | Where-Object { [string]$_.originalKeys -ne $fromKeys })
-    $global_ += $ourRemap
+    Save-LedgerPrevious -Section 'powertoys_remap' -Name $FromKeys -Value $(if ($previousKeys) { $previousKeys } else { $null })
+    $global_ = @($kbm.remapShortcuts.global | Where-Object { [string]$_.originalKeys -ne $FromKeys })
+    $global_ += [pscustomobject]@{ originalKeys = $FromKeys; newRemapKeys = '91;16;84' }
     Set-JsonProperty -Object $kbm.remapShortcuts -Name 'global' -Value $global_
     Write-JsonFile -Path $kbmPath -Object $kbm
     # The newer editor shows its own copy of the mappings, editorSettings.json, and went on showing
-    # the old Win+Shift+T after the engine's file had changed (the user, 2026-10-12). Without the
-    # copy it builds a new one from the engine's mappings the next time it opens.
+    # an old mapping after the engine's file had changed (the user, 2026-10-12). Without the copy it
+    # builds a new one from the engine's mappings the next time it opens.
     $editorCopy = Join-Path $settingsDir 'Keyboard Manager\editorSettings.json'
     if (Test-Path -LiteralPath $editorCopy) {
         Backup-File -Path $editorCopy | Out-Null
@@ -409,180 +405,11 @@ function Install-PowerToysTextExtractor {
         Write-Status 'Keyboard Manager editor: its old copy of the mappings set aside (backed up beside it); it rebuilds from the live ones' -Level Detail
     }
 
-    Set-PrintScreenSnipping -FromKeys $fromKeys
-
     # PowerToys reads module settings at start; restart it so the remap is live now.
     Get-Process PowerToys -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Start-Process -FilePath $exe | Out-Null
-    if ($ourRemap.operationType -eq 1) {
-        Write-Status "PowerToys running: $fromLabel now opens aicleaner's screen capture (text with its spacing kept)" -Level Done
-    } else {
-        Write-Status "PowerToys running: $fromLabel now opens the Snipping Tool text extractor (Win+Shift+T)" -Level Done
-    }
-    return $true
-}
-
-function Get-CaptureRemap {
-    <#
-    .SYNOPSIS
-        The Keyboard Manager entry for the screenshot keys: start aicleaner's screen capture.
-    .DESCRIPTION
-        The keys used to go to Win+Shift+T, Snipping Tool's text extractor, which puts every
-        segment after a run of spaces on a line of its own: a console summary pasted as a column
-        of fragments (the user, 2026-10-12). Capture-TextFromScreen.ps1 keeps the rows, columns
-        and indentation, so the keys start it instead (operationType 1, run a program).
-
-        powershell.exe, not pwsh: Windows' OCR is a WindowsRuntime API that PowerShell 7 cannot
-        reach. Started through conhost --headless, as the scheduled tasks are (D175), so there is
-        no console window, and with PowerToys' window type left Normal: Hidden makes PowerToys
-        hide every window the program opens, the capture's own overlay included, so the keys
-        seemed to do nothing (D190, the engine's log, the user's device, 2026-10-12). "Start
-        another" when it is already running, because PowerToys matches on the program and a
-        conhost.exe is nearly always running. Without the capture script beside this one, the
-        keys go to the text extractor as before rather than to nothing.
-    #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$FromKeys)
-    $folder = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
-    $capture = Join-Path $folder 'Capture-TextFromScreen.ps1'
-    if (-not (Test-Path -LiteralPath $capture)) {
-        Write-Status "Capture-TextFromScreen.ps1 is not in $folder; the screenshot keys open the Snipping Tool text extractor instead" -Level Warn
-        return [pscustomobject]@{ originalKeys = $FromKeys; newRemapKeys = '91;16;84'; exactMatch = $false; operationType = 0 }
-    }
-    return [pscustomobject]@{
-        originalKeys                   = $FromKeys
-        newRemapKeys                   = ''
-        exactMatch                     = $false
-        operationType                  = 1
-        runProgramFilePath             = Join-Path $env:WINDIR 'System32\conhost.exe'
-        runProgramArgs                 = "--headless `"$(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe')`" -NoProfile -ExecutionPolicy Bypass -File `"$capture`""
-        runProgramStartInDir           = $folder
-        runProgramElevationLevel       = 0
-        runProgramAlreadyRunningAction = 1
-        runProgramStartWindowType      = 0
-    }
-}
-
-function Set-PrintScreenSnipping {
-    <#
-    .SYNOPSIS
-        Print Screen opens Snipping Tool, for the times a picture is what is wanted.
-    .DESCRIPTION
-        The screenshot keys give text; a picture is still wanted now and then, and Windows' own
-        setting sends Print Screen to Snipping Tool (the user, 2026-10-12). Win+Shift+T stays
-        Snipping Tool's text extractor. Left alone when Print Screen is itself the screenshot key.
-        The value before is recorded, so the uninstaller can put it back.
-    #>
-    [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][string]$FromKeys)
-    if ($FromKeys -eq '44') {
-        Write-Status 'Print Screen is your screenshot key, so it stays the text capture' -Level Detail
-        return
-    }
-    $path = 'HKCU:\Control Panel\Keyboard'
-    $name = 'PrintScreenKeyForSnippingEnabled'
-    $item = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
-    $before = if ($item -and $item.PSObject.Properties[$name]) { [int]$item.$name } else { $null }
-    if ($before -eq 1) {
-        Write-Status 'Print Screen already opens Snipping Tool, for pictures' -Level Detail
-        return
-    }
-    Save-LedgerPrevious -Section 'windows_keyboard' -Name $name -Value $before
-    if ($PSCmdlet.ShouldProcess("$path\$name", 'Set to 1')) {
-        Set-ItemProperty -LiteralPath $path -Name $name -Value 1 -Type DWord
-        Write-Status 'Print Screen now opens Snipping Tool, for when a picture is what you want (a picture is not filtered)' -Level Done
-    }
-}
-function Get-CaptureShortcutPath {
-    <# Where the Start Menu shortcut for the screen-text tool lives. #>
-    return (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\aicleaner text from screen.lnk')
-}
-
-function Install-CaptureShortcut {
-    <#
-    .SYNOPSIS
-        A Start Menu shortcut (hotkey Ctrl+Alt+T) for Capture-TextFromScreen.ps1, which reads the
-        text off part of the screen so what gets pasted is text the proxy can filter.
-    .DESCRIPTION
-        It runs under powershell.exe on purpose: Windows' OCR engine is a WindowsRuntime API and
-        PowerShell 7 cannot reach it.
-    #>
-    [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][string]$Root)
-    $script = Join-Path $Root 'Capture-TextFromScreen.ps1'
-    if (-not (Test-Path -LiteralPath $script)) {
-        Write-Status 'Capture-TextFromScreen.ps1 is not beside this script; skipping the shortcut' -Level Warn
-        return $false
-    }
-    $shortcut = Get-CaptureShortcutPath
-    if (-not $PSCmdlet.ShouldProcess($shortcut, 'Create the screen-text shortcut')) { return $false }
-    $shell = New-Object -ComObject WScript.Shell
-    $link = $shell.CreateShortcut($shortcut)
-    $link.TargetPath = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $link.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
-    $link.WorkingDirectory = $Root
-    $link.Description = 'aicleaner: read the text off part of the screen (columns intact)'
-    $link.IconLocation = 'imageres.dll,68'
-    $link.Hotkey = 'CTRL+ALT+T'
-    $link.Save()
-    Write-Status "Shortcut created: $shortcut (Ctrl+Alt+T)" -Level Done
-    return $true
-}
-
-function Find-Tesseract {
-    <# tesseract.exe on PATH or where its installer puts it (it leaves PATH alone), or ''. #>
-    [CmdletBinding()]
-    [OutputType([string])]
-    param()
-    $onPath = Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($onPath) { return $onPath.Source }
-    $bases = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'Tesseract-OCR' }
-    if ($env:LOCALAPPDATA) { $bases += Join-Path $env:LOCALAPPDATA 'Programs\Tesseract-OCR' }
-    foreach ($base in $bases) {
-        $exe = Join-Path $base 'tesseract.exe'
-        if (Test-Path -LiteralPath $exe) { return $exe }
-    }
-    return ''
-}
-
-function Install-Tesseract {
-    <#
-    .SYNOPSIS
-        Tesseract, the capture's second reader (2026-10-13): on 25 of the user's screenshots it read
-        what Windows' engine got wrong (l as 1, $ as S, 0 as D) and said when it was unsure, so the
-        two together beat either. Returns $true when it is installed.
-    .DESCRIPTION
-        winget's UB-Mannheim.TesseractOCR, which has only a machine-wide installer: Windows asks for
-        an administrator's consent once. It is recorded, so the uninstaller can say it was ours; it
-        is not removed by it, as PowerToys is not.
-    #>
-    [CmdletBinding(SupportsShouldProcess)]
-    [OutputType([bool])]
-    param()
-    $found = Find-Tesseract
-    if ($found) {
-        Write-Status "Tesseract present ($found)" -Level Detail
-        Save-LedgerPrevious -Section 'tesseract_install' -Name 'installed_by_aicleaner' -Value $false
-        return $true
-    }
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if (-not $winget) {
-        Write-Status 'winget is not available, so Tesseract was not installed; the capture reads with the Windows engine alone' -Level Warn
-        return $false
-    }
-    if (-not $PSCmdlet.ShouldProcess('UB-Mannheim.TesseractOCR', 'winget install (asks for administrator consent)')) { return $false }
-    Write-Status 'Installing Tesseract: Windows will ask for administrator consent once' -Level Detail
-    $savedEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { & $winget.Source install -e --id UB-Mannheim.TesseractOCR --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null }
-    finally { $ErrorActionPreference = $savedEap }
-    $found = Find-Tesseract
-    if (-not $found) {
-        Write-Status "Tesseract did not install (winget exit $LASTEXITCODE; was the consent prompt declined?). The capture reads with the Windows engine alone; run this again to retry." -Level Warn
-        return $false
-    }
-    Save-LedgerPrevious -Section 'tesseract_install' -Name 'installed_by_aicleaner' -Value $true
-    Write-Status "Tesseract installed ($found): the capture now reads with both engines" -Level Done
+    Write-Status "PowerToys running: $fromLabel now opens the Snipping Tool text extractor (Win+Shift+T)" -Level Done
     return $true
 }
 
@@ -659,22 +486,13 @@ try {
     }
     if ($SkipPowerToys) { Write-Status 'PowerToys step skipped' -Level Detail }
     else {
-        Write-Status 'Screenshot shortcut: remapping it to the screen capture (text with its spacing kept)'
-        Install-PowerToysTextExtractor | Out-Null
-    }
-
-    # --- 1a. A second reader for the capture -----------------------------------
-    if ($SkipTesseract) { Write-Status 'Tesseract step skipped: the capture reads with the Windows engine alone' -Level Detail }
-    else {
-        Write-Status 'Tesseract, the second reader for the screen capture'
-        Install-Tesseract | Out-Null
-    }
-
-    # --- 1b. Screen text with columns intact ---------------------------------
-    if ($SkipCaptureShortcut) { Write-Status 'Screen-text shortcut skipped' -Level Detail }
-    else {
-        Write-Status 'Shortcut for reading text off the screen (Ctrl+Alt+T)'
-        Install-CaptureShortcut -Root $(if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }) | Out-Null
+        # Offered, not imposed (the user, 2026-10-13): "leave my screenshot key alone" skips PowerToys too.
+        $fromKeys = Get-ScreenshotKeys -Preferred $ScreenshotKeys
+        if (-not $fromKeys) { Write-Status 'Screenshot key left alone: no remap, and PowerToys not installed for it' -Level Detail }
+        else {
+            Write-Status 'Screenshot shortcut: remapping it to the Snipping Tool text extractor'
+            Install-PowerToysTextExtractor -FromKeys $fromKeys | Out-Null
+        }
     }
 
     # --- 2. VS Code telemetry (this machine hosts the window) ----------------
@@ -707,7 +525,7 @@ try {
         }
     }
 
-    Write-Status 'Workstation ready: your screenshot keys (and Ctrl+Alt+T) put the text on the clipboard, spacing kept; paste text, not screenshots' -Level Done
+    Write-Status 'Workstation ready: paste text, not screenshots (Win+Shift+T extracts the text from part of the screen)' -Level Done
     Write-Status 'The proxy, the mapping and the UI live on the VS Code server VM; reach the UI through VS Code port forwarding.' -Level Detail
 }
 catch {

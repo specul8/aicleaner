@@ -3,11 +3,9 @@
     Reads the text out of an image with Windows' own OCR engine, rows and columns intact.
 
 .DESCRIPTION
-    Two callers need this and they need the same answer, so it lives in one file.
-
-      - the proxy, which reads an image that arrived in a request so its words can be filtered
-        (aicleaner/convert.py runs this script)
-      - Capture-TextFromScreen.ps1, which reads part of the screen so it can be pasted as text
+    The proxy runs this (aicleaner/convert.py) to read an image that arrived in a request, so its
+    words can be filtered. It also read the screen for aicleaner's own capture tool until that was
+    withdrawn (2026-10-13); the screenshot keys now go to Snipping Tool's text extractor.
 
     The engine returns a box for every word, and those boxes are used to rebuild rows and columns:
     a three-column grid comes back as three columns rather than one long list, which is what
