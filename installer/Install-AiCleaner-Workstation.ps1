@@ -392,6 +392,15 @@ function Install-PowerToysTextExtractor {
     $global_ += $ourRemap
     Set-JsonProperty -Object $kbm.remapShortcuts -Name 'global' -Value $global_
     Write-JsonFile -Path $kbmPath -Object $kbm
+    # The newer editor shows its own copy of the mappings, editorSettings.json, and went on showing
+    # the old Win+Shift+T after the engine's file had changed (the user, 2026-10-12). Without the
+    # copy it builds a new one from the engine's mappings the next time it opens.
+    $editorCopy = Join-Path $settingsDir 'Keyboard Manager\editorSettings.json'
+    if (Test-Path -LiteralPath $editorCopy) {
+        Backup-File -Path $editorCopy | Out-Null
+        Remove-Item -LiteralPath $editorCopy -Force
+        Write-Status 'Keyboard Manager editor: its old copy of the mappings set aside (backed up beside it); it rebuilds from the live ones' -Level Detail
+    }
 
     # PowerToys reads module settings at start; restart it so the remap is live now.
     Get-Process PowerToys -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -416,9 +425,12 @@ function Get-CaptureRemap {
         and indentation, so the keys start it instead (operationType 1, run a program).
 
         powershell.exe, not pwsh: Windows' OCR is a WindowsRuntime API that PowerShell 7 cannot
-        reach. "Start another" when it is already running, because PowerToys matches on the
-        program and some powershell.exe is nearly always running; "show the window" would bring
-        that one forward and capture nothing. Without the capture script beside this one, the
+        reach. Started through conhost --headless, as the scheduled tasks are (D175), so there is
+        no console window, and with PowerToys' window type left Normal: Hidden makes PowerToys
+        hide every window the program opens, the capture's own overlay included, so the keys
+        seemed to do nothing (D190, the engine's log, the user's device, 2026-10-12). "Start
+        another" when it is already running, because PowerToys matches on the program and a
+        conhost.exe is nearly always running. Without the capture script beside this one, the
         keys go to the text extractor as before rather than to nothing.
     #>
     [CmdletBinding()]
@@ -434,12 +446,12 @@ function Get-CaptureRemap {
         newRemapKeys                   = ''
         exactMatch                     = $false
         operationType                  = 1
-        runProgramFilePath             = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        runProgramArgs                 = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$capture`""
+        runProgramFilePath             = Join-Path $env:WINDIR 'System32\conhost.exe'
+        runProgramArgs                 = "--headless `"$(Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe')`" -NoProfile -ExecutionPolicy Bypass -File `"$capture`""
         runProgramStartInDir           = $folder
         runProgramElevationLevel       = 0
         runProgramAlreadyRunningAction = 1
-        runProgramStartWindowType      = 1
+        runProgramStartWindowType      = 0
     }
 }
 
