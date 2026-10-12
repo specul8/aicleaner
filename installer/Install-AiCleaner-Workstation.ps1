@@ -12,6 +12,8 @@
         can filter, rather than an image, which it cannot
       - adds a Start Menu shortcut (Ctrl+Alt+T) for Capture-TextFromScreen.ps1, which reads the text
         off part of the screen with columns intact, for tables that Snipping Tool flattens
+      - installs Tesseract (an administrator prompt, once), which the capture reads with as well as
+        Windows' own engine, keeping the better reading of each word
       - turns VS Code's own telemetry off (a setting on this machine, not the VM)
     It deliberately does NOT set ANTHROPIC_BASE_URL here: a base URL on this machine would also
     apply to any local Claude Code session, where no proxy is listening, and fail it closed.
@@ -31,6 +33,10 @@
 
 .PARAMETER SkipSnippingTool
     Skip checking and installing Snipping Tool (Microsoft.ScreenSketch 11.2503.29.0+).
+
+.PARAMETER SkipTesseract
+    Skip installing Tesseract. With it, the screen capture reads with Tesseract as well as Windows'
+    own engine and keeps the better reading of each word; without it, Windows' engine alone.
 
 .PARAMETER VSCodeSettingsPath
     VS Code user settings on this machine. Default %APPDATA%\Code\User\settings.json. Pass '' to
@@ -62,6 +68,7 @@ param(
     [switch]$SkipPowerToys,
     [string]$ScreenshotKeys = '',
     [switch]$SkipSnippingTool,
+    [switch]$SkipTesseract,
     [AllowEmptyString()][string]$VSCodeSettingsPath = (Join-Path $env:APPDATA 'Code\User\settings.json'),
     [AllowEmptyString()][string]$LogPath = $(
         $base = if ($PSCommandPath) { [IO.Path]::GetFileNameWithoutExtension($PSCommandPath) } else { 'Install-AiCleaner-Workstation' }
@@ -523,6 +530,62 @@ function Install-CaptureShortcut {
     return $true
 }
 
+function Find-Tesseract {
+    <# tesseract.exe on PATH or where its installer puts it (it leaves PATH alone), or ''. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $onPath = Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    $bases = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'Tesseract-OCR' }
+    if ($env:LOCALAPPDATA) { $bases += Join-Path $env:LOCALAPPDATA 'Programs\Tesseract-OCR' }
+    foreach ($base in $bases) {
+        $exe = Join-Path $base 'tesseract.exe'
+        if (Test-Path -LiteralPath $exe) { return $exe }
+    }
+    return ''
+}
+
+function Install-Tesseract {
+    <#
+    .SYNOPSIS
+        Tesseract, the capture's second reader (2026-10-13): on 25 of the user's screenshots it read
+        what Windows' engine got wrong (l as 1, $ as S, 0 as D) and said when it was unsure, so the
+        two together beat either. Returns $true when it is installed.
+    .DESCRIPTION
+        winget's UB-Mannheim.TesseractOCR, which has only a machine-wide installer: Windows asks for
+        an administrator's consent once. It is recorded, so the uninstaller can say it was ours; it
+        is not removed by it, as PowerToys is not.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([bool])]
+    param()
+    $found = Find-Tesseract
+    if ($found) {
+        Write-Status "Tesseract present ($found)" -Level Detail
+        Save-LedgerPrevious -Section 'tesseract_install' -Name 'installed_by_aicleaner' -Value $false
+        return $true
+    }
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Write-Status 'winget is not available, so Tesseract was not installed; the capture reads with the Windows engine alone' -Level Warn
+        return $false
+    }
+    if (-not $PSCmdlet.ShouldProcess('UB-Mannheim.TesseractOCR', 'winget install (asks for administrator consent)')) { return $false }
+    Write-Status 'Installing Tesseract: Windows will ask for administrator consent once' -Level Detail
+    $savedEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & $winget.Source install -e --id UB-Mannheim.TesseractOCR --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null }
+    finally { $ErrorActionPreference = $savedEap }
+    $found = Find-Tesseract
+    if (-not $found) {
+        Write-Status "Tesseract did not install (winget exit $LASTEXITCODE; was the consent prompt declined?). The capture reads with the Windows engine alone; run this again to retry." -Level Warn
+        return $false
+    }
+    Save-LedgerPrevious -Section 'tesseract_install' -Name 'installed_by_aicleaner' -Value $true
+    Write-Status "Tesseract installed ($found): the capture now reads with both engines" -Level Done
+    return $true
+}
+
 function Install-SnippingTool {
     <#
     Ensures Snipping Tool (Microsoft.ScreenSketch) is present and new enough for its text extractor
@@ -598,6 +661,13 @@ try {
     else {
         Write-Status 'Screenshot shortcut: remapping it to the screen capture (text with its spacing kept)'
         Install-PowerToysTextExtractor | Out-Null
+    }
+
+    # --- 1a. A second reader for the capture -----------------------------------
+    if ($SkipTesseract) { Write-Status 'Tesseract step skipped: the capture reads with the Windows engine alone' -Level Detail }
+    else {
+        Write-Status 'Tesseract, the second reader for the screen capture'
+        Install-Tesseract | Out-Null
     }
 
     # --- 1b. Screen text with columns intact ---------------------------------

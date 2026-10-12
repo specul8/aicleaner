@@ -446,6 +446,10 @@ function Restore-InstallChanges {
         else { Set-ItemProperty -LiteralPath 'HKCU:\Control Panel\Keyboard' -Name 'PrintScreenKeyForSnippingEnabled' -Value ([int]$was) -Type DWord }
         Write-Status 'Print Screen key put back the way it was' -Level Detail
     }
+    $tesseract = & $section 'tesseract_install'
+    if ($tesseract -and $tesseract.PSObject.Properties['installed_by_aicleaner'] -and [bool]$tesseract.installed_by_aicleaner) {
+        Write-Status 'Tesseract was installed by aicleaner and is left in place; remove it with: winget uninstall UB-Mannheim.TesseractOCR' -Level Detail
+    }
     $install = & $section 'powertoys_install'
     if ($install -and $install.PSObject.Properties['installed_by_aicleaner'] -and [bool]$install.installed_by_aicleaner -and -not $RemovePowerToys) {
         Write-Status 'PowerToys was installed by aicleaner; run again with -RemovePowerToys to uninstall it' -Level Detail

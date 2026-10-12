@@ -141,17 +141,26 @@ function Read-OcrPass {
 function Repair-OcrWord {
     <#
     .SYNOPSIS
-        A zero the engine read as a letter, put back, in a word that is otherwise a number.
+        The engines' habitual misreadings of screen text, put back where nothing else fits.
     .DESCRIPTION
-        Console fonts draw zero slashed or dotted, and the engine reads it as a slashed O
-        ("127.0.0.1" came back as "127.0.<slashed o>.1"). Only in a word with a digit in it, and
-        a plain O only between digits or dots, so a name keeps its letters.
+        Each rule is narrow, so a hash, an ID, a host name or an address keeps its characters:
+          - a zero read as a slashed O, or as @ in a version ("127.0.<slashed o>.1", "v@.9.211"):
+            only in a word with a digit in it, and O or @ only beside digits and dots
+          - a dash read as an em or en dash ("Format<em dash>Table", "d<em dash x4>"): only in a word
+            with a letter or digit in it, never one standing alone
+          - an l read as 1 mid-word ("AiC1eaner", "disp1ayName"): only after a letter and before a lower-case one,
+            in a word with no other digit
     #>
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    if ($Text -match '[A-Za-z0-9]') { $Text = $Text -replace '[–—]', '-' }
+    if ($Text -cmatch '^[^0-9]*1[^0-9]*$') { $Text = $Text -creplace '(?<=[A-Za-z])1(?=[a-z])', 'l' }
     if ($Text -notmatch '\d') { return $Text }
-    return (($Text -replace '[\xD8\xF8]', '0') -replace '(?<=[\d.])[Oo](?=[\d.])', '0')
+    $Text = $Text -replace '[\xD8\xF8]', '0'
+    $Text = $Text -replace '(?<=[\d.])[Oo@](?=[\d.])', '0'
+    # "@.9" or "v@.9": a version's leading zero, at the start of the word or after its v.
+    return ($Text -replace '(?<=^[vV]?)@(?=\.\d)', '0')
 }
 
 function Test-WordOverlap {
@@ -197,6 +206,145 @@ function Merge-OcrReading {
     }
     for ($s = 0; $s -lt $Second.Count; $s++) { if (-not $usedSecond.Contains($s)) { $merged.Add($Second[$s]) } }
     return $merged
+}
+
+function Find-Tesseract {
+    <#
+    .SYNOPSIS
+        tesseract.exe on PATH or where its installer puts it, or '' (aicleaner/convert.py looks in
+        the same places). The build winget installs leaves PATH alone.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $onPath = Get-Command tesseract -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($onPath) { return $onPath.Source }
+    $bases = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ 'Tesseract-OCR' }
+    if ($env:LOCALAPPDATA) { $bases += Join-Path $env:LOCALAPPDATA 'Programs\Tesseract-OCR' }
+    foreach ($base in $bases) {
+        $exe = Join-Path $base 'tesseract.exe'
+        if (Test-Path -LiteralPath $exe) { return $exe }
+    }
+    return ''
+}
+
+function Read-TesseractWord {
+    <#
+    .SYNOPSIS
+        Every word Tesseract finds, with its box and confidence (0-100), the image read at twice
+        its size. Boxes come back in the image's own pixels.
+    .DESCRIPTION
+        Its TSV goes to a file and is read as UTF-8: through standard output Windows PowerShell
+        decodes it with the console's code page, and anything past ASCII would be mangled.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ImagePath, [Parameter(Mandatory)][string]$Tesseract, [double]$Scale = 2)
+    Add-Type -AssemblyName System.Drawing
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('aicleaner-tess-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $work -Force | Out-Null
+    try {
+        $source = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $ImagePath).Path)
+        try {
+            $big = New-Object System.Drawing.Bitmap([int]($source.Width * $Scale), [int]($source.Height * $Scale))
+            $graphics = [System.Drawing.Graphics]::FromImage($big)
+            $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $graphics.DrawImage($source, 0, 0, $big.Width, $big.Height)
+            $graphics.Dispose()
+        } finally { $source.Dispose() }
+        $scaled = Join-Path $work 'in.png'
+        $big.Save($scaled, [System.Drawing.Imaging.ImageFormat]::Png)
+        $big.Dispose()
+        $base = Join-Path $work 'out'
+        # Its warnings ("box outside rectangle") go to stderr, which Windows PowerShell turns into
+        # errors that stop the script however they are redirected; the exit code says what matters.
+        $savedEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & $Tesseract $scaled $base --psm 3 tsv 2>$null | Out-Null }
+        finally { $ErrorActionPreference = $savedEap }
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath "$base.tsv")) { throw "tesseract failed (exit $LASTEXITCODE)" }
+        $words = New-Object System.Collections.Generic.List[object]
+        foreach ($row in ([IO.File]::ReadAllLines("$base.tsv", [Text.Encoding]::UTF8) | Select-Object -Skip 1)) {
+            $cells = $row -split "`t"
+            if ($cells.Count -lt 12 -or $cells[0] -ne '5' -or -not $cells[11].Trim()) { continue }
+            $words.Add([pscustomobject]@{
+                Text = Repair-OcrWord -Text $cells[11]
+                X = [double]$cells[6] / $Scale; Y = [double]$cells[7] / $Scale
+                Width = [double]$cells[8] / $Scale; Height = [double]$cells[9] / $Scale
+                Confidence = [double]$cells[10]
+            })
+        }
+        return $words
+    } finally { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Merge-EngineReading {
+    <#
+    .SYNOPSIS
+        Windows' reading and Tesseract's as one, word by word (2026-10-13).
+    .DESCRIPTION
+        Weighed on 25 of the user's own screenshots: Windows' engine misreads l as 1 or I, $ as S
+        and 0 as D, where Tesseract, when confident, is right; Tesseract's own mistakes come with a
+        low confidence, and it reads frames of # as rows of H at confidence 0. So, for each stretch
+        the two read differently:
+          - one reading the other one plus more ("Ro" and "Ronin"): the longer
+          - Tesseract at ConfidentAt or above for every word of it: Tesseract's
+          - otherwise: Windows'
+        A word only Tesseract saw is kept when its confidence reaches KeepAlone (its 0s are frames
+        and noise); a word only Windows saw is kept.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Windows,
+          [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Tesseract,
+          [double]$ConfidentAt = 80, [double]$KeepAlone = 40)
+    $merged = New-Object System.Collections.Generic.List[object]
+    $usedWindows = New-Object System.Collections.Generic.HashSet[int]
+    $usedTesseract = New-Object System.Collections.Generic.HashSet[int]
+    for ($t = 0; $t -lt $Tesseract.Count; $t++) {
+        if ($usedTesseract.Contains($t)) { continue }
+        $rivals = @(for ($w = 0; $w -lt $Windows.Count; $w++) {
+            if (-not $usedWindows.Contains($w) -and (Test-WordOverlap -One $Tesseract[$t] -Other $Windows[$w])) { $w } })
+        if ($rivals.Count -eq 0) {
+            if ($Tesseract[$t].Confidence -ge $KeepAlone) { $merged.Add($Tesseract[$t]) }
+            [void]$usedTesseract.Add($t)
+            continue
+        }
+        # Every Tesseract word over the same stretch, so a word one engine split is weighed whole.
+        $mine = @(for ($m = $t; $m -lt $Tesseract.Count; $m++) {
+            $candidate = $Tesseract[$m]
+            if (-not $usedTesseract.Contains($m) -and @($rivals | Where-Object { Test-WordOverlap -One $candidate -Other $Windows[$_] }).Count) { $m } })
+        $tesseractText = (@($mine | ForEach-Object { $Tesseract[$_].Text }) -join ' ')
+        $windowsText = (@($rivals | ForEach-Object { $Windows[$_].Text }) -join ' ')
+        $lowest = (@($mine | ForEach-Object { $Tesseract[$_].Confidence }) | Measure-Object -Minimum).Minimum
+        $takeTesseract = if ($tesseractText.Length -gt $windowsText.Length -and
+                             $tesseractText.StartsWith($windowsText, [StringComparison]::OrdinalIgnoreCase)) { $true }
+                         elseif ($windowsText.Length -gt $tesseractText.Length -and
+                                 $windowsText.StartsWith($tesseractText, [StringComparison]::OrdinalIgnoreCase)) { $false }
+                         else { $lowest -ge $ConfidentAt }
+        if ($takeTesseract) { foreach ($m in $mine) { $merged.Add($Tesseract[$m]) } }
+        else { foreach ($w in $rivals) { $merged.Add($Windows[$w]) } }
+        foreach ($m in $mine) { [void]$usedTesseract.Add($m) }
+        foreach ($w in $rivals) { [void]$usedWindows.Add($w) }
+    }
+    for ($w = 0; $w -lt $Windows.Count; $w++) { if (-not $usedWindows.Contains($w)) { $merged.Add($Windows[$w]) } }
+    return $merged
+}
+
+function Get-ImageWord {
+    <#
+    .SYNOPSIS
+        The words of an image as both engines read them, merged; Windows' alone when Tesseract is
+        not installed or fails (Get-OcrWords, Read-TesseractWord, Merge-EngineReading).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ImagePath)
+    $windows = @(Get-OcrWords -ImagePath $ImagePath)
+    $tesseract = Find-Tesseract
+    if (-not $tesseract) { return $windows }
+    try { $theirs = @(Read-TesseractWord -ImagePath $ImagePath -Tesseract $tesseract) }
+    catch {
+        Write-Verbose "Tesseract could not read it, so Windows' reading alone: $($_.Exception.Message)"
+        return $windows
+    }
+    return (Merge-EngineReading -Windows $windows -Tesseract $theirs)
 }
 
 function ConvertTo-LayoutText {
@@ -319,5 +467,5 @@ function ConvertTo-RowText {
 if ($Path) {
     Assert-WindowsPowerShell
     if (-not (Test-Path -LiteralPath $Path)) { throw "No such image: $Path" }
-    ConvertTo-LayoutText -Words (Get-OcrWords -ImagePath $Path) -ColumnGap $ColumnGap
+    ConvertTo-LayoutText -Words (Get-ImageWord -ImagePath $Path) -ColumnGap $ColumnGap
 }

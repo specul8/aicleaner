@@ -131,9 +131,29 @@ def pdf_pages_to_images(raw: bytes, max_pages: int, timeout: int,
 
 # ---- images ------------------------------------------------------------------------------
 
+def find_tesseract() -> str | None:
+    """Tesseract on PATH, or where its Windows installer puts it, or None.
+
+    The build winget installs (UB-Mannheim.TesseractOCR) leaves PATH alone, so a PATH-only probe
+    reported no Tesseract on a machine that had it (2026-10-13). Read-ImageText.ps1 looks in the
+    same places.
+    """
+    found = shutil.which("tesseract")
+    if found:
+        return found
+    if os.name != "nt":
+        return None
+    for variable, folder in (("ProgramFiles", "Tesseract-OCR"), ("ProgramFiles(x86)", "Tesseract-OCR"),
+                             ("LOCALAPPDATA", r"Programs\Tesseract-OCR")):
+        base = os.environ.get(variable)
+        if base and (Path(base) / folder / "tesseract.exe").is_file():
+            return str(Path(base) / folder / "tesseract.exe")
+    return None
+
+
 def tesseract_converter(path: str | None = None, timeout: int = 60) -> ImageToText | None:
-    """Tesseract, when somebody has installed it. None when it is not on this machine."""
-    exe = path or shutil.which("tesseract")
+    """Tesseract alone, for a machine without Windows' engine. None when it is not installed."""
+    exe = path or find_tesseract()
     if not exe:
         return None
 
@@ -204,19 +224,23 @@ def windows_ocr_converter(timeout: int = 60) -> ImageToText | None:
 
 
 def image_converter(timeout: int = 60) -> ImageToText | None:
-    """Whichever OCR engine this machine has: Tesseract first, then Windows, then none.
+    """The shared reader first, then Tesseract alone, then none.
 
-    Probed like pdftotext on PATH, so neither is a dependency. Tesseract goes first because it
-    reads dense text better; the Windows engine is there without anyone installing anything.
+    The reader (Read-ImageText.ps1) keeps rows, columns and indentation, and reads with Tesseract
+    as well as Windows' engine when Tesseract is installed, keeping the better reading of each
+    word (2026-10-13). Tesseract alone, as plain lines, only where Windows' engine cannot run.
+    Neither is a dependency.
     """
-    return tesseract_converter(timeout=timeout) or windows_ocr_converter(timeout=timeout)
+    return windows_ocr_converter(timeout=timeout) or tesseract_converter(timeout=timeout)
 
 
 def ocr_engine_name() -> str:
-    """Which engine would be used, for the health check and the installer to report."""
-    if shutil.which("tesseract"):
-        return "tesseract"
-    return "windows" if windows_powershell() else ""
+    """Which engines would read an image, for the health check and the installer to report."""
+    windows = bool(windows_powershell()) and reader_script().exists()
+    tesseract = bool(find_tesseract())
+    if windows and tesseract:
+        return "windows+tesseract"
+    return "windows" if windows else ("tesseract" if tesseract else "")
 
 
 # ---- Office documents ---------------------------------------------------------------------

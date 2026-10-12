@@ -218,7 +218,7 @@ try {
         if (-not $image) { Write-Host 'Nothing selected.'; return }
     }
     if (-not (Test-Path -LiteralPath $image)) { throw "No such image: $image" }
-    $words = Get-OcrWords -ImagePath $image
+    $words = Get-ImageWord -ImagePath $image
     $text = ConvertTo-LayoutText -Words $words -ColumnGap $wantedGap
     if (-not $text) { Write-Host 'No text found in that region.'; return }
     if (-not $NoClipboard) {

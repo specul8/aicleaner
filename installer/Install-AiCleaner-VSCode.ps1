@@ -1005,8 +1005,9 @@ function Test-OcrEngine {
     [CmdletBinding()]
     [OutputType([string])]
     param()
-    if (Get-Command tesseract -ErrorAction SilentlyContinue) {
-        Write-Status 'Reading images: Tesseract' -Level Detail
+    # Where its installer puts it as well as PATH: the build winget installs leaves PATH alone (2026-10-13).
+    if ((Get-Command tesseract -ErrorAction SilentlyContinue) -or ($env:ProgramFiles -and (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Tesseract-OCR\tesseract.exe')))) {
+        Write-Status 'Reading images: Tesseract with the Windows engine, the better reading of each word' -Level Detail
         return 'tesseract'
     }
     $shell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
