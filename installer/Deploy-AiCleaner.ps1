@@ -1824,7 +1824,7 @@ function Write-NextSteps {
     $steps = New-Object System.Collections.Generic.List[string]
 
     if ($Targets -contains 'Workstation') {
-        $steps.Add("Take a screenshot with CTRL+ALT+T: the text lands on the clipboard, ready to paste.")
+        $steps.Add("Take a screenshot with your screenshot keys (or CTRL+ALT+T): the text lands on the clipboard, spacing kept, ready to paste.")
         $steps.Add("Run this script on the machine where the agent runs, if you have not already.")
     }
     if ($proxyHere) {
@@ -1867,7 +1867,7 @@ function Write-NextSteps {
         Write-Status 'To lower that risk, the installer can set up the screenshot tools on your other computer so they' -Level Detail
         Write-Status 'read the text in a screenshot automatically: text is filtered, a picture is not.' -Level Detail
         Write-Status 'To do that, run this installer on your other computer and choose:' -Level Detail
-        Write-Status '  5. None here: this device uses a remote AI Agent on a different computer' -Level Detail
+        Write-Status '  5. Screen only: the AI agent runs on a different computer; this device is where you view and type' -Level Detail
     }
 }
 
@@ -2064,7 +2064,7 @@ function Read-ScreenshotShortcut {
         Which keys this person presses to take a screenshot, asked straight after "do you take
         screenshots" (the user, 2026-10-11) and handed to the installer as -ScreenshotKeys.
     .DESCRIPTION
-        The installer remaps those keys to the Snipping Tool's text extractor. It used to ask this
+        The installer remaps those keys to aicleaner's screen capture. It used to ask this
         itself, steps later, in a prompt of its own style; asked here, the subject is asked once.
     #>
     [CmdletBinding()]
@@ -2216,7 +2216,7 @@ function Get-MachineRole {
         'desktop'       = 'Claude Desktop, on this machine'
         'code-remote'   = 'Claude Code here, reached by VS Code Remote-SSH from another PC'
         'code-headless' = "Claude Code here, driven from a plain SSH terminal$headlessNote"
-        'workstation'   = 'None here: this device uses a remote AI Agent on a different computer'
+        'workstation'   = 'Screen only: the AI agent runs on a different computer; this device is where you view and type'
         'none'          = 'None yet: just put the files in place'
     }))
     $roles = @(Resolve-Roles -Chosen $roles)
@@ -2265,7 +2265,7 @@ function Get-MachineRole {
     if ($screenHere) {
         if (-not (Confirm-Action -Message 'Do you take screenshots on this machine?' -Default 'Yes')) {
             $vscodeArgs += @('-SkipPowerToys', '-SkipSnippingTool')
-            $advice = 'Screenshots are taken elsewhere: run this script on that PC and choose "None here".'
+            $advice = 'Screenshots are taken elsewhere: run this script on that PC and choose "Screen only".'
         } else {
             $keys = Read-ScreenshotShortcut
             $vscodeArgs += @('-ScreenshotKeys', $keys)

@@ -55,8 +55,8 @@
     given: the point is to remap the shortcut you already use.
 
 .PARAMETER SkipPowerToys
-    Skip installing PowerToys and the Keyboard Manager remap Win+Shift+S -> Win+Shift+T. By default the
-    installer makes the screenshot chord open Snipping Tool's text extractor, so what reaches the
+    Skip installing PowerToys and the Keyboard Manager remap of the screenshot keys. By default the
+    installer makes the screenshot keys start aicleaner's screen capture, so what reaches the
     clipboard is text (proxied) rather than an image (base64, not inspectable). PowerToys' own Text
     Extractor is left switched off.
 
@@ -708,9 +708,9 @@ function Invoke-AiCleanerCli {
 
 function Install-PowerToysTextExtractor {
     <#
-    Installs PowerToys (winget, per user), enables Keyboard Manager and remaps Win+Shift+S -> Win+Shift+T
-    so the screenshot reflex lands on Snipping Tool's text extractor (whose OCR and persistent
-    "Automatically copy text" setting are preferred). PowerToys' own Text Extractor is switched OFF so it
+    Installs PowerToys (winget, per user), enables Keyboard Manager and remaps the screenshot keys
+    this person already presses so they start aicleaner's screen capture (New-CaptureRemap), which
+    keeps the text's rows, columns and spacing. PowerToys' own Text Extractor is switched OFF so it
     never claims Win+Shift+T ahead of Snipping Tool. Idempotent: existing settings are merged, not replaced.
     Returns $true when ready.
     #>
@@ -754,14 +754,11 @@ function Install-PowerToysTextExtractor {
     Set-JsonProperty -Object $rootCfg.enabled -Name 'TextExtractor' -Value $false
     Set-JsonProperty -Object $rootCfg -Name 'startup' -Value $true
     Write-JsonFile -Path $rootPath -Object $rootCfg
-    # Keyboard Manager: whatever this person presses for a screenshot -> Win+Shift+T (91;16;84),
+    # Keyboard Manager: whatever this person presses for a screenshot -> aicleaner's capture,
     # global, merged into the default profile.
     $fromKeys = Get-ScreenshotKeys -Preferred $ScreenshotKeys
     $fromLabel = ConvertFrom-KeyCodes -Codes $fromKeys
-    if ($fromKeys -eq '91;16;84') {
-        Write-Status 'That is already the Snipping Tool text extractor shortcut; no remap needed' -Level Done
-        return $true
-    }
+    $ourRemap = Get-CaptureRemap -FromKeys $fromKeys
     $kbmSettings = Join-Path $settingsDir 'Keyboard Manager\settings.json'
     if (-not (Test-Path -LiteralPath $kbmSettings)) {
         Write-JsonFile -Path $kbmSettings -Object ([pscustomobject]@{ name = 'Keyboard Manager'; version = '1'; properties = [pscustomobject]@{
@@ -779,10 +776,10 @@ function Install-PowerToysTextExtractor {
     # uninstaller has no way of knowing there was anything.
     $previousRemap = @($kbm.remapShortcuts.global | Where-Object { [string]$_.originalKeys -eq $fromKeys } |
         Select-Object -First 1)
-    Save-LedgerPrevious -Section 'powertoys_remap' -Name $fromKeys `
-        -Value $(if ($previousRemap.Count -gt 0) { [string]$previousRemap[0].newRemapKeys } else { $null })
+    $previousKeys = if ($previousRemap.Count -gt 0 -and $previousRemap[0].PSObject.Properties['newRemapKeys']) { [string]$previousRemap[0].newRemapKeys } else { '' }
+    Save-LedgerPrevious -Section 'powertoys_remap' -Name $fromKeys -Value $(if ($previousKeys) { $previousKeys } else { $null })
     $global_ = @($kbm.remapShortcuts.global | Where-Object { [string]$_.originalKeys -ne $fromKeys })
-    $global_ += [pscustomobject]@{ originalKeys = $fromKeys; newRemapKeys = '91;16;84' }
+    $global_ += $ourRemap
     Set-JsonProperty -Object $kbm.remapShortcuts -Name 'global' -Value $global_
     Write-JsonFile -Path $kbmPath -Object $kbm
 
@@ -790,8 +787,50 @@ function Install-PowerToysTextExtractor {
     Get-Process PowerToys -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
     Start-Process -FilePath $exe | Out-Null
-    Write-Status "PowerToys running: $fromLabel now opens the Snipping Tool text extractor (Win+Shift+T)" -Level Done
+    if ($ourRemap.operationType -eq 1) {
+        Write-Status "PowerToys running: $fromLabel now opens aicleaner's screen capture (text with its spacing kept)" -Level Done
+    } else {
+        Write-Status "PowerToys running: $fromLabel now opens the Snipping Tool text extractor (Win+Shift+T)" -Level Done
+    }
     return $true
+}
+
+function Get-CaptureRemap {
+    <#
+    .SYNOPSIS
+        The Keyboard Manager entry for the screenshot keys: start aicleaner's screen capture.
+    .DESCRIPTION
+        The keys used to go to Win+Shift+T, Snipping Tool's text extractor, which puts every
+        segment after a run of spaces on a line of its own: a console summary pasted as a column
+        of fragments (the user, 2026-10-12). Capture-TextFromScreen.ps1 keeps the rows, columns
+        and indentation, so the keys start it instead (operationType 1, run a program).
+
+        powershell.exe, not pwsh: Windows' OCR is a WindowsRuntime API that PowerShell 7 cannot
+        reach. "Start another" when it is already running, because PowerToys matches on the
+        program and some powershell.exe is nearly always running; "show the window" would bring
+        that one forward and capture nothing. Without the capture script beside this one, the
+        keys go to the text extractor as before rather than to nothing.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$FromKeys)
+    $folder = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
+    $capture = Join-Path $folder 'Capture-TextFromScreen.ps1'
+    if (-not (Test-Path -LiteralPath $capture)) {
+        Write-Status "Capture-TextFromScreen.ps1 is not in $folder; the screenshot keys open the Snipping Tool text extractor instead" -Level Warn
+        return [pscustomobject]@{ originalKeys = $FromKeys; newRemapKeys = '91;16;84'; exactMatch = $false; operationType = 0 }
+    }
+    return [pscustomobject]@{
+        originalKeys                   = $FromKeys
+        newRemapKeys                   = ''
+        exactMatch                     = $false
+        operationType                  = 1
+        runProgramFilePath             = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        runProgramArgs                 = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$capture`""
+        runProgramStartInDir           = $folder
+        runProgramElevationLevel       = 0
+        runProgramAlreadyRunningAction = 1
+        runProgramStartWindowType      = 1
+    }
 }
 
 function Install-SnippingTool {
@@ -1259,7 +1298,7 @@ try {
     }
     if ($SkipPowerToys) { Write-Status 'PowerToys step skipped' -Level Detail }
     else {
-        Write-Status 'Screenshot shortcut: remapping it to the Snipping Tool text extractor'
+        Write-Status 'Screenshot shortcut: remapping it to the screen capture (text with its spacing kept)'
         Install-PowerToysTextExtractor | Out-Null
     }
 

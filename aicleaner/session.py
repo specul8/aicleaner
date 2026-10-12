@@ -448,6 +448,32 @@ def kept(event: dict[str, Any]) -> bool:
     if kind == "system":
         return event.get("subtype") in KEPT_SYSTEM
     return kind in KEPT_EVENTS
+
+
+def doing_after(doing: str, event: dict[str, Any]) -> str:
+    """What Claude is doing once this event has happened, worded as the page's stream does it.
+
+    A block starting says what kind; only a turn ending (or the session stopping) clears it, since a
+    delta says nothing about whether more is coming. The tool's name only, never its input: an
+    input is a command line or a path, the sort of string that carries a client name.
+    """
+    # The CLI wraps the API's events in `stream_event` (--include-partial-messages).
+    inner = event.get("event") if isinstance(event.get("event"), dict) else event
+    kind = inner.get("type")
+    if kind == "content_block_start":
+        block = inner.get("content_block") or {}
+        if block.get("type") == "thinking":
+            return "thinking..."
+        if block.get("type") == "tool_use":
+            return f"{block.get('name') or 'a tool'}..."
+        if block.get("type") == "text":
+            return "writing..."
+        return doing
+    if kind in ("result", "message_stop") or event.get("type") in ("assistant", "exited", "stopped"):
+        return ""
+    return doing
+
+
 START_TIMEOUT_S = 30      # how long to wait for the child to announce itself
 INTERRUPT_TIMEOUT = 5     # a control request is answered at once or not at all (feature 48)
 QUESTION_WAIT_MS = 7 * 24 * 3600 * 1000   # Claude Code's MCP tool limit for a waiting question
@@ -617,6 +643,10 @@ class Session:
         # whether one is in progress. A page compares one poll with the next to say "it is done".
         self.turns = 0
         self.busy = False
+        # What Claude is doing now ("thinking...", a tool's name), from the fragments the buffer
+        # drops (D29). The stream shows it as it comes; a page polling through the tunnel has no
+        # stream, so the state carries it (the user, 2026-10-12).
+        self.doing = ""
         self.session_id = ""
         self.project = ""
         self.started_at = 0.0
@@ -684,6 +714,7 @@ class Session:
             "pending": [{"id": p.id, "tool": p.tool, "detail": p.detail, "asked_at": p.asked_at}
                         for p in self.pending.values()],
             "busy": self.busy,
+            "doing": self.doing,
             "queued": [dict(item) for item in self.queued],
             "events": list(self.events),
             "error": self.last_error,
@@ -1480,6 +1511,7 @@ class Session:
                 self._flush_soon()             # the next waiting prompt, if any (D176)
         elif event.get("type") in ("exited", "stopped"):
             self.busy = False
+        self.doing = doing_after(self.doing, event)
         # Everything is broadcast; only what the page draws or reads back is kept (KEPT_EVENTS).
         if kept(event):
             if len(self.events) == self.events.maxlen:

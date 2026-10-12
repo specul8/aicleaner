@@ -29,7 +29,7 @@
       - the aicleaner block from %USERPROFILE%\.claude\CLAUDE.md
       - the aicleaner values under HKCU\SOFTWARE\Policies\Claude (Claude Desktop returns to its own mode chooser;
         needs an elevated PowerShell run as the same user, otherwise they are reported as left in place)
-      - the PowerToys Keyboard Manager remap Win+Shift+S -> Win+Shift+T (PowerToys itself stays installed)
+      - the PowerToys Keyboard Manager remap of the screenshot keys (PowerToys itself stays installed)
       - the Start Menu shortcut for the screen-text tool (Ctrl+Alt+T)
       - the DO_NOT_TRACK and CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC user variables, whether or not the
         change record survived: each switches off the feature-flag evaluation Claude Code's Remote Control
@@ -921,9 +921,11 @@ try {
             $remapSection = & $section 'powertoys_remap'
             $taken = @()
             if ($remapSection) { $taken = @($remapSection.PSObject.Properties | ForEach-Object { $_.Name }) }
-            $ours = @($doc.remapShortcuts.global | Where-Object { [string]$_.newRemapKeys -eq '91;16;84' })
+            # Ours either way: the capture script started by a run-program remap (2026-10-12), or the older remap to Win+Shift+T.
+            $ours = @($doc.remapShortcuts.global | Where-Object { ($_.PSObject.Properties['newRemapKeys'] -and [string]$_.newRemapKeys -eq '91;16;84') -or
+                ($_.PSObject.Properties['runProgramArgs'] -and [string]$_.runProgramArgs -like '*Capture-TextFromScreen.ps1*') })
             if ($ours.Count -eq 0) {
-                Write-Status 'PowerToys: nothing is remapped to the text extractor; left alone' -Level Detail
+                Write-Status 'PowerToys: nothing is remapped to the screen capture or the text extractor; left alone' -Level Detail
             } elseif ($taken.Count -eq 0) {
                 Write-Status 'PowerToys: a shortcut points at Win+Shift+T, but nothing recorded what it did before.' -Level Warn
                 Write-Status 'Left in place, in case that remap was yours; remove it in PowerToys if it was not.' -Level Detail

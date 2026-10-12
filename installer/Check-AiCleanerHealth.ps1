@@ -145,13 +145,17 @@ function Test-ScreenshotRemap {
         return [pscustomobject]@{ Name = 'screenshot'; Ok = $false
             Why = 'the PowerToys remap file could not be read'; Fix = 'Install-AiCleaner-Workstation.ps1' }
     }
-    # 84 is T; the shortcut is Win+Shift+T. Matched on the text rather than parsed, because the
-    # shape of this file is PowerToys' to change and a miss here must not be read as a drift.
-    if ($text -match '"84"' -or $text -match 'Win\+Shift\+T') {
+    # The screenshot keys start Capture-TextFromScreen.ps1 (2026-10-12), or on an older install go to
+    # Win+Shift+T (84 is T). Matched on the text rather than parsed, because the shape of this file
+    # is PowerToys' to change and a miss here must not be read as a drift.
+    if ($text -match 'Capture-TextFromScreen\.ps1') {
+        return [pscustomobject]@{ Name = 'screenshot'; Ok = $true; Why = 'the screenshot keys start the screen capture'; Fix = '' }
+    }
+    if ($text -match '"84"' -or $text -match 'Win\+Shift\+T' -or $text -match '91;16;84') {
         return [pscustomobject]@{ Name = 'screenshot'; Ok = $true; Why = 'Win+Shift+T is still mapped'; Fix = '' }
     }
     return [pscustomobject]@{ Name = 'screenshot'; Ok = $false
-        Why = 'the Win+Shift+T remap is not in the PowerToys config - a screenshot sends an image instead of text'
+        Why = 'the screenshot remap is not in the PowerToys config - a screenshot sends an image instead of text'
         Fix = 'Install-AiCleaner-Workstation.ps1' }
 }
 

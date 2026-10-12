@@ -479,6 +479,12 @@ function markTools(log, events, running) {
   }
 }
 
+// The middle of a drag bar, always showing, an em dash long (the user, 2026-10-12): an invisible bar was
+// found only by luck. Pointing at it shows the whole bar; on a touch screen touching anywhere does.
+function dragGrip() {
+  return h('span', { class: 'drag-grip', 'aria-hidden': 'true' });
+}
+
 // Prompts waiting for the running turn to end (D176): above the prompt box, not in the transcript,
 // until the session takes them. Held ones came back from before a restart and go only when sent.
 function queueChips(queued) {
@@ -2074,6 +2080,12 @@ export async function render(main, context = {}) {
     markTools(log, session.events, Boolean(session.running));
     drawing.end();
     paintQueue(session.queued);
+    // Through the tunnel there is no stream to say "thinking..." as it happens: the poll's state
+    // carries what the session last saw instead (the user, 2026-10-12).
+    if (isSealed()) {
+      doing.textContent = session.doing || '';
+      doing.hidden = !session.doing;
+    }
     showEarlierWhen();
     paintBackground(background, session.events, box);
     // Not rebuilt while unchanged or in use: a half-answered question must survive the poll (D58, D69).
@@ -2395,7 +2407,6 @@ export async function render(main, context = {}) {
   const autocorrect = attachAutocorrect(box, { conversation: () => log.textContent || '' });
   view.autocorrect = autocorrect;
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
-    queueBox,
     autocorrect.stack,
     slash,
     h('div', { class: 'form-row' },
@@ -2410,9 +2421,9 @@ export async function render(main, context = {}) {
       h('span', { class: 'model-state-text' }),
       h('button', { type: 'button', class: 'model-state-stop', hidden: true }, 'Interrupt')));
   const filesBar = h('div', { id: 'files-resize', class: 'drag-bar x', role: 'separator',
-    'aria-orientation': 'vertical', title: 'Drag to change the width of the files' });
+    'aria-orientation': 'vertical', title: 'Drag to change the width of the files' }, dragGrip());
   const promptBar = h('div', { id: 'prompt-resize', class: 'drag-bar y', role: 'separator',
-    'aria-orientation': 'horizontal', title: 'Drag to change the height of the prompt' });
+    'aria-orientation': 'horizontal', title: 'Drag to change the height of the prompt' }, dragGrip());
   // The file browser opens and closes from one toggle at the band's top edge, on every screen size
   // (the user, 2026-10-01; it was a phone's alone - DECISIONS 30, 35). It starts as it was last
   // left; the first time, open where there is room and closed on a phone.
@@ -2450,7 +2461,9 @@ export async function render(main, context = {}) {
     tabStrip,
     stream,
     filePane,
-    h('div', { class: 'session-mid' }, background, cards),
+    // Waiting prompts above the prompt card, as the background tools are, not inside it: in the card
+    // they pushed Send and the indicators out of its fixed height (the user, 2026-10-12).
+    h('div', { class: 'session-mid' }, background, cards, queueBox),
     promptBar,
     promptPane);
   const band = h('div', { class: `session-band${filesOpen ? ' rail-open' : ''}`, id: 'session-band' },

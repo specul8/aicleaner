@@ -7,7 +7,7 @@
     workstation install put in place and restores what it altered:
 
       - the Start Menu shortcut "aicleaner text from screen.lnk" (Ctrl+Alt+T)
-      - the PowerToys Keyboard Manager remap Win+Shift+S -> Win+Shift+T, and only that one remap
+      - the PowerToys Keyboard Manager remap of the screenshot keys, and only that one remap
       - the PowerToys module settings it changed (Keyboard Manager, TextExtractor, run at startup),
         each back to the value recorded before the install, or removed when there was none
       - VS Code's telemetry.telemetryLevel, back to what it was, or removed when it was not set
@@ -244,10 +244,13 @@ function Remove-PowerToysRemap {
         if ($Ledger -and $Ledger.PSObject.Properties['powertoys_remap']) {
             $taken = @($Ledger.powertoys_remap.PSObject.Properties | ForEach-Object { $_.Name })
         }
-        $ours = @($before | Where-Object { [string]$_.newRemapKeys -eq '91;16;84' })
+        # Ours either way: the capture script started by a run-program remap (2026-10-12), or
+        # the older remap to Win+Shift+T. Properties checked by name: other entries may lack them.
+        $ours = @($before | Where-Object { ($_.PSObject.Properties['newRemapKeys'] -and [string]$_.newRemapKeys -eq '91;16;84') -or
+            ($_.PSObject.Properties['runProgramArgs'] -and [string]$_.runProgramArgs -like '*Capture-TextFromScreen.ps1*') })
         $unrecorded = @($ours | Where-Object { $taken -notcontains [string]$_.originalKeys })
         if ($ours.Count -eq 0) {
-            Write-Status 'Nothing here is remapped to the text extractor; no shortcut to put back' -Level Detail
+            Write-Status 'Nothing here is remapped to the screen capture or the text extractor; no shortcut to put back' -Level Detail
         } elseif ($taken.Count -eq 0) {
             $keys = (($ours | ForEach-Object { ConvertFrom-KeyCodes -Codes ([string]$_.originalKeys) }) -join ', ')
             Write-Status "$keys is remapped to Win+Shift+T, but nothing recorded what it did before." -Level Warn

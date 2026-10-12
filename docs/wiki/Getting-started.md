@@ -51,7 +51,7 @@ this machine, shown in green (for example "VS Code Server IS here"):
 | 2 | Claude Desktop on this PC (needs an elevated PowerShell for one step) |
 | 3 | Claude Code here, reached from another PC over SSH (VS Code Remote) |
 | 4 | Claude Code here, driven from a plain SSH terminal |
-| 5 | None here: this device uses a remote AI agent on a different computer (screenshot tooling only) |
+| 5 | Screen only: the AI agent runs on a different computer; this device is where you view and type (screenshot tooling only) |
 | 6 | None yet: just put the files in place |
 
 If you take screenshots on the machine, the next question is which keys you press to take one; the
