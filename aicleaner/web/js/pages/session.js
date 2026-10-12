@@ -2020,10 +2020,18 @@ export async function render(main, context = {}) {
     const button = event.target.closest('button[data-action]');
     if (!button) return;
     button.disabled = true;
+    const cancelling = button.dataset.action !== 'send';
+    const item = (current().queued || []).find((entry) => entry.id === button.dataset.id);
     try {
-      const path = button.dataset.action === 'send' ? '/api/session/queue/send' : '/api/session/queue/cancel';
+      const path = cancelling ? '/api/session/queue/cancel' : '/api/session/queue/send';
       const answer = await postJSON(path, { name: view.name, id: button.dataset.id });
       if (answer.outcome === 'interrupting') say('Stopping the current turn, then sending this.', 'ok');
+      // Cancel gives the words back to edit (the user, 2026-10-12), ahead of anything typed since.
+      if (cancelling && item && item.text) {
+        box.value = box.value.trim() ? `${item.text}\n${box.value}` : item.text;
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        box.focus();
+      }
       await refresh();
     } catch (error) {
       button.disabled = false;

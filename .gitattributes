@@ -1,0 +1,16 @@
+# One line-ending rule for the repository, whatever core.autocrlf says on the machine: text is
+# stored and checked out with LF (PowerShell 5.1 and 7, Python and the browser all read LF), except
+# batch files, which cmd.exe needs in CRLF. This is what stops git's "CRLF will be replaced by LF"
+# warnings: the working tree matches what git stores.
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.7z binary

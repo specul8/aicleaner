@@ -241,7 +241,14 @@ export function fileTabs(ctx) {
         selectInSource(tab, start, end);
       });
     } else if (d.editable) body = editorFor(tab, hooks);
-    else body = textView(d.text || '', tab.name);
+    else {
+      body = textView(d.text || '', tab.name);
+      // Say why it cannot be edited (the user, 2026-10-12, read an unexplained read-only view as a bug).
+      if (d.editable === false) {
+        head.append(h('span', { class: 'chip warn', title: 'Saving it here could change characters it holds. Convert it to UTF-8 to edit it here.' },
+          'Read-only: not UTF-8 text'));
+      }
+    }
     head.append(...[saveChip(tab)].filter(Boolean));
     // The editor is reused, so moving it into the new pane must not lose the caret or fire a save.
     const editing = tab.editor && document.activeElement === tab.editor;

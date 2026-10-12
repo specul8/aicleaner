@@ -185,7 +185,15 @@ try {
     }
     Write-Output $text
 } catch {
-    Write-Host "Could not read the screen: $($_.Exception.Message)" -ForegroundColor Red
+    $problem = "Could not read the screen: $($_.Exception.Message)"
+    Write-Host $problem -ForegroundColor Red
+    # Started from the screenshot keys this runs hidden, so a console message is seen by nobody: the
+    # keys looked as if they did nothing (the user, 2026-10-12). Said in a box, and kept in a log.
+    try {
+        Add-Content -LiteralPath (Join-Path ([IO.Path]::GetTempPath()) 'aicleaner-capture.log') -Value ("{0:u} {1}" -f (Get-Date), $problem)
+        Add-Type -AssemblyName System.Windows.Forms
+        [void][System.Windows.Forms.MessageBox]::Show($problem, 'aicleaner screen capture', 'OK', 'Warning')
+    } catch { Write-Verbose "could not show the problem: $($_.Exception.Message)" }
     exit 1
 } finally {
     if ($temporary -and (Test-Path -LiteralPath $temporary)) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }

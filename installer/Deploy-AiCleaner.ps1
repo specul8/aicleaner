@@ -967,25 +967,28 @@ function Assert-ReleaseSigned {
     $keygen = Find-SshKeygen
     if (-not $keygen) { throw 'ssh-keygen (OpenSSH) was not found, so the release cannot be checked. Add the Windows "OpenSSH Client" feature and run this again.' }
     $allowed = [IO.Path]::GetTempFileName()
+    $signed = [IO.Path]::GetTempFileName()
     $check = $null
     try {
         Set-Content -LiteralPath $allowed -Value "$identity $key" -Encoding Ascii
-        # The manifest is written to ssh-keygen's input and the input closed, by hand, with a time
-        # limit (D96). Start-Process -RedirectStandardInput hung forever in a hosted PowerShell
-        # (no console, a transcript running): ssh-keygen sat waiting for an end of input that
-        # never came, with the update stopped part way and nothing said.
+        # What was signed is the manifest with LF endings (tools/sign_release.py writes it so). A
+        # clone made where git turns LF into CRLF - Git for Windows' default, with no .gitattributes
+        # in the public repository to say otherwise - checked it out with CRLF, and ssh-keygen
+        # called a good signature incorrect (D188, the user's Update, 2026-10-12). Verified from an
+        # LF copy, as the file hashes below already are.
+        $latin1 = [Text.Encoding]::GetEncoding(28591)
+        [IO.File]::WriteAllBytes($signed, $latin1.GetBytes($latin1.GetString([IO.File]::ReadAllBytes($manifest)).Replace("`r`n", "`n")))
+        # Given to ssh-keygen as a file, through cmd's `<`, with a time limit (D96): piped in by
+        # Start-Process -RedirectStandardInput it hung forever in a hosted PowerShell, and piped by
+        # hand it was misread in some hosts too (seen from Claude Code's PowerShell tool).
         $info = New-Object System.Diagnostics.ProcessStartInfo
-        $info.FileName = $keygen
-        $info.Arguments = "-Y verify -f `"$allowed`" -I $identity -n $identity -s `"$signature`""
+        $info.FileName = Join-Path $env:WINDIR 'System32\cmd.exe'
+        $info.Arguments = "/d /s /c `"`"$keygen`" -Y verify -f `"$allowed`" -I $identity -n $identity -s `"$signature`" < `"$signed`"`""
         $info.UseShellExecute = $false
         $info.CreateNoWindow = $true
-        $info.RedirectStandardInput = $true
         $info.RedirectStandardOutput = $true
         $info.RedirectStandardError = $true
         $check = [System.Diagnostics.Process]::Start($info)
-        $bytes = [IO.File]::ReadAllBytes($manifest)
-        $check.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
-        $check.StandardInput.Close()
         # Read both before waiting, so a full pipe can never stall the child.
         $said = $check.StandardOutput.ReadToEndAsync()
         $complained = $check.StandardError.ReadToEndAsync()
@@ -993,11 +996,14 @@ function Assert-ReleaseSigned {
             try { $check.Kill() } catch { Write-Verbose "ssh-keygen had already ended: $($_.Exception.Message)" }
             throw 'Checking the release signature did not finish within a minute: refusing the release.'
         }
-        $null = $said.Result, $complained.Result
-        if ($check.ExitCode -ne 0) { throw 'The release signature does not verify with the trusted key: refusing it.' }
+        $null = $said.Result
+        if ($check.ExitCode -ne 0) {
+            $why = ([string]$complained.Result).Trim()
+            throw ('The release signature does not verify with the trusted key: refusing it.' + $(if ($why) { " (ssh-keygen: $why)" }))
+        }
     } finally {
         if ($check) { $check.Dispose() }
-        Remove-Item -LiteralPath $allowed -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $allowed, $signed -Force -ErrorAction SilentlyContinue
     }
     $listed = @{}
     foreach ($line in (Get-Content -LiteralPath $manifest)) {
@@ -1601,11 +1607,29 @@ function Update-Runtime {
         # just moved, and "Proxy started" was said over a proxy that never came up). If it is not
         # up shortly, start the script directly, which waits for /healthz and says so either way.
         if (Wait-ProxyHealth -Port $port -Seconds 20) { Write-Status 'Proxy started' -Level Detail; return }
+        # Still loading is not "did not come up" (2026-10-12): the task's proxy answered after 20 s, a
+        # second was started beside it, and that one died on the port the first then held. A proxy
+        # process already running gets longer before anything else is started.
+        if (Test-ProxyProcess -AppRoot $AppRoot) {
+            Write-Status 'The proxy is still starting; waiting for it' -Level Detail
+            if (Wait-ProxyHealth -Port $port -Seconds 60) { Write-Status 'Proxy started' -Level Detail; return }
+        }
         Write-Status 'The proxy did not come up from its scheduled task; starting it directly' -Level Warn
     }
     Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Start-AiCleaner.ps1') -Arguments @('-Detach')
     if (Wait-ProxyHealth -Port $port -Seconds 5) { Write-Status 'Proxy started' -Level Detail }
     else { Write-Status "The proxy is not answering on port $port; see logs\proxy-stderr.log" -Level Warn }
+}
+
+function Test-ProxyProcess {
+    <# True when a proxy from this app folder is running (`-m aicleaner run --config <app>\...`). #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$AppRoot)
+    $config = Join-Path $AppRoot 'aicleaner-config.json'
+    $running = @(Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine -like '* aicleaner run *' -and $_.CommandLine -like "*$config*" })
+    return ($running.Count -gt 0)
 }
 
 function Wait-ProxyHealth {

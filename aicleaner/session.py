@@ -360,14 +360,15 @@ def _dependency_folder(folder: Path) -> bool:
 
 def file_kind(name: str) -> tuple[str, str]:
     """(kind, view) for a file name. `view` is text, image, pdf or download: what its tab does.
-    Download-only covers Office files, archives and anything else binary, and SVG and HTML - both
-    can carry script, and shown inline they would run in the page's own origin."""
+    Download-only covers Office files, archives and anything else binary. SVG and HTML open as
+    their source text, to read and edit (the user, 2026-10-12): they can carry script, so they are
+    never rendered - inline_type refuses them, and /file/raw with it."""
     suffix = Path(name).suffix.lower()
     if not suffix and name.startswith("."):
         suffix = name.lower()                           # .gitignore, .env
     kind = next((k for k, suffixes in _KINDS.items() if suffix in suffixes), "other")
     if suffix in (".html", ".htm", ".svg"):
-        return kind, "download"
+        return kind, "text"
     if kind in ("markdown", "code", "config", "text"):
         return kind, "text"
     if suffix in _INLINE_IMAGES:
