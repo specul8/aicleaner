@@ -855,6 +855,8 @@ function Install-PowerToysTextExtractor {
         Write-Status 'Keyboard Manager editor: its old copy of the mappings set aside (backed up beside it); it rebuilds from the live ones' -Level Detail
     }
 
+    Set-PrintScreenSnipping -FromKeys $fromKeys
+
     # PowerToys reads module settings at start; restart it so the remap is live now.
     Get-Process PowerToys -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
@@ -908,6 +910,36 @@ function Get-CaptureRemap {
     }
 }
 
+function Set-PrintScreenSnipping {
+    <#
+    .SYNOPSIS
+        Print Screen opens Snipping Tool, for the times a picture is what is wanted.
+    .DESCRIPTION
+        The screenshot keys give text; a picture is still wanted now and then, and Windows' own
+        setting sends Print Screen to Snipping Tool (the user, 2026-10-12). Win+Shift+T stays
+        Snipping Tool's text extractor. Left alone when Print Screen is itself the screenshot key.
+        The value before is recorded, so the uninstaller can put it back.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$FromKeys)
+    if ($FromKeys -eq '44') {
+        Write-Status 'Print Screen is your screenshot key, so it stays the text capture' -Level Detail
+        return
+    }
+    $path = 'HKCU:\Control Panel\Keyboard'
+    $name = 'PrintScreenKeyForSnippingEnabled'
+    $item = Get-ItemProperty -LiteralPath $path -ErrorAction SilentlyContinue
+    $before = if ($item -and $item.PSObject.Properties[$name]) { [int]$item.$name } else { $null }
+    if ($before -eq 1) {
+        Write-Status 'Print Screen already opens Snipping Tool, for pictures' -Level Detail
+        return
+    }
+    Save-LedgerPrevious -Section 'windows_keyboard' -Name $name -Value $before
+    if ($PSCmdlet.ShouldProcess("$path\$name", 'Set to 1')) {
+        Set-ItemProperty -LiteralPath $path -Name $name -Value 1 -Type DWord
+        Write-Status 'Print Screen now opens Snipping Tool, for when a picture is what you want (a picture is not filtered)' -Level Done
+    }
+}
 function Install-SnippingTool {
     <#
     Ensures Snipping Tool (Microsoft.ScreenSketch) is present and new enough for its text extractor

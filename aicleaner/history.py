@@ -16,8 +16,10 @@ open, and we do not.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -37,6 +39,7 @@ OPEN_FACTOR = 8                 # files read per row asked for, before the searc
 
 UUID = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE)
 NOT_NAME = re.compile(r"[^A-Za-z0-9]")
+log = logging.getLogger(__name__)
 SPACES = re.compile(r"\s+")
 
 
@@ -337,6 +340,50 @@ def holding(projects: Iterable[str | Path], session_id: str, root: Path | None =
         if str(project).strip() and _transcript(project, session_id, root) is not None:
             return str(project)
     return ""
+
+
+def refile(session_id: str, home: str | Path, projects: Iterable[str | Path],
+           root: Path | None = None) -> tuple[Path, Path] | None:
+    """Move a conversation filed under another folder to the home folder's, before it is resumed
+    there: (from, to), or None when there was nothing to move.
+
+    A conversation stays filed where it began, whichever folder resumes it (DECISIONS 64), and the
+    old folder went on shaping it: one client's began in a OneDrive folder holding an empty git
+    repository of its own, and Claude kept going back there to work and commit, away from the
+    home folder's hooks and history (the user, 2026-10-12). Filed under the home folder, it is
+    that project's conversation from then on. Its folder of the same name (subagent transcripts,
+    tool output) goes with it. Never over a transcript already there; only the profile's own
+    folders are looked in (`holding`).
+    """
+    root = root if root is not None else transcript_root()
+    found_in = holding(projects, session_id, root)
+    if not found_in:
+        return None
+    source = _transcript(found_in, session_id, root)
+    if source is None:
+        return None
+    wanted = folder_for(home).lower()
+    if source.parent.name.lower() == wanted:
+        return None                                  # already the home folder's
+    existing = folders_for(home, root)
+    target_dir = existing[0] if existing else root / folder_for(home)
+    target = target_dir / source.name
+    if target.exists():
+        log.warning("not refiling %s: %s is already there", source, target)
+        return None
+    target_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+    beside = source.parent / session_id
+    if beside.is_dir():
+        destination = target_dir / session_id
+        if not destination.exists():
+            shutil.move(str(beside), str(destination))
+        else:                                        # merged, never overwriting
+            for child in beside.iterdir():
+                if not (destination / child.name).exists():
+                    shutil.move(str(child), str(destination / child.name))
+    log.info("refiled conversation %s from %s to %s", session_id, source.parent, target_dir)
+    return source, target
 
 
 def _transcript(project: str | Path, session_id: str, root: Path | None) -> Path | None:

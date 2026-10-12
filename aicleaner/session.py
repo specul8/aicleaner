@@ -806,6 +806,13 @@ class Session:
         # them, so resuming looks like picking something up rather than starting over. Off the
         # loop: it opens and parses a file that can be long.
         if resume:
+            # Filed under the folder it began in, a conversation kept going back there (the user,
+            # 2026-10-12): moved under this folder first, it is this project's from now on.
+            from .history import refile
+            try:
+                await asyncio.to_thread(refile, resume, folder, [str(folder), *self.transcript_folders])
+            except OSError as exc:
+                log.warning("could not refile conversation %s under %s: %s", resume, folder, exc)
             await self._seed(folder, resume)
         self.pending.clear()
         self.approve_token = secrets_module.token_urlsafe(24)

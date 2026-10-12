@@ -106,6 +106,11 @@ function Get-ScreenRegion {
     .SYNOPSIS
         Drag a rectangle over the screen; returns the path of a PNG of that region, or '' if
         cancelled (Escape, or a click with no drag).
+    .DESCRIPTION
+        As Snipping Tool does it: the screen is photographed first and shown dimmed, and the
+        rectangle being dragged is drawn from the undimmed photograph with an outline, so you see
+        what you are taking (the user, 2026-10-12: a uniform dim showed nothing while dragging).
+        The region is cut from that photograph, so it is the screen as it was when the keys went.
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -113,38 +118,76 @@ function Get-ScreenRegion {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+    $script:shot = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+    $graphics = [System.Drawing.Graphics]::FromImage($script:shot)
+    $graphics.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, $bounds.Size)
+    $graphics.Dispose()
+    $script:dimmed = ConvertTo-DimmedImage -Image $script:shot
     $form = New-Object System.Windows.Forms.Form
     $form.FormBorderStyle = 'None'
     $form.StartPosition = 'Manual'
     $form.Bounds = $bounds
-    $form.BackColor = [System.Drawing.Color]::Black
-    $form.Opacity = 0.35
     $form.TopMost = $true
+    $form.ShowInTaskbar = $false
     $form.Cursor = [System.Windows.Forms.Cursors]::Cross
+    # Painted in full on every move: without double buffering that flickers.
+    $form.GetType().GetProperty('DoubleBuffered', [Reflection.BindingFlags]'NonPublic, Instance').SetValue($form, $true, $null)
     $script:startPoint = $null
     $script:selection = [System.Drawing.Rectangle]::Empty
-    $form.Add_KeyDown({ if ($_.KeyCode -eq 'Escape') { $form.Close() } })
-    $form.Add_MouseDown({ $script:startPoint = $_.Location })
-    $form.Add_MouseUp({
-        if ($script:startPoint) {
-            $script:selection = [System.Drawing.Rectangle]::FromLTRB(
-                [Math]::Min($script:startPoint.X, $_.X), [Math]::Min($script:startPoint.Y, $_.Y),
-                [Math]::Max($script:startPoint.X, $_.X), [Math]::Max($script:startPoint.Y, $_.Y))
+    $outline = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(0, 153, 255), 2)
+    $form.Add_Paint({
+        $_.Graphics.DrawImageUnscaled($script:dimmed, 0, 0)
+        $drawn = $script:selection
+        if ($drawn.Width -gt 0 -and $drawn.Height -gt 0) {
+            $_.Graphics.DrawImage($script:shot, $drawn, $drawn, [System.Drawing.GraphicsUnit]::Pixel)
+            $_.Graphics.DrawRectangle($outline, $drawn)
         }
+    })
+    $form.Add_KeyDown({ if ($_.KeyCode -eq 'Escape') { $script:selection = [System.Drawing.Rectangle]::Empty; $form.Close() } })
+    $form.Add_MouseDown({ $script:startPoint = $_.Location })
+    $form.Add_MouseMove({
+        if (-not $script:startPoint) { return }
+        $script:selection = ConvertTo-Selection -From $script:startPoint -To $_.Location
+        $form.Invalidate()
+    })
+    $form.Add_MouseUp({
+        if ($script:startPoint) { $script:selection = ConvertTo-Selection -From $script:startPoint -To $_.Location }
         $form.Close()
     })
     $form.KeyPreview = $true
-    [void]$form.ShowDialog()
+    try { [void]$form.ShowDialog() }
+    finally { $form.Dispose(); $outline.Dispose(); $script:dimmed.Dispose() }
     $region = $script:selection
-    if ($region.Width -lt 5 -or $region.Height -lt 5) { return '' }
-    $bitmap = New-Object System.Drawing.Bitmap($region.Width, $region.Height)
-    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-    $graphics.CopyFromScreen($bounds.X + $region.X, $bounds.Y + $region.Y, 0, 0, $region.Size)
-    $graphics.Dispose()
-    $file = Join-Path ([IO.Path]::GetTempPath()) ("aicleaner-capture-{0}.png" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-    $bitmap.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
-    $bitmap.Dispose()
-    return $file
+    try {
+        if ($region.Width -lt 5 -or $region.Height -lt 5) { return '' }
+        $bitmap = $script:shot.Clone($region, $script:shot.PixelFormat)
+        $file = Join-Path ([IO.Path]::GetTempPath()) ("aicleaner-capture-{0}.png" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $bitmap.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bitmap.Dispose()
+        return $file
+    } finally { $script:shot.Dispose() }
+}
+
+function ConvertTo-Selection {
+    <# The rectangle between where the drag began and where the pointer is, whichever way it went. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$From, [Parameter(Mandatory)]$To)
+    return [System.Drawing.Rectangle]::FromLTRB([Math]::Min($From.X, $To.X), [Math]::Min($From.Y, $To.Y),
+        [Math]::Max($From.X, $To.X), [Math]::Max($From.Y, $To.Y))
+}
+
+function ConvertTo-DimmedImage {
+    <# A copy of the photograph of the screen with a dark veil over it: what is not being taken. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Drawing.Bitmap]$Image)
+    $copy = New-Object System.Drawing.Bitmap($Image.Width, $Image.Height)
+    $graphics = [System.Drawing.Graphics]::FromImage($copy)
+    $veil = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(140, 0, 0, 0))
+    try {
+        $graphics.DrawImageUnscaled($Image, 0, 0)
+        $graphics.FillRectangle($veil, 0, 0, $Image.Width, $Image.Height)
+    } finally { $veil.Dispose(); $graphics.Dispose() }
+    return $copy
 }
 
 # ---------------------------------------------------------------------------

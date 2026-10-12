@@ -304,6 +304,13 @@ function Remove-PowerToysRemap {
     if ($changed -and $PSCmdlet.ShouldProcess($rootPath, 'Write the PowerToys settings back')) {
         Write-JsonFile -Path $rootPath -Object $rootCfg
     }
+    # Print Screen opening Snipping Tool (2026-10-12): back to what it was, or the setting gone.
+    $printScreen = Get-LedgerValue -Ledger $Ledger -Section 'windows_keyboard' -Name 'PrintScreenKeyForSnippingEnabled'
+    if ($printScreen.Known -and $PSCmdlet.ShouldProcess('HKCU:\Control Panel\Keyboard', 'Put the Print Screen key back')) {
+        if ($null -eq $printScreen.Value) { if ((Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\Keyboard').PSObject.Properties['PrintScreenKeyForSnippingEnabled']) { Remove-ItemProperty -LiteralPath 'HKCU:\Control Panel\Keyboard' -Name 'PrintScreenKeyForSnippingEnabled' } }
+        else { Set-ItemProperty -LiteralPath 'HKCU:\Control Panel\Keyboard' -Name 'PrintScreenKeyForSnippingEnabled' -Value ([int]$printScreen.Value) -Type DWord }
+        Write-Status 'Print Screen key put back the way it was' -Level Done
+    }
     $installed = Get-LedgerValue -Ledger $Ledger -Section 'powertoys_install' -Name 'installed_by_aicleaner'
     if ($installed.Known -and $installed.Value -eq $true) {
         Write-Status 'The ledger says aicleaner installed PowerToys; it is left in place.' -Level Detail

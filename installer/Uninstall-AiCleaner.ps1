@@ -437,6 +437,15 @@ function Restore-InstallChanges {
     if ($otel) {
         Write-Status ("OpenTelemetry variables removed at install (values were not kept): " + (@($otel.PSObject.Properties.Name) -join ', ') + '. Re-add them by hand if you still need them.') -Level Detail
     }
+    # Print Screen opening Snipping Tool (2026-10-12): back to what it was, or the setting gone.
+    $keyboard = & $section 'windows_keyboard'
+    if ($keyboard -and $keyboard.PSObject.Properties['PrintScreenKeyForSnippingEnabled'] -and
+        $PSCmdlet.ShouldProcess('HKCU:\Control Panel\Keyboard', 'Put the Print Screen key back')) {
+        $was = $keyboard.PrintScreenKeyForSnippingEnabled
+        if ($null -eq $was) { if ((Get-ItemProperty -LiteralPath 'HKCU:\Control Panel\Keyboard').PSObject.Properties['PrintScreenKeyForSnippingEnabled']) { Remove-ItemProperty -LiteralPath 'HKCU:\Control Panel\Keyboard' -Name 'PrintScreenKeyForSnippingEnabled' } }
+        else { Set-ItemProperty -LiteralPath 'HKCU:\Control Panel\Keyboard' -Name 'PrintScreenKeyForSnippingEnabled' -Value ([int]$was) -Type DWord }
+        Write-Status 'Print Screen key put back the way it was' -Level Detail
+    }
     $install = & $section 'powertoys_install'
     if ($install -and $install.PSObject.Properties['installed_by_aicleaner'] -and [bool]$install.installed_by_aicleaner -and -not $RemovePowerToys) {
         Write-Status 'PowerToys was installed by aicleaner; run again with -RemovePowerToys to uninstall it' -Level Detail
