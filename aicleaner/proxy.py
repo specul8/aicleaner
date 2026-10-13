@@ -101,6 +101,7 @@ _NOT_UI_ACTIONS = ("/api/tokenise", "/api/rehydrate", "/api/session/tree-state",
 # for a browser (DECISIONS 50). Who read or downloaded what is exactly what the log is for.
 _LOGGED_READS = ("/api/session/file", "/api/session/file/raw", "/api/session/file/download")
 _FILE_WRITE = "/api/session/file/write"
+_READ_IMAGE = "/api/session/read-image"
 # Where a body value is a credential. Everything on the Secrets endpoints is; elsewhere, a key
 # that names one. "token" is withheld except where it is a client's token, which is not a secret.
 _SECRET_PATHS = ("/api/secrets",)
@@ -159,6 +160,9 @@ def _withheld(body: Any, path: str) -> Any:
     # autosave writes every few seconds, and the log would become a copy of every file edited.
     if path == _FILE_WRITE and isinstance(logged, dict) and isinstance(logged.get("text"), str):
         logged = {**logged, "text": f"({len(logged['text'])} characters)"}
+    # An image read for the prompt (feature 113) is logged by name and size, not as base64.
+    if path == _READ_IMAGE and isinstance(logged, dict) and isinstance(logged.get("data"), str):
+        logged = {**logged, "data": f"({len(logged['data']) * 3 // 4} bytes)"}
     return logged
 
 
@@ -275,8 +279,10 @@ class Proxy:
         # meant the page could reach aicleaner.
         self._open: dict[str, dict[str, Any]] = {}
         self._pdf_to_text = pdftotext_converter(cfg.pdftotext or None)
-        # Probed once at startup, like pdftotext: Tesseract if somebody installed it, otherwise
-        # the engine that ships with Windows, otherwise none and images stay a notice.
+        # Probed once at startup, like pdftotext: the shared reader (Snipping Tool's engine when the
+        # user has it, feature 113; otherwise Windows', with Tesseract where installed), otherwise
+        # Tesseract alone, otherwise none and images stay a notice. This is also what reads an image
+        # pasted into Claude Code in VS Code: it arrives here inside the request.
         self._image_to_text = image_converter(cfg.ocr_timeout_s) if cfg.ocr else None
         if cfg.ocr and self._image_to_text is None:
             log.info("no OCR engine on this machine: images and scanned PDFs stay withheld")

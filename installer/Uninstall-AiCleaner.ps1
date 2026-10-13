@@ -919,6 +919,13 @@ try {
     # --- 6. What the installers changed (recorded in install-changes.json) -----------------------
     $restored = Restore-InstallChanges
 
+    # The copy of Snipping Tool's engine DLLs the image reader made for this user (feature 113).
+    $engineCopy = Join-Path $env:LOCALAPPDATA 'aicleaner\oneocr'
+    if ((Test-Path -LiteralPath $engineCopy) -and $PSCmdlet.ShouldProcess($engineCopy, 'Remove the copy of Snipping Tool''s text engine')) {
+        Remove-Item -LiteralPath $engineCopy -Recurse -Force
+        Write-Status 'Removed the copy of Snipping Tool''s text engine' -Level Detail
+    }
+
     $captureShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\aicleaner text from screen.lnk'
     if ((Test-Path -LiteralPath $captureShortcut) -and $PSCmdlet.ShouldProcess($captureShortcut, 'Remove the screen-text shortcut')) {
         Remove-Item -LiteralPath $captureShortcut -Force

@@ -204,7 +204,7 @@ export function fileTabs(ctx) {
       h('span', { class: 'hint file-facts' }, facts),
       tab.gone ? h('span', { class: 'chip bad' }, 'No longer on disk') : null,
       tab.stale ? h('span', { class: 'chip warn' }, 'Changed on disk') : null,
-      h('span', { class: 'file-actions' }, reload, downloadLink(name, tab.root, tab.path)));
+      h('span', { class: 'file-actions' }, discussButton(), reload, downloadLink(name, tab.root, tab.path)));
     let body;
     if (tab.error) body = h('p', { class: 'error-text' }, tab.error);
     else if (!tab.data) body = h('p', { class: 'muted' }, 'Reading...');
@@ -381,6 +381,82 @@ export function fileTabs(ctx) {
       event.returnValue = '';
     }
   });
+
+  // "Discuss this code" (feature 116): the lines selected in a file tab - in the editor or the
+  // read-only view - become a snippet in the prompt, naming the file and its line numbers. A button
+  // in the tab's header while there is a selection (seen on a computer and a touch screen alike, so
+  // nobody has to know to right-click), and the same on right-click.
+  function selected() {
+    const tab = activeTab();
+    if (!tab || !ctx.discuss || !tab.data || typeof tab.data.text !== 'string') return null;
+    let text = '';
+    let before = '';
+    const box = tab.editor && ctx.pane.contains(tab.editor) ? tab.editor : null;
+    if (box && box.selectionStart !== box.selectionEnd) {
+      text = box.value.slice(box.selectionStart, box.selectionEnd);
+      before = box.value.slice(0, box.selectionStart);
+    } else {
+      const body = ctx.pane.querySelector('.file-text');
+      const sel = window.getSelection();
+      if (!body || !sel || sel.isCollapsed || !sel.rangeCount || !body.contains(sel.anchorNode) || !body.contains(sel.focusNode)) return null;
+      const range = sel.getRangeAt(0);
+      text = range.toString();
+      const lead = document.createRange();
+      lead.selectNodeContents(body);
+      lead.setEnd(range.startContainer, range.startOffset);
+      before = lead.toString();
+    }
+    const code = text.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+    if (!code.trim()) return null;
+    const first = before.replace(/\r\n?/g, '\n').split('\n').length;
+    return { code, lines: [first, first + code.split('\n').length - 1], file: tab.path.replace(/\\/g, '/'), name: tab.name };
+  }
+
+  function discuss() {
+    const found = selected();
+    closeDiscussMenu();
+    if (found) ctx.discuss(found);
+  }
+
+  function discussButton() {
+    if (!ctx.discuss) return null;
+    const button = h('button', { type: 'button', class: 'btn file-discuss', hidden: true,
+      title: 'Put the selected lines in the prompt as a code snippet, with the file and line numbers' }, 'Discuss this code');
+    // Pressed before the click lands, so the selection it acts on is still there.
+    button.addEventListener('mousedown', (event) => event.preventDefault());
+    button.addEventListener('click', discuss);
+    return button;
+  }
+
+  function showDiscuss() {
+    const button = ctx.pane.querySelector('.file-discuss');
+    if (button) button.hidden = !selected();
+  }
+
+  function closeDiscussMenu() {
+    for (const menu of document.querySelectorAll('.file-discuss-menu')) menu.remove();
+  }
+
+  document.addEventListener('selectionchange', showDiscuss);
+  ctx.pane.addEventListener('mouseup', showDiscuss);
+  ctx.pane.addEventListener('keyup', showDiscuss);
+  ctx.pane.addEventListener('select', showDiscuss, true);
+  ctx.pane.addEventListener('contextmenu', (event) => {
+    if (!selected()) return;                     // nothing selected: the browser's own menu
+    event.preventDefault();
+    closeDiscussMenu();
+    const item = h('button', { type: 'button', class: 'file-discuss-item', role: 'menuitem' }, 'Discuss this code');
+    item.addEventListener('mousedown', (e) => e.preventDefault());
+    item.addEventListener('click', discuss);
+    const menu = h('div', { class: 'file-discuss-menu', role: 'menu' }, item);
+    menu.style.left = `${Math.round(event.clientX)}px`;
+    menu.style.top = `${Math.round(event.clientY)}px`;
+    document.body.append(menu);
+  });
+  document.addEventListener('mousedown', (event) => {
+    if (!event.target.closest('.file-discuss-menu')) closeDiscussMenu();
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeDiscussMenu(); });
 
   return {
     open,

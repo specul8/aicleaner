@@ -840,11 +840,12 @@ function Install-PowerToysTextExtractor {
 
 function Install-SnippingTool {
     <#
-    Ensures Snipping Tool (Microsoft.ScreenSketch) is present and new enough for its text extractor
-    (11.2503.29.0 or later, Win+Shift+T needs Windows 11 build 26100+). Installs or updates through
-    winget's Store source; if the Store is unreachable, re-registers the provisioned package. Snipping
-    Tool's own "Automatically copy text" preference lives in the app's settings store and is set once
-    in the app. Returns $true when a capable Snipping Tool is installed.
+    Snipping Tool (Microsoft.ScreenSketch), new enough to carry its text engine (11.2503.29.0 or
+    later): aicleaner reads the text in every image and scanned PDF that reaches this machine with
+    that engine, layout kept (feature 113) - whoever took the picture, wherever (feature 115). Present:
+    said. Missing or older: asked (topic snipping-tool, default Yes), then installed or updated
+    through winget's Store source, or the provisioned package re-registered when the Store is
+    unreachable. Returns $true when a capable Snipping Tool is installed.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param()
@@ -852,15 +853,21 @@ function Install-SnippingTool {
     $storeId = '9MZ95KL8MR0L'
     $pkg = Get-AppxPackage -Name 'Microsoft.ScreenSketch' -ErrorAction SilentlyContinue | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
     $build = [Environment]::OSVersion.Version.Build
-    if ($build -lt 26100) {
-        Write-Status "Windows build $build predates Win+Shift+T text extraction (needs 26100+); the remap will open the older Snipping Tool" -Level Warn
-    }
     if ($pkg -and [version]$pkg.Version -ge $minVersion) {
-        Write-Status "Snipping Tool $($pkg.Version) present" -Level Detail
+        Write-Status "Snipping Tool $($pkg.Version) present: it reads the text in images here, layout kept" -Level Detail
+        if ($build -lt 26100) {
+            Write-Status "Windows build $build predates Win+Shift+T text extraction (needs 26100+); a key remapped to it opens the older Snipping Tool" -Level Detail
+        }
         return $true
     }
     $why = if ($pkg) { "version $($pkg.Version) is older than $minVersion" } else { 'not installed for this user' }
-    Write-Status "Snipping Tool $why; installing/updating from the Store"
+    Write-Status "Snipping Tool $why"
+    $offer = ("Install Snipping Tool from the Microsoft Store? aicleaner reads the text in images and scanned PDFs " +
+              "with its engine, on this machine, with the layout kept; without it, Windows' older engine reads them, less accurately")
+    if (-not (Confirm-Action -Topic 'snipping-tool' -Message $offer -Default 'Yes')) {
+        Write-Status "Snipping Tool not installed: images are read with Windows' older engine" -Level Detail
+        return $false
+    }
     if (-not $PSCmdlet.ShouldProcess('Microsoft.ScreenSketch', 'winget install (msstore)')) { return $false }
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     $savedEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
@@ -883,7 +890,8 @@ function Install-SnippingTool {
         Write-Status "Snipping Tool $($pkg.Version) ready" -Level Done
         return $true
     }
-    Write-Status "Snipping Tool is $(if ($pkg) { $pkg.Version } else { 'missing' }); update it from the Microsoft Store app (Library > Get updates) and re-run" -Level Warn
+    Write-Status ("Snipping Tool is $(if ($pkg) { $pkg.Version } else { 'missing' }): the Store could not provide it (on Windows Server it " +
+                  "may not be offered). Images are read with Windows' older engine; install Snipping Tool from the Microsoft Store app and re-run to change that.") -Level Warn
     return $false
 }
 function Test-OcrEngine {
@@ -898,11 +906,19 @@ function Test-OcrEngine {
 
         The Windows engine has to be driven from Windows PowerShell 5.1. The WinRT projections
         were taken out of PowerShell 7, so the type cannot even be loaded there - the same reason
-        Capture-TextFromScreen.ps1 refuses PS7.
+        Read-ImageText.ps1 refuses PS7.
+
+        First choice (feature 113): Snipping Tool's own engine, from the user's installed copy - read
+        by the same reader, with the layout kept. Nothing is installed for it.
     #>
     [CmdletBinding()]
     [OutputType([string])]
     param()
+    $snipping = Get-AppxPackage -Name 'Microsoft.ScreenSketch' -ErrorAction SilentlyContinue | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+    if ($snipping -and (Test-Path -LiteralPath (Join-Path $snipping.InstallLocation 'SnippingTool\oneocr.dll'))) {
+        Write-Status "Reading images: Snipping Tool's engine ($($snipping.Version)), the layout kept" -Level Detail
+        return 'snipping-tool'
+    }
     # Where its installer puts it as well as PATH: the build winget installs leaves PATH alone (2026-10-13).
     if ((Get-Command tesseract -ErrorAction SilentlyContinue) -or ($env:ProgramFiles -and (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Tesseract-OCR\tesseract.exe')))) {
         Write-Status 'Reading images: Tesseract with the Windows engine, the better reading of each word' -Level Detail
@@ -1394,7 +1410,7 @@ try {
     # --- 7b. Screenshot chord to text: Snipping Tool + PowerToys remap ------------
     if ($SkipSnippingTool) { Write-Status 'Snipping Tool step skipped' -Level Detail }
     else {
-        Write-Status 'Snipping Tool (text extractor capable)'
+        Write-Status 'Snipping Tool, which reads the text in images on this machine'
         Install-SnippingTool | Out-Null
     }
     if ($SkipPowerToys) { Write-Status 'PowerToys step skipped' -Level Detail }

@@ -40,7 +40,8 @@
 [CmdletBinding()]
 param(
     [string]$Path = '',
-    [double]$ColumnGap = 2.5
+    [double]$ColumnGap = 2.5,
+    [switch]$Engine
 )
 # The app folder: this script's own, or its parent when it sits in installer\ (feature 102).
 $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
@@ -152,7 +153,7 @@ function Repair-OcrWord {
     [CmdletBinding()]
     [OutputType([string])]
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
-    if ($Text -match '[A-Za-z0-9]') { $Text = $Text -replace '[–—]', '-' }
+    if ($Text -match '[A-Za-z0-9]') { $Text = $Text -replace '[\u2013\u2014]', '-' }
     if ($Text -cmatch '^[^0-9]*1[^0-9]*$') { $Text = $Text -creplace '(?<=[A-Za-z])1(?=[a-z])', 'l' }
     if ($Text -notmatch '\d') { return $Text }
     $Text = $Text -replace '[\xD8\xF8]', '0'
@@ -326,14 +327,298 @@ function Merge-EngineReading {
     return $merged
 }
 
+# ---------------------------------------------------------------------------
+# Snipping Tool's engine, OneOCR (feature 113)
+# ---------------------------------------------------------------------------
+# Microsoft's own engine, inside the Snipping Tool package: undocumented and never shipped with
+# aicleaner. The user's installed copy is used - its two DLLs copied to a folder of this user's
+# (WindowsApps will not load them in place) and signature-checked before every load, its model read
+# from the package folder, which nobody but Windows can write. Signatures as the public wrappers
+# publish them (b1tg/win11-oneocr and those built on it).
+
+$script:OneOcrKey = 'kj)TGtrK>f]b[Piow.gU+nC@s""""""4'
+
+$script:OneOcrSource = @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public class AicOcrWord {
+    public string Text; public double X; public double Y; public double Width; public double Height; public double Confidence;
+}
+
+public static class AicOneOcr {
+    [StructLayout(LayoutKind.Sequential)]
+    struct Img { public int Type; public int Width; public int Height; public int Reserved; public long Step; public IntPtr Data; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct Box { public float X1, Y1, X2, Y2, X3, Y3, X4, Y4; }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool SetDllDirectory(string path);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibrary(string path);
+    [DllImport("oneocr.dll")] static extern long CreateOcrInitOptions(out long options);
+    [DllImport("oneocr.dll")] static extern long OcrInitOptionsSetUseModelDelayLoad(long options, byte value);
+    [DllImport("oneocr.dll")] static extern long CreateOcrPipeline(byte[] model, byte[] key, long options, out long pipeline);
+    [DllImport("oneocr.dll")] static extern long CreateOcrProcessOptions(out long options);
+    [DllImport("oneocr.dll")] static extern long OcrProcessOptionsSetMaxRecognitionLineCount(long options, long count);
+    [DllImport("oneocr.dll")] static extern long RunOcrPipeline(long pipeline, ref Img image, long options, out long result);
+    [DllImport("oneocr.dll")] static extern long GetOcrLineCount(long result, out long count);
+    [DllImport("oneocr.dll")] static extern long GetOcrLine(long result, long index, out long line);
+    [DllImport("oneocr.dll")] static extern long GetOcrLineContent(long line, out IntPtr content);
+    [DllImport("oneocr.dll")] static extern long GetOcrLineBoundingBox(long line, out IntPtr box);
+    [DllImport("oneocr.dll")] static extern long GetOcrLineWordCount(long line, out long count);
+    [DllImport("oneocr.dll")] static extern long GetOcrWord(long line, long index, out long word);
+    [DllImport("oneocr.dll")] static extern long GetOcrWordContent(long word, out IntPtr content);
+    [DllImport("oneocr.dll")] static extern long GetOcrWordBoundingBox(long word, out IntPtr box);
+    [DllImport("oneocr.dll")] static extern long GetOcrWordConfidence(long word, out float confidence);
+    [DllImport("oneocr.dll")] static extern void ReleaseOcrResult(long result);
+
+    static long pipeline, process;
+
+    static byte[] Bytes(string text) {
+        byte[] encoded = System.Text.Encoding.UTF8.GetBytes(text);
+        byte[] terminated = new byte[encoded.Length + 1];
+        Array.Copy(encoded, terminated, encoded.Length);
+        return terminated;
+    }
+
+    static string Utf8(IntPtr pointer) {
+        if (pointer == IntPtr.Zero) return "";
+        int length = 0;
+        while (Marshal.ReadByte(pointer, length) != 0) length++;
+        byte[] buffer = new byte[length];
+        Marshal.Copy(pointer, buffer, 0, length);
+        return System.Text.Encoding.UTF8.GetString(buffer);
+    }
+
+    public static void Open(string dllFolder, string modelPath, string key) {
+        if (pipeline != 0) return;
+        SetDllDirectory(dllFolder);
+        if (LoadLibrary(System.IO.Path.Combine(dllFolder, "oneocr.dll")) == IntPtr.Zero)
+            throw new InvalidOperationException("oneocr.dll would not load (error " + Marshal.GetLastWin32Error() + ")");
+        long init;
+        if (CreateOcrInitOptions(out init) != 0 || OcrInitOptionsSetUseModelDelayLoad(init, 0) != 0)
+            throw new InvalidOperationException("the engine's options could not be created");
+        long made;
+        if (CreateOcrPipeline(Bytes(modelPath), Bytes(key), init, out made) != 0)
+            throw new InvalidOperationException("the engine would not open its model (a Snipping Tool update may have changed it)");
+        long options;
+        if (CreateOcrProcessOptions(out options) != 0 || OcrProcessOptionsSetMaxRecognitionLineCount(options, 1000) != 0)
+            throw new InvalidOperationException("the engine's reading options could not be set");
+        pipeline = made; process = options;
+    }
+
+    static AicOcrWord Item(string text, IntPtr boxPointer, double confidence) {
+        Box box = (Box)Marshal.PtrToStructure(boxPointer, typeof(Box));
+        double left = Math.Min(Math.Min(box.X1, box.X2), Math.Min(box.X3, box.X4));
+        double right = Math.Max(Math.Max(box.X1, box.X2), Math.Max(box.X3, box.X4));
+        double top = Math.Min(Math.Min(box.Y1, box.Y2), Math.Min(box.Y3, box.Y4));
+        double bottom = Math.Max(Math.Max(box.Y1, box.Y2), Math.Max(box.Y3, box.Y4));
+        return new AicOcrWord { Text = text, X = left, Y = top, Width = right - left, Height = bottom - top, Confidence = confidence };
+    }
+
+    // The engine's segments: each line's own text (its spacing, as Snipping Tool pastes it) and box,
+    // with the lowest confidence of its words.
+    public static AicOcrWord[] ReadLines(byte[] bgra, int width, int height, int stride) {
+        List<AicOcrWord> lines = new List<AicOcrWord>();
+        GCHandle pinned = GCHandle.Alloc(bgra, GCHandleType.Pinned);
+        try {
+            Img image = new Img { Type = 3, Width = width, Height = height, Reserved = 0, Step = stride, Data = pinned.AddrOfPinnedObject() };
+            long result;
+            if (RunOcrPipeline(pipeline, ref image, process, out result) != 0) throw new InvalidOperationException("the engine could not read the image");
+            try {
+                long count;
+                GetOcrLineCount(result, out count);
+                for (long l = 0; l < count; l++) {
+                    long line, words; IntPtr text; IntPtr boxPointer;
+                    if (GetOcrLine(result, l, out line) != 0) continue;
+                    GetOcrLineContent(line, out text);
+                    GetOcrLineBoundingBox(line, out boxPointer);
+                    if (boxPointer == IntPtr.Zero) continue;
+                    double lowest = 100;
+                    GetOcrLineWordCount(line, out words);
+                    for (long w = 0; w < words; w++) {
+                        long word; float confidence;
+                        if (GetOcrWord(line, w, out word) == 0 && GetOcrWordConfidence(word, out confidence) == 0)
+                            lowest = Math.Min(lowest, confidence * 100);
+                    }
+                    lines.Add(Item(Utf8(text), boxPointer, lowest));
+                }
+            } finally { ReleaseOcrResult(result); }
+        } finally { pinned.Free(); }
+        return lines.ToArray();
+    }
+
+    // bgra: 4 bytes a pixel, stride bytes a row. Boxes come back in that image's pixels.
+    public static AicOcrWord[] Read(byte[] bgra, int width, int height, int stride) {
+        List<AicOcrWord> words = new List<AicOcrWord>();
+        GCHandle pinned = GCHandle.Alloc(bgra, GCHandleType.Pinned);
+        try {
+            Img image = new Img { Type = 3, Width = width, Height = height, Reserved = 0, Step = stride, Data = pinned.AddrOfPinnedObject() };
+            long result;
+            if (RunOcrPipeline(pipeline, ref image, process, out result) != 0) throw new InvalidOperationException("the engine could not read the image");
+            try {
+                long lines;
+                GetOcrLineCount(result, out lines);
+                for (long l = 0; l < lines; l++) {
+                    long line, count;
+                    if (GetOcrLine(result, l, out line) != 0) continue;
+                    GetOcrLineWordCount(line, out count);
+                    for (long w = 0; w < count; w++) {
+                        long word; IntPtr text; IntPtr boxPointer; float confidence;
+                        if (GetOcrWord(line, w, out word) != 0) continue;
+                        GetOcrWordContent(word, out text);
+                        GetOcrWordBoundingBox(word, out boxPointer);
+                        GetOcrWordConfidence(word, out confidence);
+                        if (boxPointer == IntPtr.Zero) continue;
+                        Box box = (Box)Marshal.PtrToStructure(boxPointer, typeof(Box));
+                        double left = Math.Min(Math.Min(box.X1, box.X2), Math.Min(box.X3, box.X4));
+                        double right = Math.Max(Math.Max(box.X1, box.X2), Math.Max(box.X3, box.X4));
+                        double top = Math.Min(Math.Min(box.Y1, box.Y2), Math.Min(box.Y3, box.Y4));
+                        double bottom = Math.Max(Math.Max(box.Y1, box.Y2), Math.Max(box.Y3, box.Y4));
+                        words.Add(new AicOcrWord { Text = Utf8(text), X = left, Y = top, Width = right - left, Height = bottom - top, Confidence = confidence * 100 });
+                    }
+                }
+            } finally { ReleaseOcrResult(result); }
+        } finally { pinned.Free(); }
+        return words.ToArray();
+    }
+}
+'@
+
+function Get-SnippingToolPackage {
+    <# The installed Snipping Tool: @{ Version; Folder } (its engine's folder), or $null. #>
+    [CmdletBinding()]
+    param()
+    $package = Get-AppxPackage -Name 'Microsoft.ScreenSketch' -ErrorAction SilentlyContinue | Sort-Object { [version]$_.Version } -Descending | Select-Object -First 1
+    if (-not $package) { return $null }
+    $folder = Join-Path $package.InstallLocation 'SnippingTool'
+    if (-not (Test-Path -LiteralPath (Join-Path $folder 'oneocr.dll'))) { return $null }
+    return [pscustomobject]@{ Version = [string]$package.Version; Folder = $folder }
+}
+
+function Test-MicrosoftSignature {
+    <# True when the file carries a valid Authenticode signature from Microsoft Corporation. #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$Path)
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    return ($signature.Status -eq 'Valid' -and $signature.SignerCertificate -and
+            $signature.SignerCertificate.Subject -like 'CN=Microsoft Corporation,*')
+}
+
+function Copy-OneOcrLibrary {
+    <#
+    .SYNOPSIS
+        The folder holding this Snipping Tool version's two engine DLLs, copied for this user and
+        signature-checked; other versions' folders removed. Throws when a DLL is not Microsoft's.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)]$Package, [string]$CacheRoot = (Join-Path $env:LOCALAPPDATA 'aicleaner\oneocr'))
+    $folder = Join-Path $CacheRoot $Package.Version
+    New-Item -ItemType Directory -Force -Path $folder | Out-Null
+    foreach ($name in 'oneocr.dll', 'onnxruntime.dll') {
+        $copy = Join-Path $folder $name
+        if (-not (Test-Path -LiteralPath $copy)) { Copy-Item -LiteralPath (Join-Path $Package.Folder $name) -Destination $copy }
+        # Every time, not only after copying: the folder is the user's, so a DLL in it may have
+        # been replaced since. One not signed by Microsoft is never loaded.
+        if (-not (Test-MicrosoftSignature -Path $copy)) {
+            Remove-Item -LiteralPath $copy -Force -ErrorAction SilentlyContinue
+            throw "$name in $folder is not signed by Microsoft; it was removed and will be copied again from Snipping Tool"
+        }
+    }
+    Get-ChildItem -LiteralPath $CacheRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $Package.Version } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    return $folder
+}
+
+function Open-OneOcr {
+    <# Snipping Tool's engine, ready to read; throws with the reason when it cannot be. #>
+    [CmdletBinding()]
+    param()
+    $package = Get-SnippingToolPackage
+    if (-not $package) { throw 'Snipping Tool (with its text engine) is not installed' }
+    $folder = Copy-OneOcrLibrary -Package $package
+    if (-not ('AicOneOcr' -as [type])) { Add-Type -TypeDefinition $script:OneOcrSource }
+    [AicOneOcr]::Open($folder, (Join-Path $package.Folder 'oneocr.onemodel'), $script:OneOcrKey)
+    return $package
+}
+
+function ConvertTo-Bgra {
+    <#
+    .SYNOPSIS
+        A bitmap as the BGRA bytes the engine reads: @{ Bytes; Width; Height; Stride; Scale }. Padded
+        with white to 50 px a side, scaled down past 10,000 (Scale, to put boxes back).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Drawing.Bitmap]$Bitmap)
+    $scale = [Math]::Min(1.0, 10000.0 / [Math]::Max($Bitmap.Width, $Bitmap.Height))
+    $width = [Math]::Max(50, [int][Math]::Floor($Bitmap.Width * $scale))
+    $height = [Math]::Max(50, [int][Math]::Floor($Bitmap.Height * $scale))
+    $canvas = New-Object System.Drawing.Bitmap($width, $height, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $graphics = [System.Drawing.Graphics]::FromImage($canvas)
+    try {
+        $graphics.Clear([System.Drawing.Color]::White)
+        $graphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $graphics.DrawImage($Bitmap, 0, 0, [int][Math]::Floor($Bitmap.Width * $scale), [int][Math]::Floor($Bitmap.Height * $scale))
+    } finally { $graphics.Dispose() }
+    $locked = $canvas.LockBits((New-Object System.Drawing.Rectangle(0, 0, $width, $height)),
+        [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    try {
+        $bytes = New-Object byte[] ($locked.Stride * $height)
+        [System.Runtime.InteropServices.Marshal]::Copy($locked.Scan0, $bytes, 0, $bytes.Length)
+        return [pscustomobject]@{ Bytes = $bytes; Width = $width; Height = $height; Stride = $locked.Stride; Scale = $scale }
+    } finally { $canvas.UnlockBits($locked); $canvas.Dispose() }
+}
+
+function Read-OneOcrWord {
+    <#
+    .SYNOPSIS
+        What Snipping Tool's engine finds in an image file, boxes in the image's own pixels: its
+        segments (each line of text as the engine joined it) by default, single words with -SingleWords.
+    .DESCRIPTION
+        Segments, because the engine's own line text has the spacing Snipping Tool pastes ("==>"
+        whole, where its words were "==" and ">"); placing segments by their boxes is Snipping
+        Tool's text with the layout kept. Words remain for the comparison tests.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ImagePath, [switch]$SingleWords)
+    Add-Type -AssemblyName System.Drawing
+    $null = Open-OneOcr
+    $bitmap = New-Object System.Drawing.Bitmap((Resolve-Path -LiteralPath $ImagePath).Path)
+    try { $image = ConvertTo-Bgra -Bitmap $bitmap } finally { $bitmap.Dispose() }
+    $found = if ($SingleWords) { [AicOneOcr]::Read($image.Bytes, $image.Width, $image.Height, $image.Stride) }
+             else { [AicOneOcr]::ReadLines($image.Bytes, $image.Width, $image.Height, $image.Stride) }
+    $words = New-Object System.Collections.Generic.List[object]
+    foreach ($word in $found) {
+        $words.Add([pscustomobject]@{
+            Text = $word.Text; Confidence = $word.Confidence
+            X = $word.X / $image.Scale; Y = $word.Y / $image.Scale
+            Width = $word.Width / $image.Scale; Height = $word.Height / $image.Scale
+        })
+    }
+    return $words
+}
+
+function Get-ImageEngine {
+    <# Which engine would read an image here, and why not Snipping Tool's when it is not. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    try { $package = Open-OneOcr; return "snipping-tool $($package.Version)" }
+    catch { return "windows ($($_.Exception.Message))" }
+}
+
 function Get-ImageWord {
     <#
     .SYNOPSIS
-        The words of an image as both engines read them, merged; Windows' alone when Tesseract is
-        not installed or fails (Get-OcrWords, Read-TesseractWord, Merge-EngineReading).
+        The words of an image: Snipping Tool's engine when it can (feature 113); otherwise Windows'
+        engine, merged with Tesseract when Tesseract is installed.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$ImagePath)
+    try { return @(Read-OneOcrWord -ImagePath $ImagePath) }
+    catch { Write-Verbose "Snipping Tool's engine could not read it, so the Windows engine: $($_.Exception.Message)" }
     $windows = @(Get-OcrWords -ImagePath $ImagePath)
     $tesseract = Find-Tesseract
     if (-not $tesseract) { return $windows }
@@ -447,9 +732,10 @@ function ConvertTo-RowText {
     $previous = $null
     foreach ($word in $Words) {
         $column = [int][Math]::Round(($word.X - $Left) / $CharWidth)
+        $gap = if ($null -eq $previous) { 0 } else { $word.X - ($previous.X + $previous.Width) }
         if ($null -eq $previous) {
             [void]$text.Append(' ' * [Math]::Max(0, $column))
-        } elseif (($word.X - ($previous.X + $previous.Width)) -lt ($CharWidth * $ColumnGap)) {
+        } elseif ($gap -lt ($CharWidth * $ColumnGap)) {
             [void]$text.Append(' ')
         } else {
             # At least two spaces, so a break still reads as one when the text before ran long.
@@ -461,9 +747,44 @@ function ConvertTo-RowText {
     return $text.ToString()
 }
 
+function Split-ImagePage {
+    <#
+    .SYNOPSIS
+        The pages of an image file as PNG files in a folder of their own (a multi-page TIFF has
+        several; anything else one), and the folder, to remove afterwards.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ImagePath)
+    Add-Type -AssemblyName System.Drawing
+    $folder = Join-Path ([IO.Path]::GetTempPath()) ('aicleaner-pages-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $image = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $ImagePath).Path)
+    try {
+        $count = 1
+        try { $count = $image.GetFrameCount([System.Drawing.Imaging.FrameDimension]::Page) } catch { $count = 1 }
+        $pages = for ($index = 0; $index -lt [Math]::Min($count, 20); $index++) {
+            if ($count -gt 1) { [void]$image.SelectActiveFrame([System.Drawing.Imaging.FrameDimension]::Page, $index) }
+            $page = Join-Path $folder ('page-{0:d3}.png' -f ($index + 1))
+            $image.Save($page, [System.Drawing.Imaging.ImageFormat]::Png)
+            $page
+        }
+    } finally { $image.Dispose() }
+    return [pscustomobject]@{ Folder = $folder; Pages = @($pages) }
+}
+
 # Dot-sourced with no -Path: the functions are what was wanted, so stop here.
-if ($Path) {
+if ($Engine) {
+    Assert-WindowsPowerShell
+    Get-ImageEngine
+} elseif ($Path) {
     Assert-WindowsPowerShell
     if (-not (Test-Path -LiteralPath $Path)) { throw "No such image: $Path" }
-    ConvertTo-LayoutText -Words (Get-ImageWord -ImagePath $Path) -ColumnGap $ColumnGap
+    $split = Split-ImagePage -ImagePath $Path
+    try {
+        $texts = foreach ($page in $split.Pages) { ConvertTo-LayoutText -Words (Get-ImageWord -ImagePath $page) -ColumnGap $ColumnGap }
+        if (@($texts).Count -gt 1) {
+            $numbered = for ($index = 0; $index -lt @($texts).Count; $index++) { "--- page $($index + 1) ---`r`n" + @($texts)[$index] }
+            $numbered -join "`r`n`r`n"
+        } else { @($texts)[0] }
+    } finally { Remove-Item -LiteralPath $split.Folder -Recurse -Force -ErrorAction SilentlyContinue }
 }

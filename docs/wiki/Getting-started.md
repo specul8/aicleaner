@@ -51,11 +51,13 @@ this machine, shown in green (for example "VS Code Server IS here"):
 | 2 | Claude Desktop on this PC (needs an elevated PowerShell for one step) |
 | 3 | Claude Code here, reached from another PC over SSH (VS Code Remote) |
 | 4 | Claude Code here, driven from a plain SSH terminal |
-| 5 | Screen only: the AI agent runs on a different computer; this device is where you view and type (screenshot tooling only) |
-| 6 | None yet: just put the files in place |
+| 5 | None yet: just put the files in place |
 
-If you take screenshots on the machine, the next question is which keys you press to take one; the
-installer makes them send the screenshot's text instead. Before the installers run, the changes they
+A PC that only shows a machine running Claude Code needs nothing installed: screenshots and images
+you paste there are read on the machine where Claude Code runs, which the installer checks has
+Snipping Tool (its engine reads the text, layout kept) and offers to install it if not. If you take
+screenshots on the machine, you can also have your screenshot keys open Snipping Tool's text
+extractor (Win+Shift+T), or leave them alone. Before the installers run, the changes they
 will make are listed and numbered, each one its default. Press Enter to accept them all, or type the
 numbers of the ones you want to change (for example `2 5`): only those questions are asked, and
 answering one differently may bring a follow-up. Claude Desktop still asks for its API key.

@@ -19,6 +19,9 @@ import { renderMarkdown } from '../markdown.js';
 import { paintWorktree } from '../worktree.js';
 import { begin } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
+import { attachImageReading, imageButton, isReadable, readInto } from '../imagetext.js';
+import { codeEditor } from '../codeeditor.js';
+import { languageForFile, makeSnippet, nextSnippetNumber, snippetAt, snippetTitle, splitPrompt } from '../snippets.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
   viewableFiles } from '../treeselect.js';
 
@@ -305,7 +308,7 @@ function transcript(events, { after = null, placeholder = true } = {}) {
     }
     wasReplayed = Boolean(event.replayed);
     if (event.type === 'prompt') {
-      lines.push(h('div', { class: 'turn you' }, h('span', { class: 'who' }, 'you'), h('div', {}, event.text)));
+      lines.push(h('div', { class: 'turn you' }, h('span', { class: 'who' }, 'you'), promptBody(event.text)));
     } else if (event.type === 'assistant') {
       // Claude's reasoning, collapsed above the reply (the user, 2026-10-01): open it to see how a
       // request is being read and steer early. Summarised by the CLI (--thinking-display); an empty
@@ -483,6 +486,26 @@ function markTools(log, events, running) {
 // found only by luck. Pointing at it shows the whole bar; on a touch screen touching anywhere does.
 function dragGrip() {
   return h('span', { class: 'drag-grip', 'aria-hidden': 'true' });
+}
+
+// Your prompt in the transcript, its snippets numbered and labelled (feature 116): a heading, a
+// line-number gutter (from the file's own first line for a snippet taken from a file), no wrapping,
+// sideways scrolling - so "line 16 of snippet 2" points at something both of you can see.
+function promptBody(text) {
+  const parts = splitPrompt(text);
+  if (!parts.some((part) => part.snippet)) return h('div', {}, text);
+  return h('div', { class: 'prompt-parts' }, ...parts.map((part) => (part.snippet
+    ? snippetBlock(part.snippet) : h('div', { class: 'prompt-text' }, part.text))));
+}
+
+function snippetBlock(snippet) {
+  const lines = snippet.code.split('\n');
+  const first = snippet.lines ? snippet.lines[0] : 1;
+  return h('figure', { class: 'snippet', dataset: { snippet: String(snippet.number || '') } },
+    h('figcaption', { class: 'snippet-title' }, snippetTitle(snippet)),
+    h('div', { class: 'snippet-scroll' },
+      h('pre', { class: 'file-gutter snippet-gutter', 'aria-hidden': 'true' }, lines.map((_, i) => String(first + i)).join('\n')),
+      h('pre', { class: 'snippet-code' }, snippet.code)));
 }
 
 // Prompts waiting for the running turn to end (D176): above the prompt box, not in the transcript,
@@ -687,11 +710,15 @@ function treeMenu(name, full, file, about = null) {
   const download = downloadLink(view.name, file.root, file.path, '', {
     role: 'menuitem', class: 'tree-download', 'aria-label': `Download ${name}`, title: 'Download this file' });
   download.append(h('span', { 'aria-hidden': 'true' }, '\u2b07'), ' Download');
-  if (file.view === 'download') return placed(h('div', { class: 'tree-menu', role: 'menu' }, prompt, download));
+  // An image, TIFF or PDF: its text read on this machine into the prompt (feature 113).
+  const read = isReadable(name) ? h('button', { type: 'button', class: 'tree-read', role: 'menuitem', 'aria-label': `Read the text in ${name} into the prompt`,
+    title: 'Read the text in this file on this machine and put it in the prompt to check', dataset: { root: file.root, path: file.path, name } },
+  h('span', { 'aria-hidden': 'true' }, 'T'), ' Read text') : null;
+  if (file.view === 'download') return placed(h('div', { class: 'tree-menu', role: 'menu' }, prompt, read, download));
   const open = h('button', { type: 'button', class: 'tree-view', role: 'menuitem', 'aria-label': `Open ${name} in a tab`,
     title: 'Open this file in a tab', dataset: { root: file.root, path: file.path, name, view: file.view } },
   h('span', { 'aria-hidden': 'true' }, '\ud83d\udc41'), ' View');
-  return placed(h('div', { class: 'tree-menu', role: 'menu' }, prompt, open, download));
+  return placed(h('div', { class: 'tree-menu', role: 'menu' }, prompt, read, open, download));
 }
 
 // The menu opens below and right of the tap (D143), but one tapped near the end of a name ran past
@@ -1920,7 +1947,7 @@ export async function render(main, context = {}) {
   // The keys are named in the placeholder because there is nowhere else to put them: a box with
   // hidden keyboard behaviour is a box people keep using the mouse on (feature 48).
   const box = h('textarea', { id: 'session-prompt', rows: '3',
-    placeholder: 'Ask it something...  (Enter sends, Ctrl+Enter or Shift+Enter for a new line, Escape stops the turn)',
+    placeholder: 'Type something or paste a screenshot...  (Enter sends, Ctrl+Enter or Shift+Enter for a new line, Escape stops the turn)',
     'aria-label': 'Prompt' });
   // Each session has its own prompt (the user, 2026-10-01): switching shows that session's draft
   // and never clears another's. Kept in sessionStorage - it survives a reload of this tab, and is
@@ -2365,6 +2392,7 @@ export async function render(main, context = {}) {
     // when it names another one (D118). Replaced, not pushed: switching is not a page to go back to.
     noteAddress(name ? `#/session/${encodeURIComponent(name)}` : '#/session');
     loadDraft();
+    if (view.resumeSnippet) view.resumeSnippet();      // a snippet being written in that session (feature 116)
     tree.open.clear();
     clearSelection();
     Object.assign(tree, { searchOpen: false, query: '', found: null });   // another session's folders (feature 90)
@@ -2414,11 +2442,37 @@ export async function render(main, context = {}) {
   // to the left of the link indicator (the user, 2026-10-08).
   const autocorrect = attachAutocorrect(box, { conversation: () => log.textContent || '' });
   view.autocorrect = autocorrect;
+  // Feature 113: images and PDFs read to text on this machine, into the prompt to check first.
+  const sessionRoots = () => { const profile = profileOf(view.name); return [...(profile.tree || profile.projects || []), ...(profile.share ? [profile.share] : [])]; };
+  const readChip = h('div', { id: 'session-read-chip', class: 'hint', hidden: true });
+  const offerRead = (found) => {
+    const yes = h('button', { type: 'button', class: 'btn' }, 'Read its text into the prompt');
+    const no = h('button', { type: 'button', class: 'btn' }, 'No');
+    yes.addEventListener('click', () => { readChip.hidden = true; readInto(box, found, view.name, say, imageSnippet); });
+    no.addEventListener('click', () => { readChip.hidden = true; });
+    readChip.replaceChildren(`You pasted the path of ${found.filename}. `, yes, ' ', no);
+    readChip.hidden = false;
+  };
+  // Feature 116: snippets. Numbered within the session, after every one in its transcript and the box.
+  const promptTexts = () => (current().events || []).filter((e) => e.type === 'prompt').map((e) => e.text);
+  const snippetNumber = () => nextSnippetNumber([...promptTexts(), box.value]);
+  // Image text arrives as a snippet: the reader lines columns up by counting characters, which only
+  // holds unwrapped and in monospace - the code view and the transcript's snippets, not the box.
+  const imageSnippet = (text, filename) => makeSnippet({ code: text, lang: 'text', number: snippetNumber(), image: filename });
+  attachImageReading(box, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
+  const readButton = imageButton((files) => { for (const file of files) readInto(box, { file }, view.name, say, imageSnippet); });
+  const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
+  const insertCodeButton = h('button', { type: 'button', id: 'session-insert-code', class: 'btn',
+    title: 'Paste or type code in an editor with line numbers and no wrapping, then add it to the prompt' }, 'Insert code snippet');
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
+    codeSlot,
     autocorrect.stack,
     slash,
+    readChip,
     h('div', { class: 'form-row' },
       h('button', { type: 'button', id: 'session-send', class: 'primary' }, 'Send'),
+      insertCodeButton,
+      readButton,
       autocorrect.toggle,
       // Beside Send, because that is where the eye already is when waiting for a reply,
       // and waiting is when "is this thing still connected?" gets asked (feature 65).
@@ -2460,7 +2514,89 @@ export async function render(main, context = {}) {
   const stream = h('div', { class: 'session-stream' }, log, h('div', { class: 'session-underlog' }, doing, toLatest));
   const tabStrip = h('div', { id: 'file-tabs', class: 'file-tabs', role: 'tablist', hidden: true });
   const filePane = h('div', { id: 'file-pane', class: 'file-pane', hidden: true });
-  const tabs = fileTabs({ strip: tabStrip, pane: filePane, stream, name: () => view.name });
+  // The code editor in the prompt box's place, and the ways into it (feature 116).
+  const code = codeEditor({ slot: codeSlot, pane: promptPane, say });
+  view.codeEditor = code;
+  let snippetMarks = 0;
+  const snippetKey = (name) => `aicleaner.snippet.${name}`;
+  const forgetSnippet = () => { try { sessionStorage.removeItem(snippetKey(view.name)); } catch (error) { /* not stored */ } };
+  // A placeholder on its own line at the caret, replaced by the snippet (or removed) when done.
+  const placeMark = () => {
+    snippetMarks += 1;
+    const mark = `[code snippet being written #${Date.now().toString(36)}${snippetMarks}]`;
+    const at = box.selectionStart === null ? box.value.length : box.selectionStart;
+    const to = box.selectionEnd === null ? at : box.selectionEnd;
+    const before = box.value.slice(0, at);
+    const lead = before && !before.endsWith('\n') ? '\n' : '';
+    const after = box.value.slice(to);
+    const tail = after && !after.startsWith('\n') ? '\n' : '';
+    box.value = before + lead + mark + tail + after;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    return mark;
+  };
+  const replaceMark = (mark, replacement) => {
+    let at = box.value.indexOf(mark);
+    if (at < 0) {                                   // removed by hand meanwhile: put it at the end
+      if (!replacement) return;
+      box.value = `${box.value.replace(/\n*$/, '')}${box.value.trim() ? '\n' : ''}${replacement}`;
+    } else if (replacement) {
+      box.value = box.value.slice(0, at) + replacement + box.value.slice(at + mark.length);
+    } else {
+      const end = at + mark.length + (box.value[at + mark.length] === '\n' ? 1 : 0);
+      if (at > 0 && box.value[at - 1] === '\n' && end === at + mark.length) at -= 1;
+      box.value = box.value.slice(0, at) + box.value.slice(end);
+    }
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+    box.focus();
+  };
+  const openNewSnippet = (mark, saved = null) => {
+    code.open({
+      title: 'New code snippet', code: saved ? saved.code : '', lang: saved ? saved.lang : (view.snippetLang || 'text'),
+      onChange: (state) => {
+        try { sessionStorage.setItem(snippetKey(view.name), JSON.stringify({ mark, ...state })); } catch (error) { /* not kept */ }
+      },
+      onDone: (text, lang) => {
+        forgetSnippet();
+        view.snippetLang = lang;
+        replaceMark(mark, text.trim() ? makeSnippet({ code: text, lang, number: snippetNumber() }) : '');
+      },
+      onCancel: () => { forgetSnippet(); replaceMark(mark, ''); },
+    });
+  };
+  insertCodeButton.addEventListener('click', () => openNewSnippet(placeMark()));
+  // A snippet being written when the page was reloaded or the session switched comes back.
+  view.resumeSnippet = () => {
+    code.close();
+    let saved = null;
+    try { saved = JSON.parse(sessionStorage.getItem(snippetKey(view.name)) || 'null'); } catch (error) { saved = null; }
+    if (saved && saved.mark && box.value.includes(saved.mark)) openNewSnippet(saved.mark, saved);
+  };
+  view.resumeSnippet();                // the first draft was loaded before the editor existed
+  // Double-click inside a snippet in the box: back into the code editor; Update puts it back in place.
+  box.addEventListener('dblclick', () => {
+    const found = snippetAt(box.value, box.selectionStart);
+    if (!found) return;
+    code.open({
+      title: `Edit ${snippetTitle(found)}`, code: found.code, lang: found.lang, update: true,
+      firstLine: found.lines ? found.lines[0] : 1,
+      onDone: (text, lang) => {
+        const count = text.replace(/\n+$/, '').split('\n').length;
+        const lines = found.lines ? [found.lines[0], found.lines[0] + count - 1] : null;
+        const fresh = makeSnippet({ code: text, lang, number: found.number || snippetNumber(), file: found.file, lines, image: found.image });
+        box.value = box.value.slice(0, found.start) + fresh + box.value.slice(found.end);
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+        box.focus();
+      },
+      onCancel: () => box.focus(),
+    });
+  });
+  // "Discuss this code" in a file tab: the selection as a snippet at the caret, naming its file and lines.
+  const discussCode = ({ code: text, lines, file, name }) => {
+    const lang = languageForFile(name);
+    replaceMark(placeMark(), makeSnippet({ code: text, lang, number: snippetNumber(), file, lines }));
+    say(`Lines ${lines[0]}-${lines[1]} of ${name} are in the prompt as a snippet.`, 'ok');
+  };
+  const tabs = fileTabs({ strip: tabStrip, pane: filePane, stream, name: () => view.name, discuss: discussCode });
   if (view.tabs) view.tabs.stop();
   view.tabs = tabs;
   // The 15-second check, on demand, for tests - the same hook style as the stream's.
@@ -2934,6 +3070,14 @@ export async function render(main, context = {}) {
   panel.addEventListener('click', async (event) => {
     const insert = event.target.closest('button.tree-insert');
     if (insert) { insertAtCursor(box, insert.dataset.insert); tree.menu = null; showTree(); return; }
+    const readItem = event.target.closest('button.tree-read');
+    if (readItem) {
+      const d = readItem.dataset;
+      tree.menu = null;
+      showTree();
+      readInto(box, { root: d.root, path: d.path, filename: d.name }, view.name, say, imageSnippet);
+      return;
+    }
     const viewButton = event.target.closest('button.tree-view');
     if (viewButton) {
       const d = viewButton.dataset;

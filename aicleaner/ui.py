@@ -867,6 +867,54 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return web.json_response({"error": str(problem)}, status=403)
         return web.json_response(answer)
 
+    reading: dict[str, asyncio.Lock] = {}
+
+    async def session_read_image(request: web.Request) -> web.Response:
+        """Feature 113: an image or PDF read to text for the prompt box - pasted, dropped or chosen
+        (the bytes, base64, so it goes sealed through the tunnel like any call), or named by its
+        path inside the session's folders (`root` and `path`, the file tree's rule). Read with the
+        proxy's own readers, one at a time per session. Nothing is sent to the model from here."""
+        import base64
+        import binascii
+
+        from .imagetext import MAX_BYTES, ConversionError, ReadRefused, read_text
+        from .session import SessionError
+
+        body = await request.json()
+        name = str(body.get("name", ""))
+        if body.get("path"):
+            try:
+                target = await asyncio.to_thread(session_host().locate_file, name, str(body.get("root", "")),
+                                                 str(body.get("path", "")))
+                if target.stat().st_size > MAX_BYTES:
+                    return web.json_response({"error": f"{target.name} is over {MAX_BYTES // (1024 * 1024)} MB"}, status=413)
+                raw = await asyncio.to_thread(target.read_bytes)
+                filename = target.name
+            except (SessionError, OSError) as problem:
+                return web.json_response({"error": str(problem)}, status=403)
+        else:
+            try:
+                raw = base64.b64decode(str(body.get("data", "")), validate=True)
+            except (binascii.Error, ValueError):
+                return web.json_response({"error": "the file did not arrive whole"}, status=400)
+            filename = str(body.get("filename", ""))[:200]
+        lock = reading.setdefault(name, asyncio.Lock())
+        if lock.locked():
+            return web.json_response({"error": "an image is already being read for this session; try again when it is done"},
+                                     status=429)
+        image_to_text = getattr(proxy, "_image_to_text", None)
+        pdf_to_text = getattr(proxy, "_pdf_to_text", None)
+        cfg = proxy.cfg if proxy is not None else None
+        async with lock:
+            try:
+                text = await asyncio.to_thread(read_text, raw, filename, image_to_text, pdf_to_text,
+                                               cfg.ocr_max_pages if cfg else 10, cfg.ocr_timeout_s if cfg else 60)
+            except ReadRefused as refused:
+                return web.json_response({"error": str(refused)}, status=415)
+            except (ConversionError, OSError) as failed:
+                return web.json_response({"error": f"{filename or 'the file'} could not be read: {failed}"}, status=500)
+        return web.json_response({"text": text, "filename": filename})
+
     async def _send_file(request: web.Request, inline: bool) -> web.StreamResponse:
         from .session import MAX_FILE_SEND, SessionError, file_kind, inline_type
 
@@ -2698,6 +2746,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get("/api/editor/powershell/parameters", editor_ps_parameters)
         app.router.add_get("/api/session/file", session_file)
         app.router.add_post("/api/session/file/write", session_file_write)
+        app.router.add_post("/api/session/read-image", session_read_image)
         app.router.add_get("/api/session/file/raw", session_file_raw)
         app.router.add_get("/api/session/file/download", session_file_download)
         app.router.add_post("/api/session/file/stat", session_file_stat)

@@ -218,9 +218,12 @@ export function statusItems(status) {
   }
   if (status.pending > 0) items.push({ level: 'amber', text: `${status.pending} to Review`, href: '#/review' });
   if (!items.length) items.push({ level: 'green', text: 'Filtering on', href: '#/overview' });
-  // Work that landed while you were elsewhere (feature 44): on top, since it is news - and
-  // added after the check above, so a notice never stands in for "Filtering on".
-  return [...activityItems(), ...items];
+  // Work that landed while you were elsewhere (feature 44): under the filter's own state - which,
+  // with the encryption badge above it, is what the stack is for (the user, 2026-10-13; they were
+  // on top). Marked as notices, drawn without a frame, so a finished session's tick cannot be taken
+  // for "Filtering on" when the menu is collapsed to its icons. Added after the check above, so a
+  // notice never stands in for "Filtering on".
+  return [...items, ...activityItems().map((notice) => ({ ...notice, notice: true }))];
 }
 
 const LEVEL_ICON = { green: 'check', amber: 'alert', red: 'cross' };
@@ -247,7 +250,7 @@ function renderTunnelState(status) {
 function renderStatusStack(status) {
   const stack = document.getElementById('status-stack');
   stack.replaceChildren(...statusItems(status).map((item) =>
-    h('a', { class: 'status', href: item.href, title: item.text, dataset: { level: item.level } }, icon(LEVEL_ICON[item.level]), h('span', { class: 'status-text' }, item.text))));
+    h('a', { class: item.notice ? 'status notice' : 'status', href: item.href, title: item.text, dataset: { level: item.level } }, icon(LEVEL_ICON[item.level]), h('span', { class: 'status-text' }, item.text))));
 }
 
 // Secrets cannot be used at all through the tunnel (every /api/secrets call is local only), so its
@@ -313,7 +316,11 @@ function renderNavSessions(status) {
     href: `#/session/${encodeURIComponent(s.name)}/chat`, class: s.waiting ? 'waiting' : null,
     title: s.waiting ? `${s.name} is waiting on you` : `${s.name} - open its chat`,
     dataset: { session: s.name },
-  }, h('span', { class: 'dot', 'aria-hidden': 'true' }), s.name)));
+  }, h('span', { class: 'dot', 'aria-hidden': 'true' }),
+  // Collapsed to the icon rail, the first letter stands in for the name (the user, 2026-10-13: the
+  // sessions vanished); the title gives the whole name on hover.
+  h('span', { class: 'nav-session-initial', 'aria-hidden': 'true' }, s.name.slice(0, 1).toUpperCase()),
+  h('span', { class: 'nav-session-name' }, s.name))));
 }
 
 function markCurrent() {

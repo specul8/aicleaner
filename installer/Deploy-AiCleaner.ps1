@@ -1520,6 +1520,7 @@ function Select-InstallerChange {
     if ($desktop) { $items.Add([pscustomobject]@{ Topic = 'desktop-policy'; Text = "Claude Desktop's policy values written, so it sends through aicleaner" }) }
     $items.Add([pscustomobject]@{ Topic = 'proxy-task'; Text = 'The aicleaner-proxy task at sign-in, and the proxy started now' })
     $items.Add([pscustomobject]@{ Topic = 'doc-tools'; Text = 'Document converters (pandoc, Poppler, the Office readers) installed where missing' })
+    $items.Add([pscustomobject]@{ Topic = 'snipping-tool'; Text = 'Snipping Tool installed if missing: its engine reads the text in images here, layout kept' })
     if ($vscode) { $items.Add([pscustomobject]@{ Topic = 'script-analyzer'; Text = 'PSScriptAnalyzer installed, so the agent can check the PowerShell it writes' }) }
 
     Write-Host ''
@@ -1880,12 +1881,9 @@ function Write-NextSteps {
         Write-Host ''
         Write-Status 'Using VS Code from another computer' -Level Step
         Write-Status 'You chose to reach Claude Code on this computer from another computer.' -Level Detail
-        Write-Status 'Screenshots sent to an AI service are processed remotely, and can reveal client information.' -Level Detail
-        Write-Status 'Sending images to an AI service is off by default in the AI Cleaner app (it can be turned on in Settings).' -Level Detail
-        Write-Status 'To lower that risk, the installer can set up the screenshot tools on your other computer so they' -Level Detail
-        Write-Status 'read the text in a screenshot automatically: text is filtered, a picture is not.' -Level Detail
-        Write-Status 'To do that, run this installer on your other computer and choose:' -Level Detail
-        Write-Status '  5. Screen only: the AI agent runs on a different computer; this device is where you view and type' -Level Detail
+        Write-Status 'Screenshots and images you paste on the other computer reach Claude Code here, and are read' -Level Detail
+        Write-Status 'on this machine: their text is filtered and sent, the picture itself is not (sending images is off' -Level Detail
+        Write-Status 'by default in the AI Cleaner app). The other computer needs nothing installed.' -Level Detail
     }
 }
 
@@ -1966,12 +1964,6 @@ function Resolve-Roles {
     if ($roles -contains 'none') {
         Write-Status "'just put the files in place' does not add to the rest; dropping it" -Level Detail
         $roles = @($roles | Where-Object { $_ -ne 'none' })
-    }
-    if ($agents.Count -gt 0 -and $roles -contains 'workstation') {
-        # The agent installs bring the screenshot tooling with them; workstation is for a PC with
-        # no agent at all, and running it as well would only turn the proxy wiring back off.
-        Write-Status 'An agent runs here, so the screenshot tooling comes with it; dropping the client-PC role' -Level Detail
-        $roles = @($roles | Where-Object { $_ -ne 'workstation' })
     }
     if ($roles -contains 'code-headless' -and @($roles | Where-Object { @('code-local', 'code-remote') -contains $_ }).Count -gt 0) {
         Write-Status 'VS Code is used here after all, so the headless answer adds nothing; dropping it' -Level Detail
@@ -2106,25 +2098,6 @@ function Read-ScreenshotShortcut {
     return 'win+shift+s'
 }
 
-function Show-ViewerHelp {
-    <#
-    .SYNOPSIS
-        What a device that only views another machine needs, which is almost nothing.
-    .DESCRIPTION
-        Two ways of looking at the same situation - a VS Code window over SSH, or the session page
-        in a browser - and the same answer to both: the proxy, the mapping and the session all stay
-        on the machine running the agent. This one either takes screenshots or it does not.
-    #>
-    [CmdletBinding()]
-    param()
-    Write-Status 'The agent runs somewhere else, so almost nothing belongs here.' -Level Done
-    Write-Status 'Reaching a session through a browser needs nothing installed on this device: the' -Level Detail
-    Write-Status 'tunnel is set up on the machine the agent runs on, and you open the address it' -Level Detail
-    Write-Status 'prints. Cloudflare terminates TLS there, so it can see what crosses it.' -Level Detail
-    Write-Status 'The one thing worth having here is the screenshot tooling, so a console picture' -Level Detail
-    Write-Status 'becomes text the proxy can filter rather than an image it cannot read.' -Level Detail
-}
-
 function Test-InferenceCredential {
     <#
     .SYNOPSIS
@@ -2236,26 +2209,12 @@ function Get-MachineRole {
         'desktop'       = 'Claude Desktop, on this machine'
         'code-remote'   = 'Claude Code here, reached by VS Code Remote-SSH from another PC'
         'code-headless' = "Claude Code here, driven from a plain SSH terminal$headlessNote"
-        'workstation'   = 'Screen only: the AI agent runs on a different computer; this device is where you view and type'
         'none'          = 'None yet: just put the files in place'
     }))
     $roles = @(Resolve-Roles -Chosen $roles)
     $agentHere = @('code-local', 'code-remote', 'code-headless', 'desktop')
     $nothingToDo = $false
     $workstationArgs = @($WorkstationArguments)
-    if ($roles -contains 'workstation' -and @($roles | Where-Object { $_ -ne 'workstation' }).Count -eq 0) {
-        # A viewing device is a viewing device whether you look through VS Code over SSH or a
-        # browser: neither runs the agent, and both want the same one thing if anything.
-        Show-ViewerHelp
-        # Screenshots are that one thing, since pasting a picture of a console sends the client
-        # names the proxy never sees.
-        if (-not (Confirm-Action -Message 'Do you take screenshots on this device (so they can be pasted as text)?' -Default 'Yes')) {
-            $roles = @()
-            $nothingToDo = $true
-        } else {
-            $workstationArgs = @($WorkstationArguments) + @('-ScreenshotKeys', (Read-ScreenshotShortcut))
-        }
-    }
     $wanted = @($roles | Where-Object { $agentHere -contains $_ })
     if ($wanted.Count -gt 0) {
         $agents = @()
@@ -2283,18 +2242,19 @@ function Get-MachineRole {
     }
     $screenHere = $roles -contains 'code-local' -or $roles -contains 'desktop'
     if ($screenHere) {
+        # No skips only the key remap: Snipping Tool is checked anyway, because it reads the text in
+        # every image that reaches this machine, whoever took it (feature 115).
         if (-not (Confirm-Action -Message 'Do you take screenshots on this machine?' -Default 'Yes')) {
-            $vscodeArgs += @('-SkipPowerToys', '-SkipSnippingTool')
-            $advice = 'Screenshots are taken elsewhere: run this script on that PC and choose "Screen only".'
+            $vscodeArgs += @('-SkipPowerToys')
         } else {
             $keys = Read-ScreenshotShortcut
             $vscodeArgs += @('-ScreenshotKeys', $keys)
             $desktopArgs += @('-ScreenshotKeys', $keys)
         }
     } elseif ($codeRoles.Count -gt 0) {
-        # Nobody looks at a screen on a machine reached only over SSH.
-        $vscodeArgs += @('-SkipPowerToys', '-SkipSnippingTool')
-        $advice = ''
+        # Nobody looks at a screen on a machine reached only over SSH: no key remap. Snipping Tool
+        # stays, since the images pasted on the other PC are read here (feature 115).
+        $vscodeArgs += @('-SkipPowerToys')
     }
     if ($roles -contains 'desktop') {
         if (Confirm-Action -Message 'Register the nightly backup of the Claude Desktop profile?' -Default 'Yes') {
@@ -2304,7 +2264,6 @@ function Get-MachineRole {
     $targets = New-Object System.Collections.Generic.List[string]
     if ($codeRoles.Count -gt 0) { $targets.Add('VSCode') }
     if ($roles -contains 'desktop') { $targets.Add('Desktop') }
-    if ($roles -contains 'workstation') { $targets.Add('Workstation') }
     $targets = @($targets)
     if ($nothingToDo) { $targets = @() }
     # Reached from another PC and nobody looks at this screen: the final steps say what that means
