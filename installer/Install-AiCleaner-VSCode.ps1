@@ -519,6 +519,39 @@ function Test-RoutingOverride {
     Write-Status 'A repo can still override routing in .claude\settings.json: run "aicleaner scan <repo>" before the first session.' -Level Detail
 }
 
+function Invoke-AiCleanerCli {
+    <#
+    .SYNOPSIS
+        Runs "python -m aicleaner ..." where the package actually is, and returns its exit code.
+    .DESCRIPTION
+        The venv has aiohttp in it, not aicleaner: the package is imported from the install folder,
+        so python has to be started there. Inheriting whatever folder the installer was launched
+        from gives "No module named aicleaner" on a perfectly good install, which then reports the
+        mapping as invalid - a confusing way to say "I looked in the wrong place".
+
+        The proxy itself has always been started with -WorkingDirectory; this is the same rule for
+        the one-shot commands.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$AppRoot,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [string]$Level = 'Detail'
+    )
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location -LiteralPath $AppRoot
+    try {
+        & $Python @('-m', 'aicleaner') @Arguments 2>&1 | ForEach-Object { Write-Status "$_" -Level $Level }
+        return $LASTEXITCODE
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $savedEap
+    }
+}
+
 # The Pythons requirements.lock has wheels for (tools/lock_requirements.py PYTHONS), newest first.
 # Any other is passed over: its wheels have no hash in the lock, so pip refuses them - a Store
 # Python 3.14 failed the whole install there before 3.14 was locked (2026-10-15). A newer one

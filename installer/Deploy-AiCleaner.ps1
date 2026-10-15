@@ -1434,6 +1434,12 @@ function Invoke-AppScript {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Path, [string[]]$Arguments = @(), [switch]$Elevated)
     $shell = (Get-Process -Id $PID).Path
+    # Windows PowerShell 5.1 drops an empty argument on its way to a native program, so the child got
+    # "-LogPath" with nothing after it and refused to start (a new user's update, 2026-10-15). Written
+    # as "" it arrives as the empty string; PowerShell 7 passes the empty string as it is.
+    if ($PSVersionTable.PSVersion.Major -lt 7) {
+        $Arguments = @($Arguments | ForEach-Object { if ($_ -eq '') { '""' } else { $_ } })
+    }
     $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Path) + $Arguments
     if ($WhatIfPreference) { $argList += '-WhatIf' }
     Write-Status "Running $(Split-Path -Leaf $Path) $($Arguments -join ' ')$(if ($Elevated) { ' (as administrator)' })"
