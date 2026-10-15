@@ -519,6 +519,12 @@ function Test-RoutingOverride {
     Write-Status 'A repo can still override routing in .claude\settings.json: run "aicleaner scan <repo>" before the first session.' -Level Detail
 }
 
+# The Pythons requirements.lock has wheels for (tools/lock_requirements.py PYTHONS), newest first.
+# Any other is passed over: its wheels have no hash in the lock, so pip refuses them - a Store
+# Python 3.14 failed the whole install there before 3.14 was locked (2026-10-15). A newer one
+# than these means Python 3.13 is installed alongside it.
+$script:LockedPythons = @('3.14', '3.13', '3.12', '3.11')
+
 function Find-Python {
     [CmdletBinding()]
     param([string]$Preferred)
@@ -533,7 +539,7 @@ function Find-Python {
     try {
         $py = Get-Command py -ErrorAction SilentlyContinue
         if ($py) {
-            foreach ($ver in '3.13', '3.12', '3.11') {
+            foreach ($ver in $script:LockedPythons) {
                 & $py.Source "-$ver" -c 'import sys' 2>$null
                 if ($LASTEXITCODE -eq 0) { return @{ Exe = $py.Source; Args = @("-$ver") } }
             }
@@ -543,7 +549,8 @@ function Find-Python {
             if ($cmd) {
                 # No quotes inside the probe: PS 5.1 strips embedded quotes when passing args to native exes.
                 $verText = & $cmd.Source -c 'import platform; print(platform.python_version())' 2>$null
-                if ($LASTEXITCODE -eq 0 -and $verText -and [version]$verText -ge [version]'3.11') {
+                if ($LASTEXITCODE -eq 0 -and $verText -and
+                    $script:LockedPythons -contains ('{0}.{1}' -f ([version]$verText).Major, ([version]$verText).Minor)) {
                     return @{ Exe = $cmd.Source; Args = @() }
                 }
             }
