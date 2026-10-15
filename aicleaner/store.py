@@ -30,7 +30,8 @@ from typing import Any
 from . import fileio
 from . import stamp
 from .provenance import Provenance
-from .mapping import (FOUND_ORIGINS, GLOBAL_ID, ORIGIN_SCAN, SAFE_TOKEN_RE, SHAPED_TOKEN_CEILING,
+from .mapping import (FOUND_ORIGINS, GLOBAL_ID, JOINED_SUFFIX_RE, ORIGIN_SCAN, SAFE_TOKEN_RE, SHAPED_TOKEN_CEILING,
+                      SPACED_SUFFIX_RE,
                       SOURCE_MANUAL, TOKEN_SHAPES, Mapper, MappingError, classify, client_index,
                       client_tokens, email_rule_for, email_rules_of, embedded_token, parse_match,
                       rule_email_token)
@@ -1583,6 +1584,53 @@ class MappingStore:
             self.delete_form(GLOBAL_ID, real)          # unlocks the row the client already had
             return next(f["token"] for f in self.client_view(to_cid)["forms"] if f["real"] == real)
         return self.move_form(real, GLOBAL_ID, to_cid)
+
+    def migrate_spaced_suffixes(self) -> list[tuple[str, str, str]]:
+        """Rewrite every name token minted with a space before its hash suffix (2026-10-15):
+        "Client05 1a2b" becomes "Client05_1a2b", in each client file and in this machine's case
+        variants. Returns (client, old token, new token) for each change.
+
+        The model read "Client05 1a2b" as a name and a qualifier and wrote the suffix on its own,
+        which nothing could restore. The new token is the same hash, so it is still deterministic;
+        the spaced spelling stays an alias (mapping.JOINED_SUFFIX_RE), so text written before comes
+        back as the real. A suffixed token that was only ever derived is written into the file too,
+        so a machine on an older version cannot derive the spaced one again."""
+        changed: list[tuple[str, str, str]] = []
+        for path in self.client_files():
+            doc, err = _parse(path)
+            if err is not None or not isinstance(doc, dict):
+                continue
+            cid = str(doc.get("id", ""))
+            if not cid:
+                continue
+            derived = client_tokens(doc)
+            touched = False
+            for form in doc.get("forms") or []:
+                if not isinstance(form, dict) or "real" not in form:
+                    continue
+                old = str(form.get("token") or derived.get(str(form["real"]), ""))
+                new = "_".join(old.split()) if SPACED_SUFFIX_RE.match(old) else old
+                if JOINED_SUFFIX_RE.match(new) and form.get("token") != new:
+                    form["token"] = new
+                    touched = True
+                    if new != old:
+                        changed.append((cid, old, new))
+            if touched:
+                try:
+                    self._validate_then_write(path, doc)
+                except MappingError as exc:
+                    log.warning("tokens of %s not migrated: %s", cid, exc)
+                    changed = [c for c in changed if c[0] != cid]
+        learned = self.variants()
+        rewritten = {cid: {real: ("_".join(tok.split()) if SPACED_SUFFIX_RE.match(tok) else tok)
+                           for real, tok in m.items()} for cid, m in learned.items()}
+        if rewritten != learned:
+            changed += [(cid, tok, rewritten[cid][real]) for cid, m in learned.items()
+                        for real, tok in m.items() if rewritten[cid][real] != tok]
+            self._memory_variants = {cid: dict(m) for cid, m in rewritten.items()}
+            if self.variants_path is not None:
+                _write(self.variants_path, {cid: dict(sorted(m.items())) for cid, m in sorted(rewritten.items())})
+        return changed
 
     def set_label(self, cid: str, label: str) -> None:
         """Set or (with an empty label) clear a client's display name."""

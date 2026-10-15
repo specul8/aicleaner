@@ -222,15 +222,30 @@ PRODUCT_WORDS = frozenset({"entra", "intune", "azure", "office", "teams", "share
                            "fortinet", "applocker", "bitlocker", "autopilot", "purview", "graph", "wiki"})
 
 
+AUTOCORRECT_EXTRA_PATH = AUTOCORRECT_WORDS_PATH.with_name("autocorrect-extra.txt")
+
+
+def extra_words() -> list[str]:
+    """The developer and IT words SCOWL does not have (repo, codebase, refactoring; the 2026-10-14
+    review), one per line, kept apart so a rebuild from SCOWL never drops them."""
+    try:
+        lines = AUTOCORRECT_EXTRA_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    return [w.strip() for w in lines if w.strip() and not w.startswith("#")]
+
+
 @functools.lru_cache(maxsize=1)
 def dictionary_words() -> frozenset[str]:
-    """Every word in the larger SCOWL list (feature 94's autocorrect list): ordinary English words of
-    any commonness, for telling an ordinary phrase from one holding something distinctive."""
+    """Every word in the larger SCOWL list (feature 94's autocorrect list) and the developer words
+    beside it: ordinary words of any commonness, for telling an ordinary phrase from one holding
+    something distinctive."""
     try:
         lines = AUTOCORRECT_WORDS_PATH.read_text(encoding="utf-8").splitlines()
     except OSError:
         return frozenset()
-    return frozenset(line.split("\t", 1)[0] for line in lines if line and not line.startswith("#"))
+    return frozenset([line.split("\t", 1)[0] for line in lines if line and not line.startswith("#")]
+                     + extra_words())
 
 
 def phrase_adds_nothing(phrase: str, mapper: Mapper) -> bool:

@@ -1279,6 +1279,21 @@ try {
     } else {
         $block = ([string](Get-Content -LiteralPath $template -Raw -Encoding UTF8)).TrimEnd()
         $existing = if (Test-Path -LiteralPath $claudeMd) { [string](Get-Content -LiteralPath $claudeMd -Raw -Encoding UTF8) } else { '' }
+        # The template holds two versions of the file rule: convert everything first, or Read images
+        # and PDFs directly because the proxy reads them on this machine. The proxy picks one at every
+        # start (rules.py); this keeps the one already written, so an update does not flip it back.
+        $readingHere = $existing.Contains('## Files: images and PDFs are read on this machine')
+        $dropTags = if ($readingHere) { @('<!-- aicleaner:binaries:start -->', '<!-- aicleaner:binaries:end -->') }
+                    else { @('<!-- aicleaner:reading:start -->', '<!-- aicleaner:reading:end -->') }
+        $cutFrom = $block.IndexOf($dropTags[0]); $cutTo = $block.IndexOf($dropTags[1])
+        if ($cutFrom -ge 0 -and $cutTo -gt $cutFrom) {
+            $block = $block.Substring(0, $cutFrom) + $block.Substring($cutTo + $dropTags[1].Length)
+        }
+        foreach ($tag in '<!-- aicleaner:binaries:start -->', '<!-- aicleaner:binaries:end -->',
+                         '<!-- aicleaner:reading:start -->', '<!-- aicleaner:reading:end -->') {
+            $block = $block.Replace($tag + "`n", '').Replace($tag + "`r`n", '').Replace($tag, '')
+        }
+        $block = ($block -replace "(`r?`n){3,}", "`n`n").TrimEnd()
         # Plain index arithmetic rather than regex replacement: the block contains $ and backticks.
         $startTag = '<!-- aicleaner:start -->'; $endTag = '<!-- aicleaner:end -->'
         $i = $existing.IndexOf($startTag); $j = $existing.IndexOf($endTag)

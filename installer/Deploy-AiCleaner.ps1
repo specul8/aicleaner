@@ -119,6 +119,11 @@ ollback\, so a code drop that will not start can be undone
     Access application at Cloudflare - and forget it in the config. Without it remote access is kept,
     and a later install asks whether to keep it or replace it.
 
+.PARAMETER CodeTab
+    On or Off: filter the Claude Desktop app's Code tab through aicleaner (feature 117), or stop. With
+    any action once the proxy runs; the same as the switch in Settings and the "Code tab" answer to
+    "How do you use Claude?". Restart the Claude Desktop app afterwards.
+
 .PARAMETER AssumeDefaults
     Take the default answer at every yes/no question (unattended runs). Typed confirmations for
     deleting data are still asked.
@@ -148,6 +153,10 @@ ollback\, so a code drop that will not start can be undone
 .EXAMPLE
     .\Deploy-AiCleaner.ps1 -Action Update
     Move to the newest release (or, for a working-copy deployment, to the files as they are now).
+
+.EXAMPLE
+    .\Deploy-AiCleaner.ps1 -Action Update -CodeTab On
+    Move to the newest release and filter the Claude Desktop app's Code tab too.
 
 .EXAMPLE
     .\Deploy-AiCleaner.ps1 -Action Uninstall -WhatIf
@@ -181,6 +190,7 @@ param(
     [switch]$RemoveData,
     [switch]$RemoveAppFiles,
     [switch]$RemoveRemote,
+    [ValidateSet('', 'On', 'Off')][string]$CodeTab = '',
     [switch]$AssumeDefaults,
     [string]$StateRoot = (Join-Path $env:USERPROFILE '.aicleaner'),
     [AllowEmptyString()][string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) 'Deploy-AiCleaner.log')
@@ -198,6 +208,8 @@ $script:Identity = $Identity
 $script:RemoteHostnameGiven = $RemoteHostname
 # Where this install comes from, for the feature-request link at the first question (feature 109).
 $script:RepoUrlGiven = $RepoUrl
+# The Code tab switch (feature 117): -CodeTab, or the "Code tab" answer, applied once the proxy runs.
+$script:CodeTabWanted = $CodeTab
 # Whether the closing question switched the AI tools over; the setup wizard opens when it did not.
 $script:Activated = $false
 # Where a replaced build is kept (#61). Script scope for the same reason RecordPath is: the
@@ -1627,6 +1639,43 @@ function Test-ProxyProcess {
     return ($running.Count -gt 0)
 }
 
+function Set-CodeTab {
+    <#
+    .SYNOPSIS
+        Filters the Claude Desktop app's Code tab through aicleaner, or stops (feature 117).
+    .DESCRIPTION
+        Through the running proxy's own settings endpoint - the same switch as in Settings - so the
+        listeners, the certificate and Claude Code's settings are made by the code that keeps them in
+        step at every start. Waits for the proxy first; if it is not answering, says how to do it later.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][ValidateSet('On', 'Off')][string]$State)
+    $port = Get-ConfiguredPort -AppRoot $AppRoot
+    $verb = if ($State -eq 'On') { 'Filter the Claude Desktop app''s Code tab' } else { 'Stop filtering the Code tab' }
+    if (-not $PSCmdlet.ShouldProcess("aicleaner on port $port", $verb)) { return }
+    Write-Status "$verb through aicleaner" -Level Step
+    # A client PC holds the screen-capture files only and runs no proxy: waiting for one would only
+    # end in "not answering", which reads as a fault (the user, 2026-10-14).
+    if (-not (Test-Path -LiteralPath (Join-Path $AppRoot 'aicleaner\__init__.py'))) {
+        Write-Status 'This machine has the client-PC files only, so there is no proxy here for the Code tab to go through. Run this script with -Action Install and choose "Claude Code in the Claude Desktop app": it fetches the rest and switches the Code tab on.' -Level Warn
+        return
+    }
+    if (-not (Wait-ProxyHealth -Port $port -Seconds 30)) {
+        Write-Status "The proxy is not answering on port $port, so the Code tab was not changed. Once it runs: Settings > 'Claude Code in the Claude Desktop app', or this script with -CodeTab $State." -Level Warn
+        return
+    }
+    $body = @{ settings = @{ 'codetab.enabled' = ($State -eq 'On') } } | ConvertTo-Json -Compress
+    try {
+        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' -Body $body -TimeoutSec 60 -ErrorAction Stop
+        $said = [string]$answer.rules
+        if ($said -like 'the setting was saved, but*') { Write-Status $said -Level Warn }
+        elseif ($said) { Write-Status $said -Level Done }
+        else { Write-Status "The Code tab is already $($State.ToLower())" -Level Done }
+    } catch {
+        Write-Status "The Code tab could not be changed: $($_.Exception.Message)" -Level Warn
+    }
+}
+
 function Wait-ProxyHealth {
     <# True once http://127.0.0.1:<port>/healthz answers ok, polling once a second up to Seconds. #>
     [CmdletBinding()]
@@ -1960,7 +2009,7 @@ function Resolve-Roles {
     param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Chosen)
     $roles = @($Chosen | Where-Object { $_ } | Select-Object -Unique)
     if ($roles.Count -le 1) { return $roles }
-    $agents = @($roles | Where-Object { @('code-local', 'code-remote', 'code-headless', 'desktop') -contains $_ })
+    $agents = @($roles | Where-Object { @('code-local', 'code-remote', 'code-headless', 'desktop', 'code-desktop') -contains $_ })
     if ($roles -contains 'none') {
         Write-Status "'just put the files in place' does not add to the rest; dropping it" -Level Detail
         $roles = @($roles | Where-Object { $_ -ne 'none' })
@@ -2068,36 +2117,6 @@ function Get-AgentChoice {
     return ''
 }
 
-function Read-ScreenshotShortcut {
-    <#
-    .SYNOPSIS
-        Which keys this person presses to take a screenshot, asked straight after "do you take
-        screenshots" (the user, 2026-10-11) and handed to the installer as -ScreenshotKeys.
-    .DESCRIPTION
-        The installer offers to remap those keys to Snipping Tool's text extractor (Win+Shift+T), or
-        leaves them alone ('none', and no PowerToys; the user, 2026-10-13). It used to ask this itself,
-        steps later, in a prompt of its own style; asked here, the subject is asked once.
-    #>
-    [CmdletBinding()]
-    [OutputType([string])]
-    param()
-    $keys = Read-Choice -Message 'Which keys do you press now to take a screenshot?' -Default 'win+shift+s' -Options ([ordered]@{
-        'win+shift+s' = 'Win+Shift+S (the Snipping Tool shortcut)'
-        'prtsc'       = 'PrtSc'
-        'ctrl+prtsc'  = 'Ctrl+PrtSc'
-        'alt+prtsc'   = 'Alt+PrtSc'
-        'other'       = 'Something else (type the keys)'
-        'none'        = 'Leave my screenshot key alone (no remap, no PowerToys)'
-    })
-    if ($keys -ne 'other') { return $keys }      # 'none' included: the installer reads it as leave alone
-    for ($try = 0; $try -lt 3; $try++) {
-        $typed = (Read-Value -Message 'Type them, e.g. ctrl+alt+p' -Default 'win+shift+s').ToLowerInvariant()
-        if ($typed -match '^[a-z0-9]+([+ ,-][a-z0-9]+)*$') { return $typed }
-        Write-Status 'Key names like win, ctrl, shift, alt, prtsc, or a letter, joined with +' -Level Warn
-    }
-    return 'win+shift+s'
-}
-
 function Test-InferenceCredential {
     <#
     .SYNOPSIS
@@ -2201,25 +2220,35 @@ function Get-MachineRole {
     $found = [ordered]@{}
     $vscodeLocal = Test-VSCodeLocal
     if ($vscodeLocal) { $found['code-local'] = "VS Code IS here ($vscodeLocal)" }
-    if (Test-ClaudeDesktop -Quiet) { $found['desktop'] = 'Claude Desktop IS here' }
+    $desktopHere = Test-ClaudeDesktop -Quiet
+    if ($desktopHere) { $found['desktop'] = 'Claude Desktop IS here' }
     if ($vscodeServer) { $found['code-remote'] = "VS Code Server IS here ($vscodeServer)" }
-    $default = if ($found.Count) { @($found.Keys) -join ' ' } else { 'code-local' }
+    # The Code tab lives in the same app, so it is found the same way; but it is not chosen for you:
+    # switching it on changes Claude Code's own settings, which is asked for, not assumed.
+    $chosenByDefault = @($found.Keys)
+    if ($desktopHere) { $found['code-desktop'] = 'Claude Desktop IS here' }
+    $default = if ($chosenByDefault.Count) { $chosenByDefault -join ' ' } else { 'code-local' }
     $roles = @(Read-Choice -Multiple -Message 'How do you use Claude?' -Default $default -Found $found -Options ([ordered]@{
         'code-local'    = 'Claude Code in VS Code, on this machine (you work at this PC)'
         'desktop'       = 'Claude Desktop, on this machine'
         'code-remote'   = 'Claude Code here, reached by VS Code Remote-SSH from another PC'
         'code-headless' = "Claude Code here, driven from a plain SSH terminal$headlessNote"
+        # Fifth, so the answers people already know by number keep them (feature 117).
+        'code-desktop'  = 'Claude Code in the Claude Desktop app (the Code tab), on this machine'
         'none'          = 'None yet: just put the files in place'
     }))
     $roles = @(Resolve-Roles -Chosen $roles)
-    $agentHere = @('code-local', 'code-remote', 'code-headless', 'desktop')
+    $agentHere = @('code-local', 'code-remote', 'code-headless', 'desktop', 'code-desktop')
     $nothingToDo = $false
     $workstationArgs = @($WorkstationArguments)
     $wanted = @($roles | Where-Object { $agentHere -contains $_ })
+    # The Code tab (feature 117) is Claude Code that ships inside the app: it needs the app, not the
+    # CLI, and is switched on once the proxy runs.
+    if ($roles -contains 'code-desktop') { $script:CodeTabWanted = 'On' }
     if ($wanted.Count -gt 0) {
         $agents = @()
-        if (@($wanted | Where-Object { $_ -like 'code-*' }).Count -gt 0) { $agents += 'code' }
-        if ($wanted -contains 'desktop') { $agents += 'desktop' }
+        if (@($wanted | Where-Object { $_ -like 'code-*' -and $_ -ne 'code-desktop' }).Count -gt 0) { $agents += 'code' }
+        if ($wanted -contains 'desktop' -or $wanted -contains 'code-desktop') { $agents += 'desktop' }
         if (-not (Confirm-Agent -Agents $agents)) { throw 'Stopped: install the agent first, then run this again' }
     }
     # Said before anything is installed, because the answer may be "not on this machine, then".
@@ -2235,27 +2264,19 @@ function Get-MachineRole {
     # worked at locally and reached over SSH wants both.
     $codeRoles = @($roles | Where-Object { $_ -like 'code-*' })
     if ($codeRoles.Count -gt 0) {
-        $skipsLocal = @($codeRoles | Where-Object { @('code-remote', 'code-headless') -contains $_ })
-        $skipsServer = @($codeRoles | Where-Object { @('code-local', 'code-headless') -contains $_ })
+        # The Code tab uses neither VS Code nor its server.
+        $skipsLocal = @($codeRoles | Where-Object { @('code-remote', 'code-headless', 'code-desktop') -contains $_ })
+        $skipsServer = @($codeRoles | Where-Object { @('code-local', 'code-headless', 'code-desktop') -contains $_ })
         if ($skipsLocal.Count -eq $codeRoles.Count) { $vscodeArgs += '-SkipVSCode' }
         if ($skipsServer.Count -eq $codeRoles.Count) { $vscodeArgs += '-SkipVSCodeServer' }
     }
-    $screenHere = $roles -contains 'code-local' -or $roles -contains 'desktop'
-    if ($screenHere) {
-        # No skips only the key remap: Snipping Tool is checked anyway, because it reads the text in
-        # every image that reaches this machine, whoever took it (feature 115).
-        if (-not (Confirm-Action -Message 'Do you take screenshots on this machine?' -Default 'Yes')) {
-            $vscodeArgs += @('-SkipPowerToys')
-        } else {
-            $keys = Read-ScreenshotShortcut
-            $vscodeArgs += @('-ScreenshotKeys', $keys)
-            $desktopArgs += @('-ScreenshotKeys', $keys)
-        }
-    } elseif ($codeRoles.Count -gt 0) {
-        # Nobody looks at a screen on a machine reached only over SSH: no key remap. Snipping Tool
-        # stays, since the images pasted on the other PC are read here (feature 115).
-        $vscodeArgs += @('-SkipPowerToys')
-    }
+    $screenHere = $roles -contains 'code-local' -or $roles -contains 'desktop' -or $roles -contains 'code-desktop'
+    # No screenshot questions and no key remap (the user, 2026-10-14): a screenshot is taken as
+    # usual and pasted into the prompt, and the proxy reads its text on this machine. Snipping Tool
+    # is still checked by the installers, because its engine is what reads every image that
+    # reaches this machine, whoever took it (feature 115).
+    if ($codeRoles.Count -gt 0) { $vscodeArgs += @('-SkipPowerToys') }
+    if ($roles -contains 'desktop') { $desktopArgs += @('-SkipPowerToys') }
     if ($roles -contains 'desktop') {
         if (Confirm-Action -Message 'Register the nightly backup of the Claude Desktop profile?' -Default 'Yes') {
             $desktopArgs += '-RegisterBackupTask'
@@ -2518,6 +2539,39 @@ function Assert-TargetsFree {
     }
 }
 
+function Format-TargetName {
+    <#
+    .SYNOPSIS
+        The targets as a person chose them, not the internal names (the user, 2026-10-14: answer 5
+        was confirmed as "Wire this machine for VSCode", which they had not chosen).
+    .DESCRIPTION
+        'VSCode' is the Claude Code target whichever way it is used; the arguments the role step
+        built say which. A record keeps only the target, so without -Role it is named generally.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Targets, $Role = $null)
+    $names = foreach ($target in $Targets) {
+        switch ($target) {
+            'VSCode' {
+                $codeArgs = if ($Role) { @($Role.VSCode) } else { @() }
+                $noLocal = $codeArgs -contains '-SkipVSCode'
+                $noServer = $codeArgs -contains '-SkipVSCodeServer'
+                if (-not $Role) { 'Claude Code' }
+                elseif ($noLocal -and $noServer -and $script:CodeTabWanted -eq 'On') { 'Claude Code in the Claude Desktop app (the Code tab)' }
+                elseif ($noLocal -and $noServer) { 'Claude Code from an SSH terminal' }
+                elseif ($noLocal) { 'Claude Code reached by VS Code Remote-SSH' }
+                elseif ($noServer) { 'Claude Code in VS Code' }
+                else { 'Claude Code in VS Code, here and over Remote-SSH' }
+            }
+            'Desktop' { 'Claude Desktop' }
+            'Workstation' { 'the client PC (screen capture)' }
+            default { $target }
+        }
+    }
+    return (@($names) -join ', ')
+}
+
 function Add-Target {
     <#
     .SYNOPSIS
@@ -2532,7 +2586,9 @@ function Add-Target {
     param(
         [Parameter(Mandatory)]$Record,
         [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Wanted,
-        [Parameter(Mandatory)]$Role
+        [Parameter(Mandatory)]$Role,
+        # The clients folder step 2 already asked for; asked again here only when there is none.
+        [string]$Clients = ''
     )
     $appRoot = [string]$Record.install_path
     if (-not (Test-Path -LiteralPath $appRoot)) {
@@ -2554,7 +2610,7 @@ function Add-Target {
         # matches it is another question: shortcuts get deleted, a remap gets reset, a policy value
         # gets cleared. The installers are idempotent and report what they change, so re-running
         # them is the check - and the repair.
-        Write-Status ("The record says this machine is wired for {0}, from {1}" -f (($already -join ', ')), $appRoot) -Level Done
+        Write-Status ("The record says this machine is wired for {0}, from {1}" -f (Format-TargetName -Targets $already), $appRoot) -Level Done
         if (-not (Confirm-Action -Message 'Check it is all still in place, and put back anything missing?' -Default 'Yes')) {
             Write-Status 'Left as it is. -Action Update takes newer code; -Action Uninstall removes it.' -Level Detail
             return
@@ -2564,12 +2620,12 @@ function Add-Target {
         $checkRole = [pscustomobject]@{ Targets = $already; VSCode = $Role.VSCode; Desktop = $Role.Desktop
                                         Workstation = $Role.Workstation; Advice = '' }
         Invoke-Wiring -AppRoot $appRoot -Targets $already -Role $checkRole -Url ([string]$Record.repo_url) -Ref ([string]$Record.ref)
-        Write-Status ("Checked: {0} wiring is in place" -f ($already -join ' + ')) -Level Done
+        Write-Status ("Checked: {0} wiring is in place" -f (Format-TargetName -Targets $already)) -Level Done
         Write-Status 'Anything that had drifted was put back; what was already right was left alone.' -Level Detail
         return
     }
-    Write-Status ("Already deployed here for {0}; adding {1}" -f (($already -join ', ')), (($new -join ', ')))
-    if (-not (Confirm-Action -Message ("Wire this machine for {0} as well?" -f ($new -join ', ')) -Default 'Yes')) {
+    Write-Status ("Already deployed here for {0}; adding {1}" -f (Format-TargetName -Targets $already), (Format-TargetName -Targets $new -Role $Role))
+    if (-not (Confirm-Action -Message ("Set this machine up for {0} as well?" -f (Format-TargetName -Targets $new -Role $Role)) -Default 'Yes')) {
         Write-Status 'Nothing changed' -Level Done
         return
     }
@@ -2593,10 +2649,12 @@ function Add-Target {
         Write-Status 'Claude Desktop is set up through a Windows policy, which needs administrator rights: Windows will ask once, for that step only.' -Level Detail
     }
     # A proxy target needs somewhere for the client files; a workstation-only deployment has none.
+    # Asked once (the user, 2026-10-14): step 2's answer is used, not asked for a second time - and
+    # the second asking passed -ClientsPath, a parameter Set-DataLocation does not have.
     $clients = [string]$Record.clients_path
     if (-not $clients -and @($new | Where-Object { @('VSCode', 'Desktop') -contains $_ }).Count -gt 0) {
-        $clients = (Resolve-Folders).Clients
-        Set-DataLocation -AppRoot $appRoot -ClientsPath $clients
+        $clients = if ($Clients) { $Clients } else { (Resolve-Folders).Clients }
+        Set-DataLocation -AppRoot $appRoot -Clients $clients
     }
     $addRole = [pscustomobject]@{ Targets = $new; VSCode = $Role.VSCode; Desktop = $Role.Desktop
                                   Workstation = $Role.Workstation; Advice = '' }
@@ -2609,7 +2667,7 @@ function Add-Target {
         files = @($Record.files); installed_at = [string]$Record.installed_at
         updated_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     })
-    Write-Status ("This machine is now wired for {0}" -f ($merged -join ', ')) -Level Done
+    Write-Status ("This machine is now set up for {0}" -f (Format-TargetName -Targets $merged)) -Level Done
     Write-NextSteps -AppRoot $appRoot -Targets $merged -ClientsPath $clients -FromElsewhere:([bool]$Role.FromElsewhere)
 }
 
@@ -2638,7 +2696,8 @@ function Invoke-Install {
         # The code is already in this folder: this run is about wiring another role. Said, because
         # the heading above reads "Install" and what follows is not one (D52).
         Write-Status "Already deployed to $($folders.App): checking and adding wiring, not installing again. -Action Update changes the code." -Level Detail
-        Add-Target -Record $existing[0] -Wanted $targets -Role $role
+        Add-Target -Record $existing[0] -Wanted $targets -Role $role -Clients ([string]$folders.Clients)
+        if ($script:CodeTabWanted) { Set-CodeTab -AppRoot $folders.App -State $script:CodeTabWanted }
         return
     }
     # A second deployment elsewhere is fine; wiring the same role twice is not.
@@ -2703,6 +2762,7 @@ function Invoke-Install {
     Write-NextSteps -AppRoot $folders.App -Targets $targets -ClientsPath $folders.Clients -FromElsewhere:([bool]$role.FromElsewhere)
     # A statement, never captured: it runs Enable-AiCleaner.ps1, whose output belongs on the console.
     Invoke-Activation -AppRoot $folders.App -Targets $targets
+    if ($script:CodeTabWanted -and -not $workstationOnly) { Set-CodeTab -AppRoot $folders.App -State $script:CodeTabWanted }
     $port = Get-ConfiguredPort -AppRoot $folders.App
     $setupUrl = "http://127.0.0.1:$port/#/setup"
     Write-SummaryBox -Title "aicleaner $($release.Ref) is installed" -Lines @(
@@ -3018,6 +3078,7 @@ function Invoke-Update {
     if (-not $record) { throw "No deployment record at $script:RecordPath; use -Action Install" }
     Update-Deployment -Record $record -StateFolder $script:StateFolder
     if ($script:UpdateOutcome -eq 'declined') { throw 'Stopped at your request' }
+    if ($script:CodeTabWanted) { Set-CodeTab -AppRoot ([string]$record.install_path) -State $script:CodeTabWanted }
 }
 
 function Remove-DeploymentData {

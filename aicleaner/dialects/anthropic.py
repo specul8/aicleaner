@@ -34,6 +34,8 @@ class AnthropicStreamRewriter(GenericStreamRewriter):
         self._blocks: dict[int, tuple[str, TailRewriter]] = {}
         self._kept_indexes: set[int] = set()
         self._arguments: dict[int, list[str]] = {}  # index -> a tool call's restored arguments so far
+        self._written: dict[int, list[str]] = {}    # index -> the same arguments as the model wrote them
+        self._call_ids: dict[int, str] = {}         # index -> the tool call's id
 
     def _rewriter_for(self, index: int, delta_type: str) -> TailRewriter:
         entry = self._blocks.get(index)
@@ -56,15 +58,22 @@ class AnthropicStreamRewriter(GenericStreamRewriter):
         return entry[1]
 
     def _flush_block(self, index: int) -> list[SSEEvent]:
+        call_id = self._call_ids.pop(index, "")
         entry = self._blocks.pop(index, None)
         if entry is None:
             return []
         delta_type, tr = entry
         rest = tr.flush()
         arguments = self._arguments.pop(index, None)
+        written = self._written.pop(index, None)
         if arguments is not None:
             # The whole call is restored now; anything token-shaped left in it will reach a tool.
             self.fragments.extend(self.mapper.token_fragments("".join(arguments)))
+        if written and call_id and self.on_collapse is not None:
+            # Two spellings the model meant as different, one real name on disk (the rename collapse).
+            found = self.mapper.collapses("".join(written))
+            if found:
+                self.on_collapse(call_id, found)
         if not rest:
             return []
         payload = {
@@ -86,6 +95,8 @@ class AnthropicStreamRewriter(GenericStreamRewriter):
         etype = obj.get("type")
         if etype == "content_block_start":
             block = obj.get("content_block") or {}
+            if block.get("type") == "tool_use" and block.get("id"):
+                self._call_ids[int(obj.get("index", 0))] = str(block["id"])
             if block.get("type") == "tool_use" and tool_is_kept(block.get("name"), self.keep_patterns):
                 self._kept_indexes.add(int(obj.get("index", 0)))
                 self.kept += 1
@@ -105,6 +116,10 @@ class AnthropicStreamRewriter(GenericStreamRewriter):
             dtype = delta.get("type")
             field_name = DELTA_FIELDS.get(dtype)
             if field_name and isinstance(delta.get(field_name), str):
+                if dtype == "input_json_delta":
+                    # The arguments as the model wrote them, fragment by fragment (the rewriter's own
+                    # windows overlap, so they cannot be joined back into the text).
+                    self._written.setdefault(int(obj.get("index", 0)), []).append(delta[field_name])
                 tr = self._rewriter_for(int(obj.get("index", 0)), dtype)
                 emitted = tr.feed(delta[field_name])
                 if emitted == "":

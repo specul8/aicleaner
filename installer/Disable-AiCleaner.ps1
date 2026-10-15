@@ -16,6 +16,10 @@
     goes anyway, and it is not what refuses Remote Control - that is a host OTHER than
     api.anthropic.com.
 
+    The Code tab switch (feature 117) is turned off too, when it is on: the Claude Desktop app's
+    Code tab cannot reach Anthropic while its proxy is down, and this is the way back to work. It
+    stays off until it is switched on again in Settings (or Deploy-AiCleaner.ps1 -CodeTab On).
+
 .PARAMETER LogPath
     Transcript log path. Pass '' to disable.
 
@@ -141,12 +145,59 @@ function Set-RoutingOff {
     return $changed
 }
 
+function Set-CodeTabOff {
+    <#
+    .SYNOPSIS
+        The Code tab switch off (feature 117). Returns $true when something changed.
+    .DESCRIPTION
+        Through the running proxy when it answers, so its listeners stop too; otherwise by the same
+        code from the command line (`aicleaner codetab-off`), which also records the switch as off so
+        the next start does not put it back.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([bool])]
+    param()
+    $configFile = Join-Path $script:AppFolder 'aicleaner-config.json'
+    $config = Read-JsonFile -Path $configFile
+    if (-not $config -or -not $config.PSObject.Properties['codetab'] -or -not $config.codetab.enabled) { return $false }
+    if (-not $PSCmdlet.ShouldProcess('the Claude Desktop app''s Code tab', 'Stop filtering it')) { return $false }
+    $port = if ($config.PSObject.Properties['port']) { [int]$config.port } else { 8787 }
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 3 -ErrorAction Stop | Out-Null
+        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
+            -Body '{"settings":{"codetab.enabled":false}}' -TimeoutSec 30 -ErrorAction Stop
+        Write-Status "Code tab: $([string]$answer.rules)" -Level Detail
+        return $true
+    } catch {
+        Write-Verbose "proxy not answering: $($_.Exception.Message)"
+    }
+    $venvPython = Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        Write-Status "Code tab: the Python environment ($venvPython) is missing, so the Code tab could not be switched off" -Level Warn
+        return $false
+    }
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location -LiteralPath $script:AppFolder
+    try {
+        & $venvPython -m aicleaner codetab-off --config $configFile 2>&1 | ForEach-Object { Write-Status "Code tab: $_" -Level Detail }
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $savedEap
+    }
+}
+
 $transcriptStarted = $false
 if ($LogPath) { try { Start-Transcript -Path $LogPath -Append | Out-Null; $transcriptStarted = $true } catch { } }
 
 try {
     Write-Status 'Pointing Claude Code and VS Code back at the real API'
     $changed = Set-RoutingOff
+    if (Set-CodeTabOff) {
+        $changed++
+        Write-Status 'The Code tab is no longer filtered; restart the Claude Desktop app. Switch it back on in Settings.' -Level Detail
+    }
     if ($changed -gt 0) {
         Write-Status "Routing is off ($changed file(s) changed). Sessions follow a value that changes, so they should reach the API again without restarting." -Level Done
     } else {

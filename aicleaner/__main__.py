@@ -568,6 +568,50 @@ def cmd_mcp_audit(cfg: Config, config_path: str, write: bool) -> int:
     return 0
 
 
+def cmd_unwire_claude(cfg: Config) -> int:
+    """For the uninstaller: take out of Claude Code's files what the proxy's switches put there - the
+    Code tab's proxy settings, hook and MCP entries (feature 117), its certificate authority, the
+    Bash guard's hook (feature 98) and the between-tool-calls hook (feature 119) - by the same code
+    that put them there."""
+    from . import bashguard, codetab_settings, deliver
+    from .codetab_ca import Authority
+
+    state = Path(cfg.state_dir) if cfg.state_dir else Path(cfg.mapping).parent / "state"
+    failed = 0
+    for label, step in (("Code tab", lambda: codetab_settings.apply(False, state, "", "", cfg.listen)),
+                        ("Bash guard", lambda: bashguard.apply(False)),
+                        ("Between-tool-calls hook", lambda: deliver.apply(False, cfg.port)),
+                        ("Rename-collapse guard", lambda: deliver.apply_collapse_guard(False, cfg.port))):
+        try:
+            said = step()
+            print(said or f"{label}: nothing to remove")
+        except (codetab_settings.SettingsError, bashguard.GuardError, deliver.DeliverError) as exc:
+            print(f"{label}: {exc}", file=sys.stderr)
+            failed += 1
+    Authority(state).remove()
+    return 1 if failed else 0
+
+
+def cmd_codetab_off(cfg: Config) -> int:
+    """For Disable-AiCleaner.ps1 when the proxy is not answering (feature 117, decision 4): the Code tab
+    switch turned off in the config and its settings taken out of Claude Code's files, so the Code
+    tab reaches Anthropic directly again."""
+    from . import codetab_settings
+    from .codetab_ca import Authority
+
+    state = Path(cfg.state_dir) if cfg.state_dir else Path(cfg.mapping).parent / "state"
+    try:
+        if cfg.codetab_enabled:
+            cfg.update_settings({"codetab.enabled": False})
+        said = codetab_settings.apply(False, state, "", "", cfg.listen)
+    except (codetab_settings.SettingsError, ValueError, OSError) as exc:
+        print(f"Code tab: {exc}", file=sys.stderr)
+        return 1
+    Authority(state).remove()
+    print(said or "Code tab: already off")
+    return 0
+
+
 def _covers(existing: str, pattern: str) -> bool:
     """True when a pattern already in the config covers this one."""
     import fnmatch
@@ -579,7 +623,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aicleaner")
     parser.add_argument("command", choices=["run", "check", "tokenise", "rehydrate", "scan", "preflight",
                                             "scan-tokens", "set-key", "seed", "split", "prune", "detail",
-                                            "mcp-audit"])
+                                            "mcp-audit", "unwire-claude", "codetab-off"])
     parser.add_argument("path", nargs="?", default=".",
                         help="scan / preflight / scan-tokens: folder; set-key: dialect; seed and prune: client id")
     parser.add_argument("--index", type=int, default=None, help="seed: numeric client index (default: digits in the id)")
@@ -647,6 +691,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_split(cfg)
     if args.command == "detail":
         return cmd_detail(cfg, args.path)
+    if args.command == "unwire-claude":
+        return cmd_unwire_claude(cfg)
+    if args.command == "codetab-off":
+        return cmd_codetab_off(cfg)
 
     from .proxy import run
 

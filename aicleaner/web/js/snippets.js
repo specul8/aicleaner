@@ -78,8 +78,8 @@ function infoOf(info) {
   return meta;
 }
 
-// Every fenced block in a text: { start, end, codeStart, codeEnd, fence, ...meta, code }. A block
-// with no closing fence runs to the end, as Markdown has it. `start` includes a "From ..., lines" line
+// Every fenced block in a text: { start, end, codeStart, codeEnd, fence, closed, ...meta, code }. A
+// block with no closing fence (closed: false) runs to the end, as Markdown has it. `start` includes a "From ..., lines" line
 // written just above a file snippet, so replacing a block replaces its heading with it.
 export function findSnippets(text) {
   const value = String(text || '');
@@ -99,10 +99,31 @@ export function findSnippets(text) {
     const heading = /(^|\n)(From [^\n]+, lines \d+-\d+:)\n$/.exec(before);
     const meta = infoOf(match[2]);
     if (heading && meta.file) start -= heading[2].length + 1;
-    found.push({ start, end, codeStart, codeEnd, fence, ...meta, code: value.slice(codeStart, codeEnd) });
+    found.push({ start, end, codeStart, codeEnd, fence, closed: Boolean(close), ...meta, code: value.slice(codeStart, codeEnd) });
     opener.lastIndex = end;
   }
   return found;
+}
+
+// A prompt as the prompt box holds it (feature 118): [text, snippet, text, snippet, ..., text] -
+// always odd in length, text first and last. Only closed snippets are pieces; one still being typed
+// stays text. The line break either side of a snippet belongs to it, so a text piece does not open or
+// close on an empty line.
+export function promptPieces(text) {
+  const value = String(text || '');
+  const pieces = [];
+  let at = 0;
+  for (const snippet of findSnippets(value).filter((s) => s.closed)) {
+    pieces.push(value.slice(at, snippet.start).replace(at ? /^\n/ : /$^/, '').replace(/\n$/, ''), value.slice(snippet.start, snippet.end));
+    at = snippet.end;
+  }
+  pieces.push(value.slice(at).replace(at ? /^\n/ : /$^/, ''));
+  return pieces;
+}
+
+// Pieces back to the prompt's text: each on its own line, empty text pieces left out.
+export function joinPieces(pieces) {
+  return (pieces || []).filter((piece) => piece !== '').join('\n');
 }
 
 // The snippet the caret is in (anywhere from its heading to its closing fence), or null.

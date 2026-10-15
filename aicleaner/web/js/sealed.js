@@ -20,6 +20,26 @@ const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const INFO = 'aicleaner tunnel 2';
 let sealedOn = false;
 
+// Sign-in expiry (the user, 2026-10-14). Cloudflare Access ends a sign-in after 24 hours and then
+// answered every call with a redirect to its sign-in page - cross-site, so the browser failed it like
+// a network error and the page sat on "Not connected" for good. Marked as a page's own request,
+// Access answers 401 instead; aicleaner marks its own 401 (run the exchange again) with a header, so
+// any other 401, or a redirect, means "sign in again". Said once, by api.js, on this event.
+const AJAX = { 'X-Requested-With': 'XMLHttpRequest' };
+const REKEY_HEADER = 'X-Aicleaner-Tunnel';
+
+function wantsSignIn(response) {
+  return response.type === 'opaqueredirect'
+    || (response.status === 401 && response.headers.get(REKEY_HEADER) !== 'rekey');
+}
+
+export function signedOutError() {
+  const error = new Error('Your sign-in has expired: sign in again.');
+  error.signedOut = true;
+  window.dispatchEvent(new CustomEvent('aicleaner:signedout'));
+  return error;
+}
+
 export function isSealed() {
   return sealedOn;
 }
@@ -178,8 +198,9 @@ function wrapFetch(longTerm, first, connect) {
     const n = seq++;
     const mine = session;
     const envelope = await sealRequest(mine, n, inner);
-    const response = await plain('/api/sealed', { method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(envelope) });
+    const response = await plain('/api/sealed', { method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...AJAX }, body: JSON.stringify(envelope) });
+    if (wantsSignIn(response)) throw signedOutError();
     return { response, mine };
   };
   window.fetch = async (input, init = {}) => {
@@ -199,9 +220,14 @@ function wrapFetch(longTerm, first, connect) {
       ({ response, mine } = await send(inner));
     }
     if (response.status === 403) {
-      // The code was changed on the machine, or encryption switched: start over from the box.
-      forgetKey();
-      window.location.reload();
+      // The code was changed on the machine, or encryption switched: start over from the box. Only
+      // for the gate's own "locked" answer - any other 403 (a firewall, Access refusing this account)
+      // is shown as it is, and the kept key stays.
+      const said = await response.clone().json().catch(() => ({}));
+      if (String(said.error || '').startsWith('locked')) {
+        forgetKey();
+        window.location.reload();
+      }
     }
     if (!response.ok) return response;
     const envelope = await response.json();
@@ -259,21 +285,31 @@ export async function objectUrlThrough(href) {
   return URL.createObjectURL(await response.blob());
 }
 
+// Whether this page is sealed. A page loaded while aicleaner restarts got a gateway error here and
+// was taken as "not sealed": every call then came back 403 locked until a second refresh (the user,
+// 2026-10-14). An unreachable answer is tried again, for up to two minutes, before giving up.
+const UNREACHABLE_PARAMS = new Set([502, 503, 504, 520, 521, 522, 523, 524, 530]);
+async function tunnelParams() {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      const response = await fetch(PARAMS, { headers: { Accept: 'application/json', ...AJAX } });
+      if (!UNREACHABLE_PARAMS.has(response.status)) return response.ok ? await response.json() : { sealed: false };
+    } catch (error) { /* not answering yet */ }
+    await new Promise((done) => setTimeout(done, 3000));
+  }
+  return { sealed: false };
+}
+
 // Before the first page draws. Resolves once the page may talk to the API.
 export async function openTunnel() {
-  let params;
-  try {
-    const response = await fetch(PARAMS, { headers: { Accept: 'application/json' } });
-    params = response.ok ? await response.json() : { sealed: false };
-  } catch (error) {
-    params = { sealed: false };
-  }
+  const params = await tunnelParams();
   if (!params.sealed) return;
   sealedOn = true;
   const plain = window.fetch.bind(window);
   const post = async (path, body) => {
-    const response = await plain(path, { method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify(body) });
+    const response = await plain(path, { method: 'POST', redirect: 'manual',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...AJAX }, body: JSON.stringify(body) });
+    if (wantsSignIn(response)) throw signedOutError();
     const answer = await response.json();
     if (!response.ok) throw new Error(answer.error || `HTTP ${response.status}`);
     return answer;

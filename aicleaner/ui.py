@@ -20,6 +20,8 @@ API (JSON; writes need Content-Type application/json):
   POST /api/session/interrupt              {name} stop the turn, keep the session
   POST /api/session/queue/send             {name, id} send a waiting prompt now (D176)
   POST /api/session/queue/cancel           {name, id} drop a waiting prompt (D176)
+  POST /api/session/deliver                {session_id} waiting prompts for the PostToolUse hook (feature 119; this machine only)
+  POST /api/tool/check                     {tool_use_id} stop a call whose spellings collapse to one name (PreToolUse hook; this machine only)
   POST /api/session/permission-mode        {name, mode} how it asks before it acts
   POST /api/session/permission             {id, allow} answer a waiting permission request
   POST /api/session/permission/request     the approval host asking; waits for the answer
@@ -84,7 +86,7 @@ from aiohttp import web
 
 from .config import Config
 from .contact import ContactSource
-from .detect import CandidateStore
+from .detect import CandidateStore, extra_words
 from .guard import FILE_CSP, REMOTE, is_loopback_listen
 
 # What may be changed through the tunnel: the ones that alter how you are TOLD about things, not
@@ -913,7 +915,18 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                 return web.json_response({"error": str(refused)}, status=415)
             except (ConversionError, OSError) as failed:
                 return web.json_response({"error": f"{filename or 'the file'} could not be read: {failed}"}, status=500)
-        return web.json_response({"text": text, "filename": filename})
+            # The Misreadings setting, as the proxy applies it to an image inside a request: a word
+            # one letter away from a client's real name is put right before the text is shown, so
+            # the filter catches it when the prompt is sent (the user, 2026-10-14: AlCleaner for
+            # AICleaner). Text put in the prompt here is sent as typed text, which the proxy
+            # deliberately never corrects - so it is done now, where it is still known to be read.
+            corrected = 0
+            if cfg is not None and cfg.near_miss and text:
+                from collections import Counter
+                near: Counter[str] = Counter()
+                text = await asyncio.to_thread(proxy.mapper.repair_near_misses, text, near)
+                corrected = sum(near.values())
+        return web.json_response({"text": text, "filename": filename, "corrected": corrected})
 
     async def _send_file(request: web.Request, inline: bool) -> web.StreamResponse:
         from .session import MAX_FILE_SEND, SessionError, file_kind, inline_type
@@ -1033,12 +1046,16 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         path = Path(__file__).resolve().parent / "data" / "autocorrect-words.txt"
         # Words it knows with their capitals - days, months, product names (feature 100).
         terms_path = path.with_name("autocorrect-terms.txt")
+        # Developer words SCOWL does not have (2026-10-14 review), served in band 50.
+        extra_path = path.with_name("autocorrect-extra.txt")
         try:
             stat = path.stat()
             terms_stat = terms_path.stat()
+            extra_stat = extra_path.stat()
         except OSError:
             return web.json_response({"bands": {}, "terms": []})
-        tag = f'"{int(stat.st_mtime)}-{stat.st_size}-{int(terms_stat.st_mtime)}-{terms_stat.st_size}"'
+        tag = (f'"{int(stat.st_mtime)}-{stat.st_size}-{int(terms_stat.st_mtime)}-{terms_stat.st_size}'
+               f'-{int(extra_stat.st_mtime)}-{extra_stat.st_size}"')
         if request.headers.get("If-None-Match") == tag:
             return web.Response(status=304, headers={"ETag": tag})
 
@@ -1048,6 +1065,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                 if line and not line.startswith("#") and "\t" in line:
                     word, band = line.split("\t", 1)
                     bands.setdefault(band.strip(), []).append(word)
+            bands.setdefault("50", []).extend(extra_words())
             return bands
 
         bands = await asyncio.to_thread(read)
@@ -1321,6 +1339,40 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except SessionError as exc:
             return err(exc)
         return web.json_response({"ok": True})
+
+    async def session_deliver(request: web.Request) -> web.Response:
+        """Feature 119: asked by the PostToolUse hook after every tool call, with the conversation's
+        id. A Session-page session's waiting prompts are taken off its queue and handed back, to
+        reach Claude between tool calls rather than at the end of the turn. This machine only: the
+        hook runs here, and nothing remote has a reason to empty a queue this way."""
+        if request.get(REMOTE):
+            return web.json_response({"ok": False, "error": "this machine only"}, status=403)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        session = getattr(proxy, "session", None)
+        taken = session.take_waiting(str(body.get("session_id", ""))) if session is not None else []
+        if not taken:
+            return web.json_response({"ok": True, "text": ""})
+        lead = ("The user sent this message while you were working - read it now and take it into "
+                "account before you continue:" if len(taken) == 1 else
+                "The user sent these messages while you were working - read them now and take them "
+                "into account before you continue:")
+        return web.json_response({"ok": True, "text": "\n\n".join([lead, *taken])})
+
+    async def tool_check(request: web.Request) -> web.Response:
+        """Asked by the PreToolUse hook before every tool call, with its id: a call in which two
+        different spellings come back as the same real name is stopped, with the reason (the rename
+        collapse, bug report 2026-10-14). This machine only, like the hook."""
+        if request.get(REMOTE):
+            return web.json_response({"ok": False, "error": "this machine only"}, status=403)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        reason = proxy.take_collapse(str(body.get("tool_use_id", ""))) if proxy is not None else ""
+        return web.json_response({"ok": True, "deny": bool(reason), "reason": reason})
 
     async def session_stop(request: web.Request) -> web.Response:
         from .session import SessionError
@@ -2129,6 +2181,18 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                                   "windows": bashguard.applies(),
                                   "config_path": str(proxy.cfg.path or ""), "contact_file": contact.get().source, "clients": [c["id"] for c in mf.load_tolerant(record=False)[0].data["clients"]]})
 
+    async def codetab_get(request: web.Request) -> web.Response:
+        """The Code tab card (feature 117): what is in place, and whether this Claude Code's PowerShell
+        tool can be kept off the proxy (2.1.296 and later)."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        from . import codetab_settings
+        version = await asyncio.to_thread(codetab_settings.claude_version)
+        return web.json_response({**proxy.codetab_summary(), "applies": codetab_settings.applies(),
+                                  "claude_version": ".".join(map(str, version)) if version else "",
+                                  "powershell_ok": codetab_settings.powershell_ok(version),
+                                  "powershell_from": ".".join(map(str, codetab_settings.POWERSHELL_FROM))})
+
     async def config_post(request: web.Request) -> web.Response:
         if proxy is None:
             return err(ValueError("config unavailable"))
@@ -2166,18 +2230,43 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             if "attachments.allow_images" in changes and proxy.cfg.allow_images != was_binaries \
                     and not request.get(REMOTE):
                 try:
-                    rules_said = rules.apply(proxy.cfg.allow_images)
+                    rules_said = rules.apply(proxy.cfg.allow_images, reading=proxy.reads_images())
                 except rules.RulesError as exc:
                     rules_said = f"the setting was saved, but {exc}"
                     log.warning("rules block not updated: %s", exc)
             # The Bash guard (feature 98) is a hook in Claude Code's settings, kept in step with its
             # switch here - on this machine only, for the same reason as the rules block.
+            # Waiting messages between tool calls (feature 119): the same kind of hook, the same care.
+            if "claude.deliver_between_tools" in changes and not request.get(REMOTE):
+                from . import deliver
+                try:
+                    said = deliver.apply(proxy.cfg.claude_deliver_between_tools, proxy.cfg.port)
+                except deliver.DeliverError as exc:
+                    said = f"the setting was saved, but {exc}"
+                    log.warning("deliver hook not updated: %s", exc)
+                rules_said = " ".join(s for s in (rules_said, said) if s)
+            if "claude.collapse_guard" in changes and not request.get(REMOTE):
+                from . import deliver
+                try:
+                    said = deliver.apply_collapse_guard(proxy.cfg.claude_collapse_guard, proxy.cfg.port)
+                except deliver.DeliverError as exc:
+                    said = f"the setting was saved, but {exc}"
+                    log.warning("collapse guard not updated: %s", exc)
+                rules_said = " ".join(s for s in (rules_said, said) if s)
             if "claude.bash_guard" in changes and not request.get(REMOTE):
                 try:
                     said = bashguard.apply(proxy.cfg.claude_bash_guard)
                 except bashguard.GuardError as exc:
                     said = f"the setting was saved, but {exc}"
                     log.warning("bash guard not updated: %s", exc)
+                rules_said = " ".join(s for s in (rules_said, said) if s)
+            # The Code tab switch (feature 117): listeners and Claude Code's settings, this machine only.
+            if ("codetab.enabled" in changes or "codetab.port" in changes) and not request.get(REMOTE):
+                try:
+                    said = await proxy.apply_codetab()
+                except Exception as exc:  # noqa: BLE001 - saved; the reason is the answer
+                    said = f"the setting was saved, but {exc}"
+                    log.warning("Code tab not applied: %s", exc)
                 rules_said = " ".join(s for s in (rules_said, said) if s)
             return web.json_response({"ok": True, "settings": out, "rules": rules_said})
         except (ValueError, OSError) as exc:
@@ -2733,6 +2822,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/session/interrupt", session_interrupt)
         app.router.add_post("/api/session/queue/send", session_queue_send)
         app.router.add_post("/api/session/queue/cancel", session_queue_cancel)
+        app.router.add_post("/api/session/deliver", session_deliver)
+        app.router.add_post("/api/tool/check", tool_check)
         app.router.add_post("/api/session/permission-mode", session_permission_mode)
         app.router.add_post("/api/session/permission", session_permission)
         app.router.add_post("/api/session/permission/request", session_permission_request)
@@ -2796,6 +2887,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/scan", scan_state)
     app.router.add_post("/api/scan", scan_start)
     app.router.add_get("/api/config", config_get)
+    app.router.add_get("/api/codetab", codetab_get)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
     app.router.add_get("/api/setup/dns", setup_dns)

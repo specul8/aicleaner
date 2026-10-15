@@ -186,6 +186,16 @@ class Config:
     # Windows: Claude Code's Bash tool halves doubled backslashes, so a hook stops Bash calls that
     # hold them and points to PowerShell or Write/Edit (feature 98, see bashguard.py).
     claude_bash_guard: bool = True
+    # A PostToolUse hook hands the Session page's waiting messages to Claude between tool calls
+    # instead of at the end of the turn (feature 119, see deliver.py).
+    claude_deliver_between_tools: bool = True
+    # A PreToolUse hook stops a tool call in which two different spellings would be written as the
+    # same client name - the rename collapse that deleted a file (bug report 2026-10-14; deliver.py).
+    claude_collapse_guard: bool = True
+    # The Claude Desktop app's Code tab through aicleaner (feature 117, codetab*.py): a forward proxy
+    # on this port, and Claude Code's settings pointed at it. Off until chosen (installer or Settings).
+    codetab_enabled: bool = False
+    codetab_port: int = 8788
     # EMERGENCY ONLY. When the canary finds a real name after tokenising, send the request anyway
     # (logged, and flagged in the evidence log) instead of refusing it. It exists so a false
     # positive cannot lock you out of the assistant you would use to fix it; off is the only safe
@@ -254,6 +264,10 @@ class Config:
         "scan.generated_markers": ("scan_generated_markers", list),
         "highlight.terminal": ("highlight_terminal", bool),
         "claude.bash_guard": ("claude_bash_guard", bool),
+        "claude.deliver_between_tools": ("claude_deliver_between_tools", bool),
+        "claude.collapse_guard": ("claude_collapse_guard", bool),
+        "codetab.enabled": ("codetab_enabled", bool),
+        "codetab.port": ("codetab_port", int),
         "canary.fail_open": ("canary_fail_open", bool),
         "proxy.bypass": ("proxy_bypass", bool),
         "debug.timings": ("debug_timings", bool),
@@ -315,6 +329,8 @@ class Config:
                 if value not in PERMISSION_MODES:
                     raise ValueError(
                         f"session.permission_mode must be one of: {', '.join(PERMISSION_MODES)}")
+            if key == "codetab.port" and not 1024 <= value <= 65535:
+                raise ValueError("codetab.port must be between 1024 and 65535")
             if key == "logs.detail_retention_days" and value < 0:
                 raise ValueError("retention must be 0 (keep forever) or more")
             if key == "folders.roots":
@@ -434,6 +450,12 @@ class Config:
         cfg.highlight_session = _flag(hl, "session", True, "highlight.session")
         cfg.highlight_terminal = _flag(hl, "terminal", False, "highlight.terminal")
         cfg.claude_bash_guard = _flag(data.get("claude") or {}, "bash_guard", True, "claude.bash_guard")
+        cfg.claude_deliver_between_tools = _flag(data.get("claude") or {}, "deliver_between_tools", True,
+                                                 "claude.deliver_between_tools")
+        cfg.claude_collapse_guard = _flag(data.get("claude") or {}, "collapse_guard", True, "claude.collapse_guard")
+        codetab = data.get("codetab") or {}
+        cfg.codetab_enabled = _flag(codetab, "enabled", False, "codetab.enabled")
+        cfg.codetab_port = int(codetab.get("port", 8788))
         cfg.canary_fail_open = _flag(data.get("canary") or {}, "fail_open", False, "canary.fail_open")
         cfg.proxy_bypass = _flag(data.get("proxy") or {}, "bypass", False, "proxy.bypass")
         rem = data.get("remote") or {}

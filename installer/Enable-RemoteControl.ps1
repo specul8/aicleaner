@@ -54,6 +54,19 @@
 .PARAMETER Email
     The address allowed to sign in, and where the one-time PIN goes. Asked for when needed.
 
+.PARAMETER SessionDuration
+    How long a Cloudflare Access sign-in lasts, in hours as Cloudflare writes them. Default: 168h
+    (7 days); 24 hours interrupted every working day. Used for a new Access application, and with
+    -SetSessionLength for the existing one.
+
+.PARAMETER SetSessionLength
+    Change only the existing Access application's sign-in length to -SessionDuration, then stop.
+    Uses the stored API token (or -ApiToken, or asks).
+
+.EXAMPLE
+    .\Enable-RemoteControl.ps1 -SetSessionLength
+    Sign-ins to this machine's remote-control address last 7 days from the next sign-in.
+
 .PARAMETER Setup
     Skip the question: 'api' (the default when asked) to have the script do it with a token,
     'manual' for the dashboard.
@@ -110,6 +123,12 @@ param(
     [switch]$SkipTheChooser,
     # Give the existing address a new name (with -Hostname): same tunnel, same Access application.
     [switch]$Rename,
+    # How long a Cloudflare Access sign-in lasts before it is asked for again. 24 hours interrupted
+    # every working day (the user, 2026-10-14), so new applications get 7 days. Hours, as Cloudflare
+    # writes them.
+    [ValidatePattern('^[0-9]+h$')][string]$SessionDuration = '168h',
+    # Change only the existing Access application's sign-in length to -SessionDuration, and stop.
+    [switch]$SetSessionLength,
     [switch]$Remove,
     # Nobody at the keyboard (the setup wizard runs this, D177): every yes/no takes its default, and
     # anything that has no default - a token, an address, a client secret - must come as a parameter
@@ -451,7 +470,7 @@ function Invoke-ApiSetup {
         if (-not $tunnel) { throw 'The tunnel was not created' }
         Set-TunnelDns -Token $token -ZoneId $targets.ZoneId -PublicHostname $script:Hostname -TunnelId $tunnel.Id
         $audience = New-AccessApplication -Token $token -AccountId $targets.AccountId `
-            -PublicHostname $script:Hostname -Emails $emails
+            -PublicHostname $script:Hostname -Emails $emails -SessionDuration $script:SessionDuration
         # After the application exists, because pinning needs something to pin to. The allow policy
         # is unchanged either way: it matches the address the provider asserts, whoever asserts it.
         $idp = New-IdentityProvider -Token $token -AccountId $targets.AccountId `
@@ -1090,7 +1109,9 @@ function New-AccessApplication {
         [Parameter(Mandatory)][string]$Token,
         [Parameter(Mandatory)][string]$AccountId,
         [Parameter(Mandatory)][string]$PublicHostname,
-        [Parameter(Mandatory)][string[]]$Emails
+        [Parameter(Mandatory)][string[]]$Emails,
+        # How long a sign-in lasts (the script's -SessionDuration).
+        [ValidatePattern('^[0-9]+h$')][string]$SessionDuration = '168h'
     )
     $needs = 'Account | Access: Apps and Policies | Edit'
     $existing = @(Invoke-CloudflareApi -Token $Token -Path "/accounts/$AccountId/access/apps" -Needs $needs |
@@ -1108,7 +1129,7 @@ function New-AccessApplication {
         name             = "aicleaner ($PublicHostname)"
         domain           = $PublicHostname
         type             = 'self_hosted'
-        session_duration = '24h'
+        session_duration = $SessionDuration
     }
     Write-Status "Access application created for $PublicHostname" -Level Detail
     $include = @($Emails | ForEach-Object { @{ email = @{ email = $_ } } })
@@ -1201,6 +1222,38 @@ function Rename-AccessApplication {
     if (-not $PSCmdlet.ShouldProcess($PublicHostname, 'Move the Access application')) { return }
     Invoke-CloudflareApi -Token $Token -Path "/accounts/$AccountId/access/apps/$AppId" -Method 'PUT' -Needs $needs -Body $body | Out-Null
     Write-Status "Access application now guards $PublicHostname" -Level Detail
+}
+
+function Set-AccessSessionDuration {
+    <#
+    .SYNOPSIS
+        Sets how long a sign-in to the Access application lasts, keeping everything else about it.
+    .DESCRIPTION
+        Cloudflare replaces the whole application on a PUT, so what it has is read first and sent
+        back with only the session duration changed (as Rename-AccessApplication does). Browsers
+        signed in before keep the length they were given until they next sign in.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$Token,
+        [Parameter(Mandatory)][string]$AccountId,
+        [Parameter(Mandatory)][string]$AppId,
+        [Parameter(Mandatory)][string]$Duration
+    )
+    $needs = 'Account | Access: Apps and Policies | Edit'
+    $app = Invoke-CloudflareApi -Token $Token -Path "/accounts/$AccountId/access/apps/$AppId" -Needs $needs
+    if (-not $app) { throw "The Access application $AppId was not found; change it in the Zero Trust dashboard" }
+    if ([string]$app.session_duration -eq $Duration) {
+        Write-Status "Sign-ins already last $Duration" -Level Done
+        return
+    }
+    $body = @{ name = [string]$app.name; domain = [string]$app.domain; session_duration = $Duration }
+    foreach ($keep in 'type', 'allowed_idps', 'auto_redirect_to_identity', 'app_launcher_visible', 'skip_interstitial') {
+        if ($app.PSObject.Properties[$keep] -and $null -ne $app.$keep) { $body[$keep] = $app.$keep }
+    }
+    if (-not $PSCmdlet.ShouldProcess([string]$app.domain, "Set the sign-in length to $Duration")) { return }
+    Invoke-CloudflareApi -Token $Token -Path "/accounts/$AccountId/access/apps/$AppId" -Method 'PUT' -Needs $needs -Body $body | Out-Null
+    Write-Status ("Sign-ins to {0} now last {1} (was {2}); a browser signed in before keeps its old length until it next signs in" -f $app.domain, $Duration, $app.session_duration) -Level Done
 }
 
 function Test-PublicName {
@@ -1407,8 +1460,29 @@ try {
         Remove-Item Env:\AICLEANER_IDP_SECRET -ErrorAction SilentlyContinue
     }
     $script:Hostname = $Hostname
+    $script:SessionDuration = $SessionDuration
     $script:Emails = @($Email | Where-Object { $_ })
     Set-OwnedIds -Config $config      # before anything can reuse instead of create
+
+    # --- Sign-in length -------------------------------------------------------
+    if ($SetSessionLength) {
+        $remote = if ($config.PSObject.Properties['remote']) { $config.remote } else { $null }
+        $accountId = Get-RemoteValue -Remote $remote -Name 'account_id'
+        $appId = Get-RemoteValue -Remote $remote -Name 'access_app_id'
+        if (-not $accountId -or -not $appId) {
+            throw ('No Access application is recorded for this machine. In the Zero Trust dashboard: Access > ' +
+                   'Applications > the aicleaner application > Edit > Session Duration.')
+        }
+        $secure = if ($ApiToken) { $ApiToken } else { Read-StoredCloudflareToken }
+        if (-not $secure) {
+            if ((Get-Variable -Name 'Unattended' -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) { throw 'Unattended, and no API token is stored or given' }
+            $secure = Read-Host -Prompt 'Paste the API token (hidden)' -AsSecureString
+        }
+        $token = ConvertFrom-SecureToken -Secure $secure
+        try { Set-AccessSessionDuration -Token $token -AccountId $accountId -AppId $appId -Duration $SessionDuration }
+        finally { $token = $null; [GC]::Collect() }
+        return
+    }
 
     # --- Rename ---------------------------------------------------------------
     if ($Rename) {

@@ -818,6 +818,28 @@ try {
         }
     }
 
+    # --- 1a-iii. The Code tab's settings and the Bash guard's hook (features 117, 98) -
+    # Put there by the proxy's switches, so taken out by the same code (`aicleaner unwire-claude`),
+    # which knows from its own record what it added and what was there before: the Code tab's proxy
+    # settings, its SessionStart hook and MCP entries, its certificate authority, and the Bash guard's
+    # PreToolUse hook. Left behind, Claude Code would send everything to a proxy that is gone, and run
+    # hooks with a Python that is gone.
+    $venvPython = Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'
+    $configFile = Join-Path $root 'aicleaner-config.json'
+    if ((Test-Path -LiteralPath $venvPython) -and (Test-Path -LiteralPath $configFile) -and
+        $PSCmdlet.ShouldProcess($settingsPath, 'Remove the Code tab settings and the Bash guard hook')) {
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        Push-Location -LiteralPath $root
+        try {
+            & $venvPython -m aicleaner unwire-claude --config $configFile 2>&1 | ForEach-Object { Write-Status "Claude Code settings: $_" -Level Detail }
+            if ($LASTEXITCODE -ne 0) { Write-Status 'Some Claude Code settings could not be put back; see the lines above' -Level Warn }
+        } finally {
+            Pop-Location
+            $ErrorActionPreference = $savedEap
+        }
+    }
+
     # --- 1b. VS Code environmentVariables ---------------------------------------------
     # Every settings file the installer can write: the locally installed VS Code, and the servers a
     # Remote-SSH session runs from. Missing the server ones left Claude Code pointed at a proxy that

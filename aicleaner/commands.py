@@ -37,6 +37,9 @@ BUILT_INS: tuple[tuple[str, str, bool], ...] = (
     # /usage-credits or /extra-usage: they open a browser on the machine running the session,
     # which from a phone is somebody else's screen.
     ("/clear", "Start the conversation afresh: what was said so far is no longer in context", False),
+    # Run from this page by the user 2026-10-14: it summarised the session and carried on. Send it
+    # while the session is idle; sent mid-turn it waits in the queue like any message.
+    ("/compact", "Summarise the conversation so far to free context; add instructions to steer the summary", False),
     ("/context", "How full the context is, by category", False),
     ("/usage", "How much of the plan's session and weekly limits is used", False),
     ("/autocompact", "When the conversation is summarised to free context", False),
@@ -44,7 +47,42 @@ BUILT_INS: tuple[tuple[str, str, bool], ...] = (
     ("/advisor", "A second model to consult: fable, opus, sonnet or off", True),
     ("/reload-skills", "Pick up skills added or changed since the session started", False),
     ("/reload-plugins", "Pick up plugins added or changed since the session started", False),
+    # Named by a headless session's own init event (Claude Code 2.1.289, 2026-10-14): the commands
+    # and bundled skills it accepts without a terminal. Descriptions from Anthropic's reference.
+    ("/agents", "How to create or manage subagents", False),
+    ("/auto-mode-setup", "Draft auto mode's environment entries from this project and recent sessions", False),
+    ("/batch", "Plan a large change, split it into independent units and run them in parallel", True),
+    ("/claude-api", "Load the Claude API and Managed Agents reference for this project's language", False),
+    ("/code-review", "Review the current diff, or a PR, branch or path, for bugs; --fix applies the findings", False),
+    ("/dataviz", "Design guidance for charts, graphs and dashboards", False),
+    ("/debug", "Turn on debug logging for this session and troubleshoot from the log", False),
+    ("/deep-research", "Search the web on a question, cross-check sources and write a cited report", True),
+    ("/design", "Draft UI mockups or screen flows as a Claude Design artifact", True),
+    ("/design-sync", "Upload this repo's design system to Claude Design", False),
+    ("/doctor", "Check the installation, settings and CLAUDE.md, and propose fixes", False),
+    ("/fewer-permission-prompts", "Add an allowlist of common read-only tool calls to the project settings", False),
+    ("/init", "Write a CLAUDE.md guide for this project", False),
+    ("/insights", "An HTML report on recent sessions on this machine", False),
+    ("/list-agents", "The subagents, teammates and other sessions Claude can message", False),
+    ("/loop", "Run a prompt repeatedly, at an interval or self-paced", False),
+    ("/plugin-authoring", "Load the reference for writing a plugin mod", False),
+    ("/recap", "A one-line summary of this session", False),
+    ("/run", "Launch and drive the project's app to see a change working", False),
+    ("/run-skill-generator", "Teach /run and /verify how to build and launch this project", False),
+    ("/schedule", "Create, list or run routines that execute in the cloud", False),
+    ("/security-review", "Review this branch's changes for security vulnerabilities", False),
+    ("/simplify", "Review the changed code for cleanup and apply the fixes", False),
+    ("/team-onboarding", "A teammate onboarding guide from the last 30 days of usage", False),
+    ("/update-config", "Describe a settings change and have it made in settings.json", False),
+    ("/verify", "Build and run the app to confirm a change does what it should", False),
+    ("/workflow-authoring", "Load the reference for writing dynamic workflow scripts", False),
 )
+
+# Named by a headless session but not offered: /usage-credits and /extra-usage open a browser on the
+# machine running the session (from a phone, somebody else's screen); /heapdump writes a memory dump
+# to that machine's Desktop; /focus changes a terminal view nobody here sees; the rest are internal.
+HIDDEN = frozenset({"usage-credits", "extra-usage", "heapdump", "focus", "design-consent", "design-revoke",
+                    "workflow-launch-exec"})
 
 
 @dataclass(frozen=True)
@@ -148,11 +186,14 @@ def _plugin_roots(home: Path) -> list[tuple[str, Path]]:
 
 
 def _from_session(offered: Iterable[str]) -> list[Command]:
-    """The namespaced names the running session accepts - a plugin's skill from a store this scan
-    does not read, an MCP server's prompt. Bare names are left out: built-ins and terminal-only
-    commands share that space, and only the ones tried headless (BUILT_INS) are safe to offer."""
-    return [Command(name=f"/{name}", kind="command", description="", source="session")
-            for name in offered if ":" in name or name.startswith("mcp__")]
+    """The names the running session accepts that the lists above do not have - a plugin's skill
+    from a store this scan does not read, an MCP server's prompt, a built-in added by a newer
+    Claude Code. A headless session names only what it accepts without a terminal (/login, /resume
+    and /plugin are not among them; checked 2026-10-14), so a bare name is offered too, unless it is
+    one of HIDDEN or internal (a leading underscore)."""
+    return [Command(name=f"/{name}", kind="built-in" if ":" not in name and not name.startswith("mcp__")
+                    else "command", description="", source="session")
+            for name in offered if name not in HIDDEN and not name.startswith("_")]
 
 
 def available(projects: Iterable[str | Path] = (), home: str | Path = "",

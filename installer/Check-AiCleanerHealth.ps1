@@ -200,6 +200,36 @@ function Test-CheckApplies {
     }
 }
 
+function Test-CodeTab {
+    <#
+    The Claude Desktop app's Code tab (feature 117). Only when it is in use: the switch on in the
+    proxy, or Claude Code's settings still pointing at a local proxy. With the proxy down the Code
+    tab cannot reach Anthropic at all (fail safe), and this names that as the cause.
+    #>
+    param([int]$ProxyPort, $Proxy)
+    if ($Proxy -and $Proxy.Ok) {
+        try { $codetab = (Invoke-RestMethod -Uri "http://127.0.0.1:$ProxyPort/healthz" -TimeoutSec 5).codetab } catch { $codetab = $null }
+        if (-not $codetab -or -not $codetab.enabled) { return $null }
+        $set = $codetab.settings
+        if ($codetab.listening -and $set.proxy_set -and $set.ca_set -and $set.hook) {
+            return [pscustomobject]@{ Name = 'codetab'; Ok = $true
+                Why = "listening on 127.0.0.1:$($codetab.port); Claude Code's settings point at it"; Fix = '' }
+        }
+        $why = if ($codetab.error) { [string]$codetab.error } elseif (-not $codetab.listening) { 'switched on but not listening' } else { 'Claude Code''s settings are not all in place' }
+        return [pscustomobject]@{ Name = 'codetab'; Ok = $false; Why = "the Code tab: $why"
+            Fix = 'Settings > "Claude Code in the Claude Desktop app": save it again, or switch it off' }
+    }
+    $settings = $script:ClaudeSettings
+    if (-not (Test-Path -LiteralPath $settings)) { return $null }
+    try { $doc = Get-Content -LiteralPath $settings -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    $proxyUrl = ''
+    if ($doc.PSObject.Properties['env'] -and $doc.env -and $doc.env.PSObject.Properties['HTTPS_PROXY']) { $proxyUrl = [string]$doc.env.HTTPS_PROXY }
+    if ($proxyUrl -notlike 'http://127.0.0.1:*') { return $null }
+    return [pscustomobject]@{ Name = 'codetab'; Ok = $false
+        Why = "the Claude Desktop app's Code tab cannot reach Anthropic: its proxy ($proxyUrl) is not running"
+        Fix = 'Start-AiCleaner.ps1 -Detach (or Disable-AiCleaner.ps1 to stop filtering it)' }
+}
+
 function Get-HealthChecks {
     <# Returns every check that applies here, plus a Skipped list so the state file can say
        "not checked on this machine" rather than leaving a silent gap that reads as a pass. #>
@@ -232,6 +262,10 @@ function Get-HealthChecks {
         }
     }
     if ($applies['screenshot']) { $checks += Test-ScreenshotRemap }
+    if ($applies['proxy']) {
+        $codetab = Test-CodeTab -ProxyPort $ProxyPort -Proxy $proxy
+        if ($codetab) { $checks += $codetab }
+    }
     return [pscustomobject]@{ Checks = @($checks); Skipped = @($skipped) }
 }
 

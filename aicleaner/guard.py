@@ -142,6 +142,12 @@ def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None) -> 
             except AccessError as exc:
                 log.warning("refused a request at %s: %s", arriving, exc)
                 return web.Response(status=403, text=f"aicleaner: {exc}")
+            except (OSError, ValueError) as exc:
+                # Cloudflare's signing keys could not be fetched (a network blip, a bad answer): not a
+                # refusal of this person, so not a 403 - a 503 the page treats as "try again" - and
+                # never the uncaught 500 it used to be (2026-10-14 review).
+                log.warning("could not check a request at %s: %s", arriving, exc)
+                return web.json_response({"error": "aicleaner could not check the sign-in just now"}, status=503)
             request[ACCESS_EMAIL] = str(claims.get("email", "")).lower()
             request[ACCESS_COUNTRY] = str(claims.get("country", ""))
             request[REMOTE] = True

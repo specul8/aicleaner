@@ -38,6 +38,8 @@ MAX_SEALED_FILE = 50 * 1024 * 1024
 # Set on the inner request of a sealed envelope, so a handler that would stream answers in one piece.
 INSIDE_TUNNEL = web.RequestKey("aicleaner_inside_tunnel", bool)
 LOCKED = "locked: through the tunnel this page talks only in sealed requests. Enter the code."
+# On our own 401 (run the key exchange again), so the page can tell it from any other 401.
+REKEY = {"X-Aicleaner-Tunnel": "rekey"}
 # Compressed before sealing (D178), for a page that says it can open gzip: an encrypted body is noise,
 # so nothing on the way - Cloudflare included - can compress it. Not what is already compressed.
 COMPRESS_FROM = 2048
@@ -67,8 +69,10 @@ def make_tunnel_gate(proxy: Any) -> Any:
             sid, seq, plain = proxy.tunnel_sessions.open(json.loads(envelope))
             inner = json.loads(plain)
         except UnknownSession:
-            # Restarted, or idle too long: the page runs the exchange again and resends.
-            return web.json_response({"error": "unknown session"}, status=401)
+            # Restarted, or idle too long: the page runs the exchange again and resends. Marked as
+            # ours, so the page tells it from Cloudflare Access's 401 - an expired sign-in, which a
+            # re-key cannot mend (the user, 2026-10-14: the page sat on "Not connected" for good).
+            return web.json_response({"error": "unknown session"}, status=401, headers=REKEY)
         except (SealError, ValueError):
             return web.json_response({"error": "the sealed request did not open"}, status=400)
         answer = json.dumps(await _dispatch(request, inner)).encode("utf-8")
@@ -79,7 +83,7 @@ def make_tunnel_gate(proxy: Any) -> Any:
         try:
             return web.json_response(proxy.tunnel_sessions.seal_reply(sid, seq, answer))
         except UnknownSession:
-            return web.json_response({"error": "unknown session"}, status=401)
+            return web.json_response({"error": "unknown session"}, status=401, headers=REKEY)
 
     return gate
 

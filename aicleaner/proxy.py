@@ -37,7 +37,9 @@ from .config import Config, session_profiles
 from .attachments import scrub
 from .convert import image_converter, pdftotext_converter
 from .contact import ContactSource
-from . import bashguard, who
+from . import bashguard, codetab_settings, deliver, rules, who
+from .codetab import CODETAB, CodeTab
+from .codetab_ca import Authority, AuthorityError
 from .guard import REMOTE, make_guard
 from .tunnelcrypt import Sessions as TunnelSessions, TunnelSecret
 from .tunnelgate import make_tunnel_gate
@@ -56,7 +58,7 @@ from .secrets import read_secret
 from .sse import SSEParser
 from .store import MappingStore
 from .transform import (canary, canary_matches, canary_sites, rule_declined, detection_text, dumps, rehydrate_message, strip_marks, tokenise_json,
-                        walk_strings)
+                        tool_is_kept, walk_strings)
 from .ui import build_ui_routes
 from .usersecrets import UserSecrets
 
@@ -219,6 +221,9 @@ class Proxy:
         client_home = os.environ.get("AICLEANER_CLIENT_HOME", "").strip()
         self.mcp = McpWatch(Path(cfg.state_dir) if cfg.state_dir else None,
                             home=Path(client_home) if client_home else None)
+        # The Claude Desktop app's Code tab (feature 117): its listeners while the switch is on.
+        self.codetab: CodeTab | None = None
+        self.codetab_error = ""
         # Candidates are per host: the folder may be OneDrive-synced between machines.
         self.store = (CandidateStore(Path(cfg.mapping).parent / f"candidates-{evidence.host}.jsonl")
                       if cfg.detect_enabled else None)
@@ -278,6 +283,8 @@ class Proxy:
         # What the Session page reads to say "waiting on the AI service" - "connected" only ever
         # meant the page could reach aicleaner.
         self._open: dict[str, dict[str, Any]] = {}
+        # Tool calls to stop before they run (the rename collapse): id -> (when, reason).
+        self.collapsed: dict[str, tuple[float, str]] = {}
         self._pdf_to_text = pdftotext_converter(cfg.pdftotext or None)
         # Probed once at startup, like pdftotext: the shared reader (Snipping Tool's engine when the
         # user has it, feature 113; otherwise Windows', with Tesseract where installed), otherwise
@@ -742,6 +749,108 @@ class Proxy:
             await asyncio.to_thread(self.mcp.audit, self.session_folders())
         except Exception as exc:  # noqa: BLE001 - an audit failure must never stop the proxy
             log.warning("MCP audit failed: %s", exc)
+        # Servers added since the Code tab switch went on are kept off its proxy too (feature 117).
+        if self.cfg.codetab_enabled and codetab_settings.applies():
+            try:
+                said = await asyncio.to_thread(codetab_settings.apply_mcp, True, self._state_path())
+                if said:
+                    log.info("Code tab: %s", said)
+            except codetab_settings.SettingsError as exc:
+                log.warning("Code tab: MCP servers not updated: %s", exc)
+
+    def _state_path(self) -> Path:
+        return Path(self.cfg.state_dir) if self.cfg.state_dir else Path(self.cfg.mapping).parent / "state"
+
+    def codetab_authority(self) -> Authority:
+        return Authority(self._state_path())
+
+    async def apply_codetab(self) -> str:
+        """Listeners and Claude Code's settings made to match the switch (feature 117). Returns what
+        was done for the page; a failure is kept in codetab_error and raised for the page to show."""
+        if not codetab_settings.applies():
+            return ""
+        state = self._state_path()
+        url = f"http://127.0.0.1:{self.cfg.codetab_port}"
+        try:
+            if self.cfg.codetab_enabled:
+                authority = self.codetab_authority()
+                await asyncio.to_thread(authority.ensure)
+                if self.codetab is not None and self.codetab.port != self.cfg.codetab_port:
+                    await self.codetab.stop()
+                    self.codetab = None
+                if self.codetab is None:
+                    tab = CodeTab(self.handle, authority, self.cfg.codetab_port, self.cfg.client_max_mb)
+                    try:
+                        await tab.start()
+                    except OSError as exc:
+                        raise codetab_settings.SettingsError(
+                            f"port {self.cfg.codetab_port} is in use ({exc}); choose another in Settings") from exc
+                    self.codetab = tab
+                said = await asyncio.to_thread(codetab_settings.apply, True, state, url, str(authority.ca_path),
+                                               self.cfg.listen)
+            else:
+                if self.codetab is not None:
+                    await self.codetab.stop()
+                    self.codetab = None
+                said = await asyncio.to_thread(codetab_settings.apply, False, state, url, "", self.cfg.listen)
+                if said:
+                    await asyncio.to_thread(self.codetab_authority().remove)
+        except (codetab_settings.SettingsError, AuthorityError) as exc:
+            self.codetab_error = str(exc)
+            raise
+        self.codetab_error = ""
+        if said:
+            log.info(said)
+        return said
+
+    # ---- the rename collapse (2026-10-14) ----------------------------------------------------
+
+    COLLAPSE_KEEP_S = 600          # a flag waits this long for the tool's PreToolUse check
+
+    def note_collapse(self, call_id: str, found: list[tuple[list[str], str]]) -> None:
+        """A tool call in which different spellings come back as one real name: held until the
+        PreToolUse hook asks (hooks/check_collapse.py), which then stops the call with the reason.
+        The reason names the spellings as the model wrote them, never the real name."""
+        now = time.time()
+        self.collapsed = {k: v for k, v in self.collapsed.items() if now - v[0] < self.COLLAPSE_KEEP_S}
+        pairs = "; ".join(" and ".join(f"'{s}'" for s in spellings) for spellings, _real in found)
+        reason = ("aicleaner stopped this call before it ran: " + pairs + " are different strings to you, "
+                  "but on this machine they are written as the same client name, so this command would treat "
+                  "them as one - a rename between them overwrites the file and then deletes it. Write the "
+                  "name the same way each time, or use a name without the client's name in it.")
+        self.collapsed[call_id] = (now, reason)
+        log.warning("tool call %s holds spellings that become one name (%s): it will be stopped", call_id, pairs)
+
+    def take_collapse(self, call_id: str) -> str:
+        """The reason to stop this call, once; empty when it is fine."""
+        entry = self.collapsed.pop(call_id, None)
+        return entry[1] if entry and time.time() - entry[0] < self.COLLAPSE_KEEP_S else ""
+
+    def _collapses_in(self, mapper: Mapper, obj: Any) -> None:
+        """The same check on a reply that was not streamed: each tool call's input as written."""
+        blocks = obj.get("content") if isinstance(obj, dict) else None
+        for block in blocks if isinstance(blocks, list) else []:
+            if (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id")
+                    and not tool_is_kept(block.get("name"), self.keep_tools())):
+                found = mapper.collapses(json.dumps(block.get("input"), ensure_ascii=False))
+                if found:
+                    self.note_collapse(str(block["id"]), found)
+
+    def reads_images(self) -> bool:
+        """True when an image in a request is read on this machine and replaced by its text (local
+        reading on, and an engine found at startup) - what the CLAUDE.md rule tells sessions."""
+        return self._image_to_text is not None
+
+    def codetab_summary(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"enabled": self.cfg.codetab_enabled, "port": self.cfg.codetab_port,
+                               "error": self.codetab_error, "listening": False}
+        if self.codetab is not None:
+            out.update(self.codetab.summary())
+        try:
+            out["settings"] = codetab_settings.state(self._state_path())
+        except Exception as exc:  # noqa: BLE001 - a summary never fails the health check
+            out["settings"] = {"error": str(exc)}
+        return out
 
     async def _start(self, app: web.Application) -> None:
         timeout = aiohttp.ClientTimeout(total=None, sock_read=self.cfg.upstream_timeout_s)
@@ -755,6 +864,55 @@ class Proxy:
                 log.info(said)
         except bashguard.GuardError as exc:
             log.warning("bash guard not applied: %s", exc)
+        # Name tokens minted with a space before their hash suffix get it joined with underscores
+        # (2026-10-15): "Client05 1a2b" was read as a name and a qualifier, and the suffix went out on
+        # its own. Once per start; nothing to do after the first.
+        if self._handle is not None:
+            try:
+                moved = await asyncio.to_thread(self._handle.store.migrate_spaced_suffixes)
+                if moved:
+                    log.info("joined the suffix of %d token(s) with underscores: %s", len(moved),
+                             ", ".join(f"{old!r} -> {new!r}" for _cid, old, new in moved[:10]))
+                    await asyncio.to_thread(self._handle._reload)
+            except Exception as exc:  # noqa: BLE001 - a migration that fails leaves the old tokens working
+                log.warning("token suffixes not migrated: %s", exc)
+        # Waiting Session-page messages handed to Claude between tool calls (feature 119): the hook
+        # kept in step at every start, so a deploy installs it and a new port is followed. Only when
+        # the page can drive sessions - otherwise there is never anything waiting to hand over.
+        try:
+            said = await asyncio.to_thread(deliver.apply, self.cfg.claude_deliver_between_tools
+                                           and self.session is not None, self.cfg.port)
+            if said:
+                log.info(said)
+        except deliver.DeliverError as exc:
+            log.warning("deliver hook not applied: %s", exc)
+        # The rename-collapse guard: every session on the machine, since the proxy sees them all.
+        try:
+            said = await asyncio.to_thread(deliver.apply_collapse_guard, self.cfg.claude_collapse_guard, self.cfg.port)
+            if said:
+                log.info(said)
+        except deliver.DeliverError as exc:
+            log.warning("collapse guard not applied: %s", exc)
+        # The CLAUDE.md file rule kept in step with what this machine does with images (the user,
+        # 2026-10-14): read here, so sessions may Read them. Only a block already there is touched.
+        try:
+            said = await asyncio.to_thread(rules.apply, self.cfg.allow_images, reading=self.reads_images(),
+                                           only_if_present=True)
+            if said and not said.startswith("no change"):
+                log.info(said)
+        except rules.RulesError as exc:
+            log.warning("rules block not updated: %s", exc)
+        # The Code tab switch (feature 117) kept in step at every start, as the bash guard is.
+        try:
+            await self.apply_codetab()
+        except (codetab_settings.SettingsError, AuthorityError) as exc:
+            log.warning("Code tab not applied: %s", exc)
+        # No co-author lines in commits or pull requests (feature 117, decision 8): merged where missing.
+        if codetab_settings.applies():
+            try:
+                await asyncio.to_thread(codetab_settings.apply_attribution, self.session_folders())
+            except Exception as exc:  # noqa: BLE001 - never stops the proxy
+                log.warning("attribution not set: %s", exc)
         if self.session is not None:
             # Sessions a previous proxy left running in their brokers (DECISIONS 49): picked up,
             # not restarted, so a deploy no longer ends one or forks its conversation.
@@ -830,6 +988,9 @@ class Proxy:
             await host.stop_all()
 
     async def _stop(self, app: web.Application) -> None:
+        if self.codetab is not None:
+            await self.codetab.stop()
+            self.codetab = None
         if self.session is not None:
             # A session lives in its own broker (DECISIONS 49): this proxy lets go and the next one
             # re-attaches. Its model requests fail while no proxy answers, and Claude Code retries.
@@ -868,6 +1029,7 @@ class Proxy:
         # Each client's folder is shared in OneDrive (DECISIONS 51); outside it nothing syncs.
         from .shares import in_onedrive
         body["clients_in_onedrive"] = in_onedrive(Path(self.cfg.clients_dir))
+        body["codetab"] = self.codetab_summary()
         return web.json_response(body)
 
     async def api_tokenise(self, request: web.Request) -> web.Response:
@@ -886,7 +1048,8 @@ class Proxy:
         # pointed at us", not "did the request succeed".
         self.requests_seen += 1
         self.last_request_at = time.time()
-        dialect = request.match_info["dialect"]
+        # The Code tab's calls arrive at its reader with no dialect in the path (feature 117).
+        dialect = request.match_info.get("dialect") or ("anthropic" if request.get(CODETAB) else "")
         tail = request.match_info["tail"]
         upstream = self.cfg.upstreams.get(dialect)
         if upstream is None:
@@ -902,7 +1065,10 @@ class Proxy:
         session_name, session_client = self._session_of(request)
         # What the substitution log needs about this request (DECISIONS 38): an id shared with its
         # evidence record, and who was driving.
-        request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": await self._driver(session_name),
+        driver = await self._driver(session_name)
+        if request.get(CODETAB):
+            driver = {**driver, "app": "Claude Desktop Code tab"}
+        request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver,
                          "project": "", "held": None, "unprotected": [], "declined": [], "canary": []}
         self._open[request[_REQ]["id"]] = {"session": session_name, "started": time.time(), "content_at": None}
         if self._handle is not None and self._handle.broken:
@@ -1188,7 +1354,9 @@ class Proxy:
             kept = 0
             if _is_json(upstream_resp.content_type) and raw:
                 try:
-                    obj, kept = rehydrate_message(mapper, json.loads(raw), inbound, self.keep_tools(),
+                    original = json.loads(raw)
+                    self._collapses_in(mapper, original)
+                    obj, kept = rehydrate_message(mapper, original, inbound, self.keep_tools(),
                                                   mark=self._marks_for(request))
                     footer = self._footer(request, dialect, tail, len(inbound))
                     if footer:
@@ -1221,6 +1389,7 @@ class Proxy:
         parser = SSEParser()
         rewriter = get_stream_rewriter(dialect, mapper, inbound, self.keep_tools(),
                                        mark=self._marks_for(request))
+        rewriter.on_collapse = self.note_collapse
         max_index = -1
         footer_done = False
         try:

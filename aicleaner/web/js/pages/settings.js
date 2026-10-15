@@ -80,6 +80,7 @@ function paintCards() {
     loggingCard(s), notificationsCard(s, Boolean(view.config.remote)), kindsCard(s, kinds),
     nearMissCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
     view.config.windows ? bashGuardCard(s) : null,
+    view.config.windows && !view.config.remote ? codeTabCard(s) : null,
     toolsCard(s), routingCard(), restartCard(),
     foldersCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
@@ -483,6 +484,36 @@ function bashGuardCard(s) {
     () => ({ 'claude.bash_guard': guard.querySelector('input').checked }));
 }
 
+// The Claude Desktop app's Code tab through aicleaner (feature 117). What is in place is fetched
+// separately: asking Claude Code its version takes a moment, and the rest of the page need not wait.
+function codeTabCard(s) {
+  const on = checkbox('codetab', 'Filter the Code tab in the Claude Desktop app', s['codetab.enabled']);
+  const port = h('input', { type: 'number', name: 'codetab_port', min: '1024', max: '65535', value: String(s['codetab.port'] || 8788),
+    'aria-label': 'Code tab proxy port', class: 'narrow' });
+  const status = h('div', { class: 'hint codetab-status' }, 'Checking...');
+  getJSON('/api/codetab').then((info) => {
+    const lines = [];
+    if (info.enabled) {
+      lines.push(info.listening ? `Listening on 127.0.0.1:${info.port}.` : `Not listening${info.error ? `: ${info.error}` : '.'}`);
+      const set = info.settings || {};
+      lines.push(set.proxy_set && set.ca_set && set.hook ? 'Claude Code\'s settings point at it.' : 'Claude Code\'s settings are not all in place - save again.');
+      if (set.mcp_servers) lines.push(`${set.mcp_servers} local MCP server(s) kept off the proxy.`);
+      const seen = Object.entries(info.tunnels || {}).map(([host, n]) => `${host} (${n})`).join(', ');
+      if (seen) lines.push(`Seen: ${seen}.`);
+    } else {
+      lines.push(info.error || 'Off.');
+    }
+    if (info.claude_version && info.powershell_ok === false) {
+      lines.push(`Claude Code ${info.claude_version} is older than ${info.powershell_from}: its PowerShell tool will still use the proxy (git and npm there pass through it untouched). Update Claude Code to keep them off it.`);
+    }
+    status.textContent = lines.join(' ');
+  }).catch(() => { status.textContent = ''; });
+  return card('codetab', 'Claude Code in the Claude Desktop app (the Code tab)',
+    'The Code tab does not use aicleaner\'s usual routing. With this on, Claude Code\'s settings send its traffic through a proxy on this machine: calls to Anthropic are read and filtered like VS Code\'s, sign-in and updates pass through untouched, and its error-log upload is blocked. Only Claude Code trusts the certificate aicleaner uses, and that certificate can only vouch for api.anthropic.com. Commands Claude Code runs and the MCP servers in its own settings connect directly, as before; MCP servers from a project\'s .mcp.json or a plugin pass through the proxy untouched. While aicleaner is stopped the Code tab cannot reach Anthropic - nothing is sent unfiltered. Restart the Claude Desktop app after changing it.',
+    [h('div', { class: 'form-row' }, on), h('label', { class: 'field' }, 'Port', port), status],
+    () => ({ 'codetab.enabled': on.querySelector('input').checked, 'codetab.port': Number(port.value) || 8788 }));
+}
+
 // The file tabs on the Session page (feature 92): what a double-click in a Markdown preview does.
 // Saved on the server, so every device follows it (the user, 2026-10-08).
 function editorCard(s) {
@@ -519,7 +550,8 @@ function autocorrectCard(s) {
       h('p', { class: 'hint' }, 'Also leave alone:'),
       h('div', { class: 'form-row' }, ...skips),
       h('label', { class: 'field' }, 'Your own words, one per line, as they should be spelt (powershell becomes PowerShell)', own),
-      h('label', { class: 'field' }, 'Your replacements, one per line as typed = replacement (keyvault = Key Vault)', swaps)],
+      h('label', { class: 'field' }, 'Your replacements, one per line as typed = replacement (keyvault = Key Vault). A one-word replacement with capitals (OneDrive) also counts as one of your words', swaps),
+      h('p', { class: 'hint' }, 'A word with a known spelling - yours, a replacement\'s, or a product name - always takes it, even where the options above would leave a word alone.')],
     () => ({
       'prompt.autocorrect_replace': swaps.value.split('\n').map((w) => w.trim()).filter(Boolean),
       'prompt.autocorrect': on.querySelector('input').checked,

@@ -39,11 +39,15 @@ function placeholderAt(box, label) {
   return mark;
 }
 
+// The prompt can be several text boxes (feature 118), and removing a snippet joins the box after it
+// into the one before - so the mark is looked for in every box of the prompt it was put in.
 function replaceMark(box, mark, text) {
-  const at = box.value.indexOf(mark);
-  if (at < 0) return;                                  // deleted by hand meanwhile: nothing to replace
-  box.value = box.value.slice(0, at) + text + box.value.slice(at + mark.length);
-  box.dispatchEvent(new Event('input', { bubbles: true }));
+  const scope = box.promptScope || null;
+  const holder = [box, ...(scope ? scope.querySelectorAll('textarea') : [])].find((one) => one.value.includes(mark));
+  if (!holder) return;                                 // deleted by hand meanwhile: nothing to replace
+  const at = holder.value.indexOf(mark);
+  holder.value = holder.value.slice(0, at) + text + holder.value.slice(at + mark.length);
+  holder.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
 // One read: { file } from the clipboard, a drop or the chooser; or { root, path, filename } for a
@@ -56,6 +60,7 @@ export async function readInto(box, what, sessionName, say, format = null) {
     return;
   }
   const mark = placeholderAt(box, label);
+  box.promptScope = box.closest('.prompt-box-parts');  // kept: the box may be gone when the text arrives
   // One read at a time, in the order asked (the server reads one at a time per session and turns
   // a second away); each placeholder is in the box at once, so the order is visible.
   const turn = queue.then(() => readNow(box, what, sessionName, say, mark, label, format));
@@ -74,6 +79,11 @@ async function readNow(box, what, sessionName, say, mark, label, format) {
     if (!text.trim()) replaceMark(box, mark, `[No text found in ${named}]`);
     else if (format) replaceMark(box, mark, format(text, named));
     else replaceMark(box, mark, `[Text read from ${named} on this machine - check it before sending]\n${text}`);
+    // The Misreadings setting put a client name right (one letter out, as engines misread): said,
+    // so a changed word in the snippet is not a surprise.
+    if (text.trim() && answer.corrected) {
+      say(`${named}: ${answer.corrected} likely misreading${answer.corrected === 1 ? '' : 's'} of a client name put right.`, 'ok');
+    }
   } catch (error) {
     replaceMark(box, mark + '\n', '');
     replaceMark(box, mark, '');

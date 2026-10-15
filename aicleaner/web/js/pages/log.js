@@ -20,6 +20,7 @@ function driver(who) {
   const name = who.email || who.user || '';
   const detail = [];
   if (who.source === 'session-page') detail.push('Session page');
+  if (who.app) detail.push(who.app);                  // the Claude Desktop app's Code tab (feature 117)
   if (who.via) detail.push(who.via === 'remote' ? 'through the tunnel' : 'on this machine');
   if (who.upn) detail.push(`UPN ${who.upn}`);
   if (who.ssh_from && who.ssh_from.length) detail.push(`SSH open from ${who.ssh_from.join(', ')}`);

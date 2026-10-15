@@ -39,6 +39,8 @@ START = "<!-- aicleaner:start -->"
 END = "<!-- aicleaner:end -->"
 BIN_START = "<!-- aicleaner:binaries:start -->"
 BIN_END = "<!-- aicleaner:binaries:end -->"
+READ_START = "<!-- aicleaner:reading:start -->"
+READ_END = "<!-- aicleaner:reading:end -->"
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "templates" / "CLAUDE.md"
 
@@ -55,43 +57,65 @@ def user_claude_md(home: Path | None = None) -> Path:
     return base / ".claude" / "CLAUDE.md"
 
 
-def block_text(allow_binaries: bool, template: Path | None = None) -> str:
-    """The block as it should read for this setting, sentinels included."""
+def block_text(allow_binaries: bool, template: Path | None = None, reading: bool = False) -> str:
+    """The block as it should read for this setting, sentinels included.
+
+    Three states (the user, 2026-10-14): binaries sent -> no file rule; withheld but read on this
+    machine (`reading`: an OCR engine is present) -> Read images and PDFs directly, the proxy turns
+    them into text; withheld and unread -> convert everything first. A session told never to read
+    an image refused screenshots the proxy would have turned into text."""
     source = Path(template or TEMPLATE)
     try:
         text = source.read_text(encoding="utf-8-sig")
     except OSError as exc:
         raise RulesError(f"the rules template could not be read: {exc}") from exc
-    if not allow_binaries:
-        return _strip_markers(text)
     start, end = text.find(BIN_START), text.find(BIN_END)
-    if start < 0 or end < start:
+    if allow_binaries and (start < 0 or end < start):
         # The template is ours, so this is a packaging fault rather than a user one. Keeping the
         # whole block is the safe direction: the agent goes on converting locally, which works
         # whatever the setting says.
         log.warning("the rules template has no binaries region; leaving the rule in place")
-        return _strip_markers(text)
-    without = text[:start] + text[end + len(BIN_END):]
-    return _strip_markers(without).replace("\n\n\n", "\n\n")
+        return _strip_markers(_cut(text, READ_START, READ_END))
+    if allow_binaries:
+        text = _cut(_cut(text, BIN_START, BIN_END), READ_START, READ_END)
+    elif reading and text.find(READ_START) >= 0:
+        text = _cut(text, BIN_START, BIN_END)
+    else:
+        text = _cut(text, READ_START, READ_END)
+    return _strip_markers(text).replace("\n\n\n", "\n\n")
+
+
+def _cut(text: str, start_tag: str, end_tag: str) -> str:
+    """The text without one marked region, markers and all."""
+    start, end = text.find(start_tag), text.find(end_tag)
+    if start < 0 or end < start:
+        return text
+    return text[:start] + text[end + len(end_tag):]
 
 
 def _strip_markers(text: str) -> str:
-    return text.replace(BIN_START + "\n", "").replace(BIN_END + "\n", "").replace(
-        BIN_START, "").replace(BIN_END, "").strip() + "\n"
+    for tag in (BIN_START, BIN_END, READ_START, READ_END):
+        text = text.replace(tag + "\n", "").replace(tag, "")
+    return text.strip() + "\n"
 
 
-def apply(allow_binaries: bool, path: Path | None = None, template: Path | None = None) -> str:
+def apply(allow_binaries: bool, path: Path | None = None, template: Path | None = None,
+          reading: bool = False, only_if_present: bool = False) -> str:
     """Rewrite the block in `path` for this setting. Returns what happened, for the UI to say.
 
     Creates the file when it is absent - a machine with no user-level CLAUDE.md still wants the
-    rule when binaries are withheld. Never touches a byte outside the sentinels.
+    rule when binaries are withheld - unless `only_if_present`: the check at every start keeps a
+    block the installer wrote in step, and never adds one somebody declined. Never touches a byte
+    outside the sentinels.
     """
     target = Path(path or user_claude_md())
-    wanted = block_text(allow_binaries, template)
+    wanted = block_text(allow_binaries, template, reading=reading)
     try:
         existing = target.read_text(encoding="utf-8-sig") if target.exists() else ""
     except OSError as exc:
         raise RulesError(f"{target} could not be read: {exc}") from exc
+    if only_if_present and START not in existing:
+        return ""
 
     start, end = existing.find(START), existing.find(END)
     if (start < 0) != (end < 0) or (start >= 0 and end < start):
@@ -113,9 +137,12 @@ def apply(allow_binaries: bool, path: Path | None = None, template: Path | None 
         target.write_text(updated, encoding="utf-8")
     except OSError as exc:
         raise RulesError(f"{target} could not be written: {exc}") from exc
-    return ("binaries may now be sent, so the file-handling rule was removed from "
-            f"{target.name}" if allow_binaries else
-            f"binaries are withheld, so the file-handling rule was written into {target.name}")
+    if allow_binaries:
+        return f"binaries may now be sent, so the file-handling rule was removed from {target.name}"
+    if reading:
+        return (f"images and PDFs are read on this machine, so {target.name} now lets sessions Read "
+                "them directly (only their text is sent)")
+    return f"binaries are withheld, so the file-handling rule was written into {target.name}"
 
 
 def _back_up(target: Path) -> None:

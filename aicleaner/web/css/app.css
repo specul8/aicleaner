@@ -877,10 +877,14 @@ button.link { background: none; border: 0; color: var(--accent); cursor: pointer
 .tree-root.share { color: var(--accent); }
 .tree-root.share.none { color: var(--muted); font-weight: 400; font-style: italic; }
 
-/* The slash list under the prompt box: names on the left, where they came from, then what they
-   do. It sits in the flow rather than floating, so a phone gets the same list as a desktop. */
-.slash-list { display: flex; flex-direction: column; margin-top: .4rem; border: 1px solid var(--border);
-  border-radius: 6px; max-height: 16rem; overflow: auto; }
+/* The slash list: names on the left, where they came from, then what they do. It floats at the
+   command being typed (the user, 2026-10-14) - under the box it had only the room below a short
+   box. session.js places it below the word or above it, and inside the window; the width fits a
+   phone as well as a desktop. */
+.slash-list { position: fixed; z-index: 40; display: flex; flex-direction: column;
+  width: min(40rem, calc(100vw - 16px)); max-height: 20rem; overflow: auto;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .45); }
 .slash-list[hidden] { display: none; }
 /* How many matched, pinned at the foot: the list is no longer capped at twelve, so it should say
    how long it is (47). */
@@ -1132,7 +1136,29 @@ dialog.picker-dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .session-mid > #session-background { margin-top: 0; }
 .session-mid > #session-permissions:empty { display: none; }
 #prompt-pane { flex: 0 0 auto; height: var(--prompt-h, auto); min-height: 0; display: flex; flex-direction: column; gap: .4rem; }
-#prompt-pane #session-prompt { flex: 1 1 auto; min-height: 2.6rem; resize: none; }
+#prompt-pane .prompt-text-box { flex: 1 1 auto; min-height: 2.6rem; resize: none; }
+/* Feature 118: the prompt as text boxes with snippet objects between them. With no snippets the
+   wrapper is invisible and the one box looks as it always has; with snippets the wrapper takes the
+   box's border and scrolls, and the text boxes inside it lose theirs and grow with their text. */
+.prompt-box-parts { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.prompt-box-parts.has-snippets { overflow-y: auto; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 7px; padding: 2px 0; }
+.prompt-box-parts.has-snippets:focus-within { border-color: var(--focus); }
+.prompt-box-parts.has-snippets > .ac-stack { flex: 0 0 auto; }
+.prompt-box-parts.has-snippets > .ac-stack:last-child { flex: 1 0 auto; }
+#prompt-pane .prompt-box-parts.has-snippets .prompt-text-box { border: 0; border-radius: 0; min-height: 1.7rem;
+  overflow: hidden; padding: 2px 8px; }
+.prompt-box-parts.has-snippets > .ac-stack:last-child .prompt-text-box { flex: 1 0 auto; }
+.prompt-snippet { flex: 0 0 auto; margin: 2px 8px; padding: 3px 8px; min-width: 0; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--surface); font-family: var(--mono); font-size: 12.5px; line-height: 1.45;
+  cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+.prompt-snippet:focus { outline: 2px solid var(--focus); outline-offset: 1px;
+  background: color-mix(in srgb, var(--focus) 14%, var(--surface)); }
+/* Never wrapped: a line wider than the box is cut off with "..." (the user, 2026-10-14). */
+.prompt-snippet-line { white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.prompt-snippet-line.fold { color: var(--muted); font-style: italic; }
+.prompt-box-parts.disabled .prompt-snippet { opacity: .6; pointer-events: none; }
+.prompt-scratch { position: fixed; left: -9999px; top: 0; }
 @media (max-width: 60rem) {
   .session-top { grid-template-columns: minmax(0, 1fr); }
 }

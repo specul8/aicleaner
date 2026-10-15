@@ -1230,6 +1230,21 @@ class Session:
         await self.interrupt(cancel_queued=True)
         return "interrupting"
 
+    def take_waiting(self) -> list[str]:
+        """The waiting prompts, handed to Claude between tool calls (feature 119): every one not
+        held, in order, off the queue and shown as sent. Asked for by the PostToolUse hook, so only
+        mid-turn; a held prompt and everything after it stay, as they would at the turn's end."""
+        if not self.busy or not self.running:
+            return []
+        taken: list[str] = []
+        while self.queued and not self.queued[0].get("held"):
+            taken.append(self.queued.pop(0)["text"])
+        if taken:
+            self._queue_changed()
+            for text in taken:
+                self._emit({"type": "prompt", "text": text, "between_tools": True})
+        return taken
+
     def _flush_soon(self) -> None:
         """A turn ended: send the next waiting prompt, unless it is held or something else is."""
         if not self.queued or self.queued[0].get("held") or not self.running:
@@ -1900,6 +1915,11 @@ class SessionHost:
         session.projects = folders
         session.transcript_folders = self.conversation_folders(profile)
         home = folders[0] if folders else None
+        # No co-author lines from a folder new since the last start (feature 117, decision 8).
+        if home is not None:
+            from . import codetab_settings
+            if codetab_settings.applies():
+                await asyncio.to_thread(codetab_settings.apply_attribution, [str(home)])
         return await session.start(project=str(home) if home else project, resume=resume,
                                    model=model or profile.model)
 
@@ -1911,6 +1931,16 @@ class SessionHost:
 
     async def cancel_queued(self, item_id: str, name: str = "") -> None:
         await self._session(name).cancel_queued(item_id)
+
+    def take_waiting(self, session_id: str) -> list[str]:
+        """Feature 119: the waiting prompts of the running session with this conversation id, or
+        nothing - the hook asks for every Claude Code session on the machine, VS Code's included."""
+        if not session_id:
+            return []
+        for session in self.sessions.values():
+            if session.running and session.session_id == session_id:
+                return session.take_waiting()
+        return []
 
     async def stop(self, name: str = "") -> None:
         await self._session(name).stop()

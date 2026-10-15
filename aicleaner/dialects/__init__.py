@@ -36,6 +36,11 @@ class GenericStreamRewriter:
         # Pieces of tokens still in a tool call's restored arguments (the D87 safety net). Only the
         # Anthropic rewriter sees whole tool calls; everywhere else this stays empty.
         self.fragments: list[str] = []
+        # Told, the moment a tool call's arguments are complete, when two different spellings in it
+        # come back as the same real name (the rename collapse, 2026-10-14): on_collapse(tool_use_id,
+        # [(spellings, real)]). Called during the stream, because the tool runs as soon as the
+        # client has the message - before anything after the stream would see it.
+        self.on_collapse = None
 
     def _rewrite_data(self, data: str) -> str:
         try:

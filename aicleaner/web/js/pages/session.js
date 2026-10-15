@@ -5,12 +5,12 @@
 // and one of them selected. Everything a person reads here is the profile's name and the client's
 // label - never a client id, which is plumbing for the filter.
 
-import { connected, getJSON, onConnection, postJSON, say, sayError } from '../api.js';
+import { connected, getJSON, onConnection, postJSON, say, sayError, signedOut } from '../api.js';
 import { busyButton, h, iconButton, setChildren } from '../dom.js';
 import { folderPicker } from '../picker.js';
 import { pane } from '../panes.js';
 import { downloadLink, fileTabs } from '../filetabs.js';
-import { onFirstRow, onLastRow } from '../caretrow.js';
+import { caretRect, onFirstRow, onLastRow } from '../caretrow.js';
 import { confirmLeave, forget, rebase, track } from '../unsaved.js';
 import { fillShare, shareSlot } from '../sharecard.js';
 import { handOverWheel } from '../wheelchain.js';
@@ -21,7 +21,8 @@ import { begin } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { attachImageReading, imageButton, isReadable, readInto } from '../imagetext.js';
 import { codeEditor } from '../codeeditor.js';
-import { languageForFile, makeSnippet, nextSnippetNumber, snippetAt, snippetTitle, splitPrompt } from '../snippets.js';
+import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetTitle, splitPrompt } from '../snippets.js';
+import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
   viewableFiles } from '../treeselect.js';
 
@@ -584,7 +585,8 @@ function sinceText(at) {
   return `${Math.round(seconds / 3600)} h ago`;
 }
 
-function paintBackground(panel, events, box) {
+// boxOf(): the prompt's text box the caret was last in (feature 118: there can be several).
+function paintBackground(panel, events, boxOf) {
   const running = backgroundTasks(events);
   panel.hidden = !running.length;
   if (!running.length) {
@@ -608,6 +610,7 @@ function paintBackground(panel, events, box) {
       }, h('span', { 'aria-hidden': 'true' }, '→')))));
   panel.onclick = (event) => {
     const button = event.target.closest('button.bg-insert');
+    const box = boxOf ? boxOf() : null;
     if (!button || !box) return;
     const row = button.closest('.bg-row');
     const what = row ? row.querySelector('.bg-what').textContent : '';
@@ -617,7 +620,7 @@ function paintBackground(panel, events, box) {
 
 // The file tree. Half of driving a session is saying where to look, and a phone has no terminal
 // beside it to run `ls` in. Names only: nothing here reads a file.
-const tree = { open: new Map(), separator: '\\', cache: new Map(), menu: null, searchOpen: false, query: '', found: null };
+const tree = { open: new Map(), separator: '\\', cache: new Map(), menu: null, searchOpen: false, query: '', found: null, foundFor: '' };
 
 function joinPath(root, relative, name, separator) {
   const parts = [root];
@@ -897,7 +900,13 @@ function searchStatus(found, keepSearching) {
 // redrawn, so the box keeps its focus and caret through the page's regular tree redraws.
 function renderSearch(panel, name, focus = false) {
   let pane = panel.querySelector(':scope > .tree-search-pane');
+  let fresh = false;
   if (!pane || pane.dataset.session !== name) {
+    fresh = true;
+    // Results belong to the session they were searched in (the user, 2026-10-15: changing session
+    // left the old session's results on screen). Another session's are dropped, and the query -
+    // kept, as it is between Files and Search (D145) - runs again here, below.
+    if (tree.foundFor !== name) tree.found = null;
     const box = h('input', { type: 'search', class: 'tree-search-box', placeholder: 'Part of a file or folder name',
       'aria-label': 'Search files and folders by name', value: tree.query || '', 'data-unsaved-ignore': '' });
     const status = h('p', { class: 'hint tree-search-status', role: 'status' });
@@ -918,12 +927,17 @@ function renderSearch(panel, name, focus = false) {
       status.classList.add('searching');
       try {
         const found = await getJSON(`/api/session/search?name=${encodeURIComponent(name)}&q=${encodeURIComponent(query)}${more ? '&more=1' : ''}`);
+        // A search that finishes after the session changed is not this pane's any more: dropped,
+        // or it would put one session's results under another's.
+        if (!pane.isConnected) return;
         if (mine === asked) {
           if (more && found.continued && tree.found) found.results = [...tree.found.results, ...found.results];
           tree.found = found;
+          tree.foundFor = name;
           tree.menu = null;
         }
       } catch (error) {
+        if (!pane.isConnected) return;
         if (mine === asked) { tree.found = null; sayError(error); }
       }
       if (mine === asked) { status.classList.remove('searching'); renderSearch(panel, name); }
@@ -945,12 +959,10 @@ function renderSearch(panel, name, focus = false) {
   statusLine.replaceChildren(...((tree.query || '').trim().length < 2
     ? ['Type at least 2 characters.'] : searchStatus(found, keepSearching)).filter(Boolean));
   pane.querySelector('.tree-search-hits').replaceChildren(...(found ? found.results.map(searchRow) : []));
-  if (focus) {
-    const box = pane.querySelector('.tree-search-box');
-    box.focus();
-    // Opened with a query kept from before (D145): run it again.
-    if ((tree.query || '').trim().length >= 2 && !found) box.dispatchEvent(new Event('input'));
-  }
+  const box = pane.querySelector('.tree-search-box');
+  if (focus) box.focus();
+  // Opened with a query kept from before (D145), or moved to another session: run it again here.
+  if ((focus || fresh) && (tree.query || '').trim().length >= 2 && !found) box.dispatchEvent(new Event('input'));
 }
 
 async function renderTree(panel, name, roots, current, share) {
@@ -1214,6 +1226,13 @@ function slashRows(rows, chosen) {
   }, h('span', { class: 'slash-name' }, row.name + (row.takes_value ? ' <value>' : '')),
      h('span', { class: 'slash-kind chip' }, row.source === 'built-in' ? row.kind : row.source),
      h('span', { class: 'slash-what muted' }, row.description || '')));
+}
+
+// How many matched, pinned at the list's foot (47). Kept when the arrows rebuild the rows, which
+// used to drop it.
+function slashCount(rows) {
+  return h('div', { class: 'slash-count muted small' },
+    `${rows.length} ${rows.length === 1 ? 'command' : 'commands'}`);
 }
 
 // ---- permission cards -------------------------------------------------------------------------
@@ -1822,7 +1841,7 @@ function subscribe(name, refresh, onEvent) {
       setLink('retrying');     // the browser is handling it; just say so
       return;
     }
-    setLink('down');
+    setLink(signedOut() ? 'signedout' : 'down');
     // Closed for good, so reconnect ourselves. Backoff because the usual cause is the proxy
     // restarting, and a tight loop against something that is still coming up is how a page
     // turns a five-second outage into a hammering.
@@ -1888,6 +1907,8 @@ const LINK_TEXT = {
   live: ['green', 'Connected'],
   retrying: ['amber', 'Reconnecting...'],
   down: ['red', 'Not connected'],
+  // The sign-in expired (the user, 2026-10-14): nothing reconnects until you sign in again.
+  signedout: ['red', 'Signed out'],
 };
 
 function setLink(state) {
@@ -1896,7 +1917,8 @@ function setLink(state) {
   if (!dot) return;
   const [level, label] = LINK_TEXT[state] || LINK_TEXT.down;
   dot.dataset.level = level;
-  dot.title = state !== 'live' ? 'The page is not receiving events. What you see may be out of date.'
+  dot.title = state === 'signedout' ? 'Your Cloudflare sign-in has expired. Reload the page to sign in again; your draft is kept.'
+    : state !== 'live' ? 'The page is not receiving events. What you see may be out of date.'
     : isSealed() ? 'Through the encrypted tunnel the page asks this session for news every 2 seconds, and it is answering.'
       : 'The page is receiving events from this session.';
   dot.textContent = label;
@@ -1946,9 +1968,16 @@ export async function render(main, context = {}) {
   const slash = h('div', { id: 'session-slash', class: 'slash-list', hidden: true });
   // The keys are named in the placeholder because there is nowhere else to put them: a box with
   // hidden keyboard behaviour is a box people keep using the mouse on (feature 48).
-  const box = h('textarea', { id: 'session-prompt', rows: '3',
+  const firstBox = h('textarea', { id: 'session-prompt', class: 'prompt-text-box', rows: '3',
     placeholder: 'Type something or paste a screenshot...  (Enter sends, Ctrl+Enter or Shift+Enter for a new line, Escape stops the turn)',
     'aria-label': 'Prompt' });
+  // Feature 118: the prompt is text boxes with snippet objects between them (promptparts.js). `box`
+  // is the text box the caret was last in - what caret-based actions (insert a path, a slash
+  // command, read an image) act on; the whole prompt is promptValue() / setPrompt().
+  let box = firstBox;
+  let prompt = null;                   // the parts, made once autocorrect has wrapped the first box
+  const promptValue = () => (prompt ? prompt.value : firstBox.value);
+  const setPrompt = (text) => { if (prompt) prompt.value = text; else firstBox.value = text; box = prompt ? prompt.box : firstBox; };
   // Each session has its own prompt (the user, 2026-10-01): switching shows that session's draft
   // and never clears another's. Kept in sessionStorage - it survives a reload of this tab, and is
   // gone when the tab closes, so what you were typing about a client is not left in the browser.
@@ -1956,12 +1985,13 @@ export async function render(main, context = {}) {
   const saveDraft = (name = view.name) => {
     if (!name) return;
     try {
-      if (box.value) sessionStorage.setItem(draftKey(name), box.value);
+      const text = promptValue();
+      if (text) sessionStorage.setItem(draftKey(name), text);
       else sessionStorage.removeItem(draftKey(name));
     } catch (error) { /* storage refused: the draft lives until the page is left */ }
   };
   const loadDraft = () => {
-    try { box.value = sessionStorage.getItem(draftKey(view.name)) || ''; } catch (error) { box.value = ''; }
+    try { setPrompt(sessionStorage.getItem(draftKey(view.name)) || ''); } catch (error) { setPrompt(''); }
     view.historyAt = null;
   };
   loadDraft();
@@ -2055,8 +2085,9 @@ export async function render(main, context = {}) {
       if (answer.outcome === 'interrupting') say('Stopping the current turn, then sending this.', 'ok');
       // Cancel gives the words back to edit (the user, 2026-10-12), ahead of anything typed since.
       if (cancelling && item && item.text) {
-        box.value = box.value.trim() ? `${item.text}\n${box.value}` : item.text;
-        box.dispatchEvent(new Event('input', { bubbles: true }));
+        const typed = promptValue();
+        setPrompt(typed.trim() ? `${item.text}\n${typed}` : item.text);
+        saveDraft();
         box.focus();
       }
       await refresh();
@@ -2122,10 +2153,10 @@ export async function render(main, context = {}) {
       doing.hidden = !session.doing;
     }
     showEarlierWhen();
-    paintBackground(background, session.events, box);
+    paintBackground(background, session.events, () => box);
     // Not rebuilt while unchanged or in use: a half-answered question must survive the poll (D58, D69).
     repaint(cards, permissionCards(state_));
-    box.disabled = !session.running;
+    if (prompt) prompt.disabled = !session.running; else firstBox.disabled = !session.running;
     // One control, labelled for what it will do - but never relabelled while a start or stop is
     // in flight, or the label would change under the pointer between the request resolving and
     // the refresh landing, which is the mis-click this design has to avoid.
@@ -2271,7 +2302,7 @@ export async function render(main, context = {}) {
     view.state.events = [...events, event];
     paintLog(log, view.state.events, view.name);
     markTools(log, view.state.events, Boolean(current().running));
-    paintBackground(background, view.state.events, box);
+    paintBackground(background, view.state.events, () => box);
   };
 
   // A profile with no history, or a machine with no transcripts, is an empty list and not an
@@ -2320,11 +2351,44 @@ export async function render(main, context = {}) {
     if (view.slashAt >= rows.length) view.slashAt = 0;
     view.slashRows = rows;
     // Say how many, so the list is honest about its own length.
-    slash.replaceChildren(...slashRows(rows, view.slashAt),
-      h('div', { class: 'slash-count muted small' },
-        `${rows.length} ${rows.length === 1 ? 'command' : 'commands'}`));
+    slash.replaceChildren(...slashRows(rows, view.slashAt), slashCount(rows));
     slash.hidden = false;
+    placeSlash();
   };
+
+  // Over the page, at the command being typed (the user, 2026-10-14): under the box it had only
+  // the room below a short box. Below the word, or above it when there is more room there; moved
+  // left when it would run off the right edge; never taller than the room it has.
+  const SLASH_GAP = 4;
+  const SLASH_MARGIN = 8;
+  const placeSlash = (event) => {
+    if (slash.hidden || (event && event.target === slash)) return;   // the list's own scrolling
+    const typed = slashWord(box);
+    if (typed === null) return;
+    const at = (box.selectionStart === null ? box.value.length : box.selectionStart) - typed.length;
+    const word = caretRect(box, at);
+    const below = window.innerHeight - word.bottom - SLASH_GAP - SLASH_MARGIN;
+    const above = word.top - SLASH_GAP - SLASH_MARGIN;
+    slash.style.maxHeight = '';
+    const wanted = Math.min(slash.scrollHeight, parseFloat(getComputedStyle(slash).maxHeight) || Infinity);
+    const under = below >= wanted || below >= above;
+    const room = Math.max(0, under ? below : above);
+    if (wanted > room) slash.style.maxHeight = `${room}px`;
+    const height = Math.min(wanted, room);
+    slash.style.top = `${under ? word.bottom + SLASH_GAP : word.top - SLASH_GAP - height}px`;
+    const width = slash.offsetWidth;
+    const left = Math.min(word.left, window.innerWidth - width - SLASH_MARGIN);
+    slash.style.left = `${Math.max(SLASH_MARGIN, left)}px`;
+    slash.classList.toggle('above', !under);
+  };
+  // At page level, once, calling whichever render of the page is current (as tree.redraw does).
+  view.placeSlash = placeSlash;
+  if (!view.slashHooked) {
+    view.slashHooked = true;
+    const follow = (event) => { if (view.placeSlash) view.placeSlash(event); };
+    window.addEventListener('resize', follow);
+    window.addEventListener('scroll', follow, true);      // the page, or the box itself, scrolled
+  }
 
   // The name replaces what was typed of it, and a space follows so anything the command takes
   // can just be typed on.
@@ -2440,8 +2504,22 @@ export async function render(main, context = {}) {
   view.nonePicked = nonePicked;
   // Autocorrect (feature 94): its green marks sit in a layer behind the box, and its on/off button
   // to the left of the link indicator (the user, 2026-10-08).
-  const autocorrect = attachAutocorrect(box, { conversation: () => log.textContent || '' });
+  const autocorrect = attachAutocorrect(firstBox, { conversation: () => log.textContent || '' });
   view.autocorrect = autocorrect;
+  // The prompt's text parts after the first: autocorrect, image reading and the keys, as the first.
+  const makeBox = () => {
+    const more = h('textarea', { class: 'prompt-text-box', rows: '1', 'aria-label': 'Prompt (continued)' });
+    const element = autocorrect.attach(more);
+    attachImageReading(more, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
+    wireKeys(more);
+    return { box: more, element };
+  };
+  prompt = promptParts({
+    first: { box: firstBox, element: autocorrect.stack },
+    makeBox,
+    onEdit: (part) => editSnippet(part),
+    onActive: (one) => { box = one; },
+  });
   // Feature 113: images and PDFs read to text on this machine, into the prompt to check first.
   const sessionRoots = () => { const profile = profileOf(view.name); return [...(profile.tree || profile.projects || []), ...(profile.share ? [profile.share] : [])]; };
   const readChip = h('div', { id: 'session-read-chip', class: 'hint', hidden: true });
@@ -2455,18 +2533,18 @@ export async function render(main, context = {}) {
   };
   // Feature 116: snippets. Numbered within the session, after every one in its transcript and the box.
   const promptTexts = () => (current().events || []).filter((e) => e.type === 'prompt').map((e) => e.text);
-  const snippetNumber = () => nextSnippetNumber([...promptTexts(), box.value]);
+  const snippetNumber = () => nextSnippetNumber([...promptTexts(), promptValue()]);
   // Image text arrives as a snippet: the reader lines columns up by counting characters, which only
   // holds unwrapped and in monospace - the code view and the transcript's snippets, not the box.
   const imageSnippet = (text, filename) => makeSnippet({ code: text, lang: 'text', number: snippetNumber(), image: filename });
-  attachImageReading(box, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
+  attachImageReading(firstBox, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
   const readButton = imageButton((files) => { for (const file of files) readInto(box, { file }, view.name, say, imageSnippet); });
   const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
   const insertCodeButton = h('button', { type: 'button', id: 'session-insert-code', class: 'btn',
     title: 'Paste or type code in an editor with line numbers and no wrapping, then add it to the prompt' }, 'Insert code snippet');
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
     codeSlot,
-    autocorrect.stack,
+    prompt.element,
     slash,
     readChip,
     h('div', { class: 'form-row' },
@@ -2534,20 +2612,29 @@ export async function render(main, context = {}) {
     box.dispatchEvent(new Event('input', { bubbles: true }));
     return mark;
   };
+  // The mark is in whichever text part it was put in; a snippet written into it becomes an object
+  // when its input event is raised (feature 118).
   const replaceMark = (mark, replacement) => {
-    let at = box.value.indexOf(mark);
+    const boxes = prompt.boxes();
+    const holder = boxes.find((one) => one.value.includes(mark)) || boxes[boxes.length - 1];
+    let at = holder.value.indexOf(mark);
+    let caret = 0;
     if (at < 0) {                                   // removed by hand meanwhile: put it at the end
       if (!replacement) return;
-      box.value = `${box.value.replace(/\n*$/, '')}${box.value.trim() ? '\n' : ''}${replacement}`;
+      holder.value = `${holder.value.replace(/\n*$/, '')}${holder.value.trim() ? '\n' : ''}${replacement}`;
+      caret = holder.value.length;
     } else if (replacement) {
-      box.value = box.value.slice(0, at) + replacement + box.value.slice(at + mark.length);
+      holder.value = holder.value.slice(0, at) + replacement + holder.value.slice(at + mark.length);
+      caret = at + replacement.length;
     } else {
-      const end = at + mark.length + (box.value[at + mark.length] === '\n' ? 1 : 0);
-      if (at > 0 && box.value[at - 1] === '\n' && end === at + mark.length) at -= 1;
-      box.value = box.value.slice(0, at) + box.value.slice(end);
+      const end = at + mark.length + (holder.value[at + mark.length] === '\n' ? 1 : 0);
+      if (at > 0 && holder.value[at - 1] === '\n' && end === at + mark.length) at -= 1;
+      holder.value = holder.value.slice(0, at) + holder.value.slice(end);
+      caret = at;
     }
-    box.dispatchEvent(new Event('input', { bubbles: true }));
-    box.focus();
+    holder.focus();
+    holder.setSelectionRange(caret, caret);
+    holder.dispatchEvent(new Event('input', { bubbles: true }));
   };
   const openNewSnippet = (mark, saved = null) => {
     code.open({
@@ -2569,12 +2656,13 @@ export async function render(main, context = {}) {
     code.close();
     let saved = null;
     try { saved = JSON.parse(sessionStorage.getItem(snippetKey(view.name)) || 'null'); } catch (error) { saved = null; }
-    if (saved && saved.mark && box.value.includes(saved.mark)) openNewSnippet(saved.mark, saved);
+    if (saved && saved.mark && promptValue().includes(saved.mark)) openNewSnippet(saved.mark, saved);
   };
   view.resumeSnippet();                // the first draft was loaded before the editor existed
-  // Double-click inside a snippet in the box: back into the code editor; Update puts it back in place.
-  box.addEventListener('dblclick', () => {
-    const found = snippetAt(box.value, box.selectionStart);
+  // A snippet object opened (double-click, Enter, a second tap): the code editor; Update puts it back
+  // in place, and emptying it removes it.
+  const editSnippet = (part) => {
+    const found = findSnippets(part.text)[0];
     if (!found) return;
     code.open({
       title: `Edit ${snippetTitle(found)}`, code: found.code, lang: found.lang, update: true,
@@ -2582,14 +2670,13 @@ export async function render(main, context = {}) {
       onDone: (text, lang) => {
         const count = text.replace(/\n+$/, '').split('\n').length;
         const lines = found.lines ? [found.lines[0], found.lines[0] + count - 1] : null;
-        const fresh = makeSnippet({ code: text, lang, number: found.number || snippetNumber(), file: found.file, lines, image: found.image });
-        box.value = box.value.slice(0, found.start) + fresh + box.value.slice(found.end);
-        box.dispatchEvent(new Event('input', { bubbles: true }));
-        box.focus();
+        prompt.replace(part, text.trim()
+          ? makeSnippet({ code: text, lang, number: found.number || snippetNumber(), file: found.file, lines, image: found.image })
+          : '');
       },
-      onCancel: () => box.focus(),
+      onCancel: () => { if (part.element.isConnected) part.element.focus(); else box.focus(); },
     });
-  });
+  };
   // "Discuss this code" in a file tab: the selection as a snippet at the caret, naming its file and lines.
   const discussCode = ({ code: text, lines, file, name }) => {
     const lang = languageForFile(name);
@@ -2601,6 +2688,8 @@ export async function render(main, context = {}) {
   view.tabs = tabs;
   // The 15-second check, on demand, for tests - the same hook style as the stream's.
   window.__aicleanerFileCheck = () => tabs.check();
+  // The whole prompt as it would be sent, snippets unfolded (feature 118), for tests.
+  window.__aicleanerPromptText = () => promptValue();
   const work = h('div', { class: 'session-work' },
     tabStrip,
     stream,
@@ -2656,12 +2745,12 @@ export async function render(main, context = {}) {
 
   // What Send does, so the key and the button cannot drift apart (feature 48).
   async function sendPrompt() {
-    const text = box.value.trim();
+    const text = promptValue().trim();
     if (!text) return;
     const sentFrom = view.name;
     try {
       await postJSON('/api/session/prompt', { name: sentFrom, text });
-      if (view.name === sentFrom) { box.value = ''; if (view.autocorrect) view.autocorrect.clear(); }
+      if (view.name === sentFrom) { setPrompt(''); if (view.autocorrect) view.autocorrect.clear(); }
       saveDraft(sentFrom);
       view.historyAt = null;
       await refresh();
@@ -2689,23 +2778,27 @@ export async function render(main, context = {}) {
   function walkHistory(step) {
     // From the first row as laid out (Up) or the last (Down), not merely with no line break in the
     // way: a long wrapped paragraph has none, and Up in its middle recalled history (2026-10-01).
-    if (step < 0 && !onFirstRow(box)) return false;
-    if (step > 0 && !onLastRow(box)) return false;
+    // With snippets in the prompt (feature 118), only from its first text part (Up) or its last (Down).
+    if (step < 0 && !(prompt.isFirst(box) && onFirstRow(box))) return false;
+    if (step > 0 && !(prompt.isLast(box) && onLastRow(box))) return false;
     const history = promptHistory();
     if (view.historyAt === null || view.historyAt === undefined) {
       if (step > 0 || !history.length) return false;
-      view.historyDraft = box.value;
+      view.historyDraft = promptValue();
       view.historyAt = history.length;
     }
     const next = view.historyAt + step;
     if (next < 0) return true;                                      // at the oldest: stay there
     if (next >= history.length) {
-      box.value = view.historyDraft || '';
+      setPrompt(view.historyDraft || '');
       view.historyAt = null;
     } else {
-      box.value = history[next];
+      setPrompt(history[next]);
       view.historyAt = next;
     }
+    const boxes = prompt.boxes();
+    box = boxes[boxes.length - 1];
+    box.focus();
     box.setSelectionRange(box.value.length, box.value.length);
     return true;
   }
@@ -2761,53 +2854,58 @@ export async function render(main, context = {}) {
 
   // Typing makes what is in the box yours again: Up starts from it next time (69). Only a person
   // raises `input`; putting a recalled prompt in the box does not.
-  box.addEventListener('input', () => { view.historyAt = null; saveDraft(); showSlash().catch(() => {}); });
-  box.addEventListener('blur', () => { setTimeout(closeSlash, 150); });   // after a click lands
-  box.addEventListener('keydown', (event) => {
-    // Layered, and the order matters (feature 48). While the slash picker is open it owns
-    // Enter, Escape and the arrows; with it closed the same keys mean what they mean everywhere
-    // else. Before this there was no keyboard path to send at all - Enter inserted a newline and
-    // the only way out of the box was the mouse.
-    if (slash.hidden) {
-      if (event.key === 'Enter' && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
-        event.preventDefault();
-        sendPrompt();
+  // On every text part of the prompt (feature 118); the handlers act on `box`, the part in use.
+  function wireKeys(one) {
+    one.addEventListener('input', () => { view.historyAt = null; saveDraft(); showSlash().catch(() => {}); });
+    one.addEventListener('blur', () => { setTimeout(closeSlash, 150); });   // after a click lands
+    one.addEventListener('keydown', (event) => {
+      // Layered, and the order matters (feature 48). While the slash picker is open it owns
+      // Enter, Escape and the arrows; with it closed the same keys mean what they mean everywhere
+      // else. Before this there was no keyboard path to send at all - Enter inserted a newline and
+      // the only way out of the box was the mouse.
+      if (slash.hidden) {
+        if (event.key === 'Enter' && !event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+          event.preventDefault();
+          sendPrompt();
+          return;
+        }
+        // Ctrl+Enter and Shift+Enter both insert a newline. Two conventions, both common, and
+        // supporting both costs nothing - a person should not have to learn which one this box
+        // chose. The textarea already does this for Shift+Enter, so only Ctrl needs help.
+        if (event.key === 'Enter' && event.ctrlKey && !event.altKey && !event.metaKey) {
+          event.preventDefault();
+          insertNewline();
+          return;
+        }
+        if (event.key === 'Escape') { event.preventDefault(); interruptTurn(); }
+        if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !event.altKey && !event.ctrlKey
+            && !event.metaKey && !event.shiftKey && walkHistory(event.key === 'ArrowUp' ? -1 : 1)) {
+          event.preventDefault();
+        }
         return;
       }
-      // Ctrl+Enter and Shift+Enter both insert a newline. Two conventions, both common, and
-      // supporting both costs nothing - a person should not have to learn which one this box
-      // chose. The textarea already does this for Shift+Enter, so only Ctrl needs help.
-      if (event.key === 'Enter' && event.ctrlKey && !event.altKey && !event.metaKey) {
+      const rows = view.slashRows || [];
+      if (event.key === 'Escape') { closeSlash(); event.preventDefault(); return; }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (!rows.length) return;
+        view.slashAt = (view.slashAt + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
+        slash.replaceChildren(...slashRows(rows, view.slashAt), slashCount(rows));
+        // The box has max-height and scrolls, but every keypress rebuilds all the rows, which
+        // resets scrollTop - so without this, removing the cap makes things worse: the selection
+        // walks off the bottom of a box that never follows it.
+        const picked = slash.children[view.slashAt];
+        if (picked) picked.scrollIntoView({ block: 'nearest' });
         event.preventDefault();
-        insertNewline();
         return;
       }
-      if (event.key === 'Escape') { event.preventDefault(); interruptTurn(); }
-      if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && !event.altKey && !event.ctrlKey
-          && !event.metaKey && !event.shiftKey && walkHistory(event.key === 'ArrowUp' ? -1 : 1)) {
-        event.preventDefault();
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        const row = rows[view.slashAt];
+        if (row) { takeSlash(row.name); event.preventDefault(); }
       }
-      return;
-    }
-    const rows = view.slashRows || [];
-    if (event.key === 'Escape') { closeSlash(); event.preventDefault(); return; }
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      if (!rows.length) return;
-      view.slashAt = (view.slashAt + (event.key === 'ArrowDown' ? 1 : -1) + rows.length) % rows.length;
-      slash.replaceChildren(...slashRows(rows, view.slashAt));
-      // The box has max-height and scrolls, but every keypress rebuilds all the rows, which
-      // resets scrollTop - so without this, removing the cap makes things worse: the selection
-      // walks off the bottom of a box that never follows it.
-      const picked = slash.children[view.slashAt];
-      if (picked) picked.scrollIntoView({ block: 'nearest' });
-      event.preventDefault();
-      return;
-    }
-    if (event.key === 'Enter' || event.key === 'Tab') {
-      const row = rows[view.slashAt];
-      if (row) { takeSlash(row.name); event.preventDefault(); }
-    }
-  });
+    });
+  }
+  wireKeys(firstBox);
+  prompt.value = firstBox.value;       // the draft loaded earlier, its snippets made objects
   slash.addEventListener('click', (event) => {
     const row = event.target.closest('button.slash-row');
     if (row) takeSlash(row.dataset.name);
@@ -2843,7 +2941,7 @@ export async function render(main, context = {}) {
   };
   if (isSealed() && view.name) polled(refresh());
   view.poll = setInterval(() => {
-    if (!connected()) { if (isSealed()) setLink('down'); return; }
+    if (!connected()) { if (signedOut()) setLink('signedout'); else if (isSealed()) setLink('down'); return; }
     polled(refresh());
     view.pollTicks += 1;
     if (view.pollTicks % 6 === 0 && view.name && !current().running) loadPast({ quiet: true }).catch(() => {});
@@ -2997,7 +3095,8 @@ export async function render(main, context = {}) {
       // moved on, so it goes in the transcript and in the prompt box, ready to send - never lost.
       if (result && result.late && body.answers) {
         const text = Object.entries(body.answers).map(([q, a]) => `${q}\n${a}`).join('\n\n');
-        box.value = box.value.trim() ? `${box.value.trimEnd()}\n\n${text}` : text;
+        const typed = promptValue();
+        setPrompt(typed.trim() ? `${typed.trimEnd()}\n\n${text}` : text);
         saveDraft();
         say('That question had already closed, so Claude did not get your answer. It is in the transcript and in the prompt box, ready to send.');
       }

@@ -86,3 +86,12 @@ SaaS
 PaaS
 IaaS
 CI
+# The 2026-10-14 review: the pronoun (it also makes I'm, I'd, I'll, I've known) and these.
+I
+English
+Git
+Gemini
+InPrivate
+UI
+UX
+GUI

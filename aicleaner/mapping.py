@@ -17,7 +17,7 @@ from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 # Tokens must survive shells, HCL, URLs and JSON without quoting surprises.
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@-]*$")
@@ -241,7 +241,26 @@ def _suffixed(real: str, index: int, prefix: str, kind: str, n: int) -> str:
     if kind == "slug":
         sep = "-" if "-" in real else ("_" if "_" in real else "")
         return f"{plain}{sep}{h}"
-    return f"{plain} {h}"
+    # Joined with underscores into one identifier (the user, 2026-10-15). "Client05 Pty 1a2b" read
+    # as a name and a qualifier, so the model wrote the hex part on its own ("the 1a2b docs") - a
+    # piece no reverse table knows, which went out and into files as a literal. Still this real's own
+    # hash, so the token is the same on every machine whatever order the names were met in.
+    return joined_suffix(plain, h)
+
+
+def joined_suffix(token: str, suffix: str) -> str:
+    """A name token with a hash suffix, as one identifier: words and suffix joined by underscores
+    (Client05_Pty_1a2b), so the suffix is never read as a word of its own."""
+    return "_".join(token.split() + [suffix])
+
+
+# A name token whose suffix was minted after a space, before 2026-10-15: "Client05 1a2b",
+# "Client05 Pty 9015 cdd6" (a case variant's second suffix). Rewritten with underscores by
+# store.migrate_spaced_suffixes; the spaced spelling still comes back as the real, for text written
+# before. The last word is always the hash, which no plain multi-word token ends in.
+SPACED_SUFFIX_RE = re.compile(r"^(?:client|org)\d+(?: [a-z0-9]+)* [0-9a-f]{4}(?:[0-9a-f]{4})?$", re.IGNORECASE)
+# The same token as it is now; its spaced and URL-encoded spellings are kept as aliases of it.
+JOINED_SUFFIX_RE = re.compile(r"^(?:client|org)\d+(?:_[a-z0-9]+)*_[0-9a-f]{4}(?:[0-9a-f]{4})?$", re.IGNORECASE)
 
 
 def email_rule_for(real: str, rules: Iterable[str]) -> str:
@@ -350,6 +369,42 @@ _WORD_RUN = re.compile(r"[A-Za-z0-9]{8,}")
 def _json_escape(text: str) -> str:
     """How text appears inside a JSON string literal (quotes, backslashes, control characters)."""
     return json.dumps(text, ensure_ascii=False)[1:-1]
+
+
+# The ways a name is written escaped, each as the function that writes it (bug report 2026-10-14).
+# A domain in a regex (`fabrikam\.com`, or re.escape's `fabrikam\-prod\.com`), in PowerShell with a
+# backtick before the dot, URL-encoded (`%2E`), or defanged (`[.]`) went out with the real name in
+# it: the tokeniser matched only the plain spelling, and the canary decoded only %XX. Each spelling
+# is now a key of its own and is replaced by the token written the same way, so a regex still works
+# after the swap and comes back as the real name, escaped as it was sent.
+DISGUISES: tuple[Callable[[str], str], ...] = (
+    lambda s: s.replace(".", "\\."),
+    re.escape,
+    lambda s: s.replace(".", "`."),
+    lambda s: s.replace(".", "%2E"),
+    lambda s: s.replace(".", "%2e"),
+    lambda s: s.replace(".", "[.]"),
+)
+
+
+def _as_written(text: str) -> str:
+    return text
+
+
+def _url_spaces(text: str) -> str:
+    return text.replace(" ", "%20")
+
+
+def _disguises(text: str) -> list[tuple[str, Callable[[str], str]]]:
+    """Each escaped spelling of `text` that differs from it, with the function that wrote it."""
+    out: list[tuple[str, Callable[[str], str]]] = []
+    seen = {text}
+    for style in DISGUISES:
+        spelling = style(text)
+        if spelling not in seen:
+            seen.add(spelling)
+            out.append((spelling, style))
+    return out
 
 
 def _whole(key: str) -> str:
@@ -736,8 +791,10 @@ def variant_token(variant: str, real: str, token: str, taken: set[str] | None = 
         if "." in token:
             head, dot, rest = token.partition(".")
             candidate = f"{head}-{short}{dot}{rest}"
+        elif " " in token:
+            candidate = joined_suffix(token, short)      # one identifier, as _suffixed (2026-10-15)
         else:
-            candidate = f"{token}{' ' if ' ' in token else '-'}{short}"
+            candidate = f"{token}-{short}"
         if candidate not in used:
             return candidate
     return token
@@ -813,7 +870,21 @@ class Mapper:
         self._rev_scanned: dict[str, Form | None] = {}
         self.variant_sink = None              # set by MapperHandle so variants are remembered
         self._rev_dirty = False
-        self._fwd_re = self._compile(self._fwd, "real")
+        # Escaped spellings of each real (DISGUISES): matched like a real, replaced by the token
+        # written the same way. The first form to claim a spelling keeps it, as with the reals.
+        self._disguised: dict[str, tuple[Form, Callable[[str], str]]] = {}
+        for f in self.forms:
+            for spelling, style in _disguises(f.real):
+                self._disguised.setdefault(spelling, (f, style))
+        self._disguised_fold: dict[str, tuple[Form, Callable[[str], str]]] = {}
+        for spelling, found in self._disguised.items():
+            self._disguised_fold.setdefault(spelling.lower(), found)
+        keys = dict(self._fwd)
+        for spelling, (f, _style) in self._disguised.items():
+            keys.setdefault(spelling, f)
+        self._fwd_re = self._compile(keys, "real")
+        self._rev_disguised: dict[str, tuple[str, Callable[[str], str], bool]] = {}
+        self._rev_disguised_fold: dict[str, tuple[str, Callable[[str], str], bool]] = {}
         self._rev_re = self._compile_reverse()
         # Quotes and backslashes in a real are escaped wherever JSON sits inside a string (tool-call
         # arguments, streamed partial_json), and escaped again when that request is serialised; the
@@ -826,12 +897,22 @@ class Mapper:
                 self._fwd_json.setdefault(key, f)
             for key in (f.real, once, _json_escape(once)):
                 self._canary.setdefault(key, f)
+        # The escaped spellings too: inside tool-call JSON a regex's backslash is itself escaped.
+        self._disguised_json: dict[str, tuple[Form, Callable[[str], str]]] = {}
+        for spelling, (f, style) in self._disguised.items():
+            once = _json_escape(spelling)
+            self._fwd_json.setdefault(spelling, f)
+            if once != spelling:
+                self._fwd_json.setdefault(once, f)
+                self._disguised_json.setdefault(once, (f, style))
+            for key in (spelling, once, _json_escape(once)):
+                self._canary.setdefault(key, f)
         # Compiled on first use, not here. Both are only ever read on a request path
         # (tokenise_json_text and the canary scan), and a Mapper is built far more often for
         # validation than for serving: _combine_error builds one purely to find out whether it
         # can be built, and load_tolerant does that about twice per client file. Compiling these
         # eagerly meant every one of those paid for two large trie regexes it would never use.
-        self._escapes = any(f.real != _json_escape(f.real) for f in self.forms)
+        self._escapes = any(f.real != _json_escape(f.real) for f in self.forms) or bool(self._disguised)
         self._fwd_json_re_cache: re.Pattern[str] | None = None
         self._canary_re_cache: re.Pattern[str] | None = None
         self._tails_re: re.Pattern[str] | None = None
@@ -1024,6 +1105,19 @@ class Mapper:
                     self._rev_scanned[text] = f
         return f if f is not None else Form(text, text, "")   # left as it came, never a crash
 
+    def _disguise(self, text: str) -> tuple[Form, Callable[[str], str]] | None:
+        """The form and the escaping of a matched escaped spelling (DISGUISES), in any case."""
+        return self._disguised.get(text) or self._disguised_fold.get(text.lower())
+
+    def _canary_form(self, key: str) -> Form | None:
+        """The form a canary match belongs to: a real or a JSON spelling of one, a case variant, or
+        an escaped spelling (also as JSON writes it)."""
+        f = self._canary.get(key) or self._primary(key)
+        if f is None:
+            hidden = self._disguise(key) or self._disguised_json.get(key)
+            f = hidden[0] if hidden else None
+        return f
+
     def _primary(self, text: str) -> Form | None:
         """The declared form a case-insensitive match belongs to. The regex's IGNORECASE matches
         some letters .lower() does not map (the long s, the dotless and dotted i, the Kelvin sign),
@@ -1049,6 +1143,26 @@ class Mapper:
                 keys.setdefault(bracketed)
         self._abbrev = self._abbreviations()
         keys.update(dict.fromkeys(self._abbrev))
+        # A token written escaped (DISGUISES) - `client99-1a2b.invalid` in a regex the model wrote -
+        # went back unrestored, so a search or a rule written with it found nothing. Each escaped
+        # spelling, and that spelling as JSON writes it, comes back as the real escaped the same way.
+        # Keyed exactly, and folded for a case variant: %2E and %2e fold together, and each must
+        # come back as it was written.
+        self._rev_disguised = {}
+        self._rev_disguised_fold = {}
+        for token in self._rev:
+            spellings = _disguises(token)
+            if JOINED_SUFFIX_RE.match(token):
+                # Written before the suffix was joined (2026-10-15), or URL-encoded: "Client05 1a2b"
+                # and "Client05%201a2b" come back as the real, the second encoded the same way.
+                spellings += [(token.replace("_", " "), _as_written),
+                              (token.replace("_", "%20"), _url_spaces)]
+            for spelling, style in spellings:
+                for written, as_json in ((spelling, False), (_json_escape(spelling), True)):
+                    if written not in self._rev_disguised and written not in self._rev:
+                        self._rev_disguised[written] = (token, style, as_json)
+                        self._rev_disguised_fold.setdefault(written.lower(), (token, style, as_json))
+                        keys.setdefault(written)
         return self._compile(keys, "token")
 
     def _abbreviations(self) -> dict[str, str]:
@@ -1098,7 +1212,20 @@ class Mapper:
         if getattr(self, "_tails_re", None) is None:
             tails = {f.token[1:] for f in self.forms if len(f.token) > 6}
             self._tails_re = self._compile(dict.fromkeys(tails), "token")
-        return [m.group(0) for m in self._tails_re.finditer(text)]
+        found = [m.group(0) for m in self._tails_re.finditer(text)]
+        # A name token's hash suffix written on its own (2026-10-15): "Client99_1a2b" was read as a
+        # name and a qualifier, and "1a2b" alone went to files and commits. Whole words only, with a
+        # letter in them (not "2001"), and never an ordinary word ("face").
+        if getattr(self, "_suffixes_re", None) is None:
+            from .detect import dictionary_words      # here, not at the top: detect imports mapping
+            ordinary = dictionary_words()
+            suffixes = {f.token.rsplit("_", 1)[1] for f in self.forms if JOINED_SUFFIX_RE.match(f.token)}
+            suffixes = {s for s in suffixes if re.search(r"[a-f]", s, re.IGNORECASE) and s.lower() not in ordinary}
+            self._suffixes_re = (re.compile(r"(?<![A-Za-z0-9_%])(?:" + "|".join(sorted(suffixes)) + r")(?![A-Za-z0-9_])",
+                                            re.IGNORECASE) if suffixes else None)
+        if self._suffixes_re is not None:
+            found += [m.group(0) for m in self._suffixes_re.finditer(text)]
+        return found
 
     @property
     def stream_re(self) -> re.Pattern[str]:
@@ -1113,6 +1240,20 @@ class Mapper:
     def _restored(self, matched: str, counter: Counter[str] | None, escape: bool = False) -> str:
         """The real for a matched token, in the form the token was written; counted as restored.
         `[CC]lient04` is not a case-insensitive class, so it comes back exactly as it was."""
+        hidden = (self._rev_disguised.get(matched) or self._rev_disguised_fold.get(matched.lower())
+                  if matched not in self._rev else None)
+        if hidden is not None:
+            # An escaped token: its real, escaped as the token was (and JSON-escaped when the token
+            # was written inside JSON text).
+            token, style, as_json = hidden
+            f = self.backward(token)
+            if counter is not None:
+                counter[f.client] += 1
+                pairs = getattr(counter, "pairs", None)
+                if pairs is not None:
+                    pairs[(f.client, f.real, matched)] += 1
+            out = style(f.real)
+            return _json_escape(out) if (as_json or escape) else out
         base = self._abbrev.get(matched.lower())
         if base is not None and matched not in self._rev:
             # An abbreviation (D117): the token's real, counted under the abbreviation so the
@@ -1169,7 +1310,8 @@ class Mapper:
         pairs = getattr(counter, "pairs", None)
 
         def repl(m: re.Match[str]) -> str:
-            f = self.forward(m.group(0))
+            disguised = self._disguise(m.group(0))
+            f = disguised[0] if disguised else self.forward(m.group(0))
             # A form with a matching rule is still MATCHED here - the pattern is the unrestricted
             # one, and has to stay that way so detection, the near-miss path and the canary all
             # see it. The rule decides only whether this particular occurrence is replaced
@@ -1180,7 +1322,8 @@ class Mapper:
                 counter[f.client] += 1
                 if pairs is not None:
                     pairs[(f.client, f.real, f.token)] += 1
-            return f.token
+            # An escaped spelling gets the token escaped the same way (DISGUISES).
+            return disguised[1](f.token) if disguised else f.token
 
         return self._fwd_re.sub(repl, text)
 
@@ -1194,6 +1337,23 @@ class Mapper:
             return f"{MARK_OPEN}{out}{MARK_CLOSE}" if mark and out != m.group(0) else out
 
         return self._reverse_pattern().sub(repl, text)
+
+    def collapses(self, text: str) -> list[tuple[list[str], str]]:
+        """Different spellings in `text` that come back as the same real name: (spellings, real).
+
+        The bug report of 2026-10-14: a "rename" in one command held the misspelt name and the
+        intended one - two different strings to the model - and both were written to disk as the
+        client's one real name, so writing the new file overwrote the old and deleting the old
+        deleted the only copy. Read on the arguments as the model wrote them (tokens), before they
+        are restored; nothing is counted."""
+        restored: dict[str, set[str]] = {}
+        for m in self._reverse_pattern().finditer(text):
+            if not self._abbreviation_fits(m):
+                continue
+            real = self._restored(m.group(0), None)
+            if real != m.group(0):
+                restored.setdefault(real, set()).add(m.group(0))
+        return [(sorted(spellings), real) for real, spellings in restored.items() if len(spellings) > 1]
 
     def _abbreviation_fits(self, m: re.Match[str]) -> bool:
         """A token matches glued inside a longer word (DECISIONS 36); an abbreviation does not - it is
@@ -1216,13 +1376,22 @@ class Mapper:
 
         def repl(m: re.Match[str]) -> str:
             key = m.group(0)
-            f = self._fwd_json.get(key) or self._fwd_json.get(_json_escape(key)) or self.forward(key)
+            # An escaped spelling as written, or as JSON writes it (a regex's backslash doubled).
+            disguised = self._disguise(key)
+            in_json = None if disguised else self._disguised_json.get(key)
+            hidden = disguised or in_json
+            f = hidden[0] if hidden else (self._fwd_json.get(key) or self._fwd_json.get(_json_escape(key))
+                                          or self.forward(key))
             if f.match is not None and not rule_allows(f.match, m.string, m.start(), m.end(), f.real):
                 return key
             if counter is not None:
                 counter[f.client] += 1
                 if pairs is not None:
                     pairs[(f.client, f.real, f.token)] += 1
+            if disguised:
+                return disguised[1](f.token)
+            if in_json:
+                return _json_escape(in_json[1](f.token))
             return f.token
 
         return self._fwd_json_re.sub(repl, text)
@@ -1299,7 +1468,7 @@ class Mapper:
         out = []
         for m in self._canary_re.finditer(text):
             key = m.group(0)
-            f = self._canary.get(key) or self._primary(key)
+            f = self._canary_form(key)
             if f is not None and not _declined(f, m):
                 out.append((f, m.start(), m.end()))
         return out
@@ -1310,7 +1479,7 @@ class Mapper:
         found = set()
         for m in self._canary_re.finditer(text):
             key = m.group(0)
-            f = self._canary.get(key) or self._primary(key)
+            f = self._canary_form(key)
             if f is not None and not _declined(f, m):
                 found.add(f.client)
         return sorted(found)
@@ -1326,7 +1495,7 @@ class Mapper:
         out = []
         for m in self._canary_re.finditer(text):
             key = m.group(0)
-            f = self._canary.get(key) or self._primary(key)
+            f = self._canary_form(key)
             if f is not None and _declined(f, m):
                 out.append((f, key))
         return out

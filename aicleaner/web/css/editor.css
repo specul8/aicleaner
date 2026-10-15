@@ -47,7 +47,7 @@
    clear so it shows through); corrected words get a green background there, the text itself stays
    the box's own. The bubble and the layer's size are placed from script. */
 .ac-stack { position: relative; flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
-.ac-stack > #session-prompt { position: relative; z-index: 1; background: transparent; flex: 1 1 auto; }
+.ac-stack > .prompt-text-box { position: relative; z-index: 1; background: transparent; flex: 1 1 auto; }
 .ac-layer { position: absolute; top: 0; left: 0; overflow: hidden; pointer-events: none; color: transparent;
   border-style: solid; border-color: transparent; box-sizing: border-box; margin: 0;
   background: var(--surface-2); white-space: pre-wrap; overflow-wrap: break-word; }

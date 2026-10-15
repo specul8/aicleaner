@@ -25,22 +25,52 @@ const UNREACHABLE = new Set([502, 503, 504, 520, 521, 522, 523, 524, 530]);
 const PROBE_MS = 3000;
 const PROBE_URL = '/api/tunnel/params';     // cheap, allowed locally and through the tunnel, never sealed
 const WAITING = 'aicleaner is not answering - it may be restarting. Reconnecting...';
-const link = { up: true, timer: null, listeners: new Set() };
+// The other way the link goes down (the user, 2026-10-14): the Cloudflare sign-in expired. Nothing
+// reconnects from that - only signing in again, which a reload starts - so it is said differently,
+// the probing stops, and the draft (kept in this tab's storage) survives the reload.
+const SIGNED_OUT = 'Your Cloudflare sign-in has expired (it lasts 24 hours). Sign in again - your draft is kept.';
+const AJAX = { 'X-Requested-With': 'XMLHttpRequest' };
+const link = { up: true, timer: null, listeners: new Set(), signedOut: false };
 
 export function connected() { return link.up; }
+
+// True once the sign-in has expired; the page shows "Signed out" rather than "Not connected".
+export function signedOut() { return link.signedOut; }
+
+// A 401 that is not aicleaner's own re-key, or a redirect: Access wants a sign-in.
+function wantsSignIn(response) {
+  return response.type === 'opaqueredirect'
+    || (response.status === 401 && response.headers.get('X-Aicleaner-Tunnel') !== 'rekey');
+}
+
+function signOut() {
+  if (link.signedOut) return;
+  link.signedOut = true;
+  link.up = false;
+  clearInterval(link.timer);
+  link.timer = null;
+  for (const toast of document.querySelectorAll('#toasts .toast')) {
+    if (toast.dataset.text === WAITING) toast.remove();
+  }
+  say(SIGNED_OUT, 'error', { action: { label: 'Sign in again', run: () => window.location.reload() } });
+  for (const listener of link.listeners) { try { listener(false); } catch (e) { /* one page, not all */ } }
+}
+window.addEventListener('aicleaner:signedout', signOut);
 
 // Called with true when aicleaner answers again (and false when it stops).
 export function onConnection(listener) { link.listeners.add(listener); return () => link.listeners.delete(listener); }
 
 function linkDown() {
-  if (!link.up) return;
+  if (!link.up || link.signedOut) return;
   link.up = false;
   say(WAITING, 'warn');
   for (const listener of link.listeners) { try { listener(false); } catch (e) { /* one page, not all */ } }
   link.timer = setInterval(async () => {
     try {
-      const answer = await fetch(PROBE_URL, { headers: { Accept: 'application/json' }, cache: 'no-store' });
-      if (!UNREACHABLE.has(answer.status)) linkUp();
+      const answer = await fetch(PROBE_URL, { headers: { Accept: 'application/json', ...AJAX }, cache: 'no-store',
+                                              redirect: 'manual' });
+      if (wantsSignIn(answer)) signOut();
+      else if (!UNREACHABLE.has(answer.status)) linkUp();
     } catch (error) { /* still down */ }
   }, PROBE_MS);
 }
@@ -69,11 +99,13 @@ class Unreachable extends Error {
 async function watched(url, init) {
   let response;
   try {
-    response = await fetch(url, init);
+    response = await fetch(url, { ...init, redirect: 'manual', headers: { ...(init.headers || {}), ...AJAX } });
   } catch (error) {
+    if (error && error.signedOut) { signOut(); throw error; }
     linkDown();
     throw new Unreachable(0);
   }
+  if (wantsSignIn(response)) { signOut(); throw new Unreachable(response.status); }
   if (UNREACHABLE.has(response.status)) { linkDown(); throw new Unreachable(response.status); }
   if (!link.up) linkUp();
   return response;
@@ -245,8 +277,9 @@ export function say(text, level = 'info', extra = {}) {
 // action the server named still gets the message and the explanation - it just has no button,
 // which is the right outcome rather than a button that does nothing.
 export function sayError(error, handlers = null) {
-  // aicleaner not answering is already said, once, by the reconnecting notice (D138).
-  if (error && error.unreachable) return null;
+  // aicleaner not answering is already said, once, by the reconnecting notice (D138), and an
+  // expired sign-in by its own.
+  if (error && (error.unreachable || error.signedOut)) return null;
   const text = error && error.message ? error.message : String(error);
   const why = (error && error.why) || '';
   const offer = error && error.offer;
