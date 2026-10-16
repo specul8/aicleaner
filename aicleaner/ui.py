@@ -744,6 +744,37 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except SessionError as problem:
             return err(problem, status=404)
 
+    async def conversation_search(request: web.Request) -> web.Response:
+        """Conversations ranked for a topic (2026-10-16): this profile's, or every profile's."""
+        from .session import SessionError
+
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.json_response({"results": [], "searched": 0, "read": 0, "ms": 0})
+        if len(query) > 300:
+            return err(ValueError("a search is at most 300 characters"))
+        try:
+            answer = await asyncio.to_thread(session_host().search_conversations, request.query.get("name", ""),
+                                             query, request.query.get("scope") == "all")
+            return web.json_response(answer)
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def conversation_rank(request: web.Request) -> web.Response:
+        """The model's order and a reason for each, over results the page sent back."""
+        from .convsearch import RANK_CANDIDATES
+
+        body = await request.json()
+        query = str(body.get("q") or "").strip()[:300]
+        results = [r for r in (body.get("results") or []) if isinstance(r, dict) and r.get("id")][:RANK_CANDIDATES]
+        if not query or not results:
+            return err(ValueError("a question and some results to rank are needed"))
+        try:
+            ranked = await asyncio.to_thread(session_host().rank_conversations, query, results)
+        except RuntimeError as problem:
+            return err(problem, status=502)
+        return web.json_response({"ranked": ranked})
+
     async def session_earlier(request: web.Request) -> web.Response:
         """The 500 events before what the page shows, for "Show earlier" (feature 82)."""
         from .session import SessionError
@@ -2886,6 +2917,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get("/api/session/tabs-state", session_tabs_state)
         app.router.add_post("/api/session/tabs-state", session_tabs_state_save)
         app.router.add_get("/api/session/past", session_past)
+        app.router.add_get("/api/session/conversations/search", conversation_search)
+        app.router.add_post("/api/session/conversations/rank", conversation_rank)
         app.router.add_get("/api/session/earlier", session_earlier)
         app.router.add_get("/api/tunnel/params", tunnel_params)
         app.router.add_post("/api/tunnel/hello", tunnel_hello)

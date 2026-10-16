@@ -370,6 +370,23 @@ function Get-LedgerPath {
     return (Join-Path $env:USERPROFILE '.aicleaner\install-changes.json')
 }
 
+function Get-LedgerSection {
+    <#
+    .SYNOPSIS
+        One section of install-changes.json, or $null when there is no record or no such section.
+        A function, so every step can read the ledger: the PowerToys remap step used a script block
+        defined inside Restore-InstallChanges, and under StrictMode the uninstall stopped there
+        ("The variable '$section' cannot be retrieved", 2026-10-16).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    $ledgerPath = Get-LedgerPath
+    if (-not (Test-Path -LiteralPath $ledgerPath)) { return $null }
+    try { $ledger = Read-JsonFile -Path $ledgerPath } catch { return $null }
+    if ($null -ne $ledger -and $ledger.PSObject.Properties[$Name]) { return $ledger.$Name }
+    return $null
+}
+
 function Restore-JsonSection {
     <#
     .SYNOPSIS
@@ -960,7 +977,7 @@ try {
         $doc = Read-JsonFile -Path $kbm
         if ($doc.PSObject.Properties['remapShortcuts'] -and $doc.remapShortcuts.PSObject.Properties['global']) {
             # Which keys were taken is in the ledger: the person chose them at install time.
-            $remapSection = & $section 'powertoys_remap'
+            $remapSection = Get-LedgerSection -Name 'powertoys_remap'
             $taken = @()
             if ($remapSection) { $taken = @($remapSection.PSObject.Properties | ForEach-Object { $_.Name }) }
             # Ours either way: the capture script started by a run-program remap (2026-10-12), or the older remap to Win+Shift+T.

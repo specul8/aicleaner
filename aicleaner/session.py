@@ -275,7 +275,10 @@ SEARCH_BUDGET_S = 30.0          # the user, 2026-10-08 (was 10)
 # Folders that hold installed dependencies or tools, not work - "no value searching a repo folder
 # containing Node modules or the node app" (the user, 2026-10-07) - and git's own database.
 DEPENDENCY_FOLDERS = frozenset({"node_modules", "bower_components", "jspm_packages", "site-packages",
-                                "__pycache__", ".terraform", ".git"})
+                                "__pycache__", ".terraform", ".git",
+                                # Tool caches and test leftovers (2026-10-16): generated, never work, and
+                                # one test temp folder held a deep enough tree to use up a search's time.
+                                ".pytest_cache", ".pytest-tmp", ".mypy_cache", ".ruff_cache", ".tox", ".nox"})
 
 
 class SearchWalk:
@@ -283,20 +286,24 @@ class SearchWalk:
 
     It stops at a number of results ("limit": narrow the search) or when its time is up ("time":
     the folders not yet walked are still here, and `run` again picks up where it stopped - the
-    page's "Keep searching"). The folders are walked one root after another, each breadth first.
+    page's "Keep searching").
+
+    **Every root's shallow folders first** (2026-10-16): one queue across all the roots, breadth
+    first, so the top of every folder is searched before the depths of any. It used to walk one root
+    to the bottom before starting the next, and a file at the top of the OneDrive share was never
+    reached in 30 seconds because a repository listed before it held a deep tree of test leftovers.
     """
 
     def __init__(self, needle: str, roots: list[Path]):
         self.needle = needle
         self.roots = list(roots)
-        self.root_index = 0
-        self.pending: deque[Path] = deque([self.roots[0]]) if self.roots else deque()
+        self.pending: deque[tuple[Path, Path]] = deque((root, root) for root in self.roots)
         self.skipped = 0
         self.found = 0
 
     @property
     def done(self) -> bool:
-        return not self.pending and self.root_index >= len(self.roots) - 1
+        return not self.pending
 
     def run(self, limit: int, budget_s: float) -> tuple[list[dict[str, Any]], str]:
         """(results found this time, why it stopped: "limit", "time", or "" when every folder was walked)."""
@@ -304,12 +311,8 @@ class SearchWalk:
         deadline = time.monotonic() + budget_s
         while True:
             if not self.pending:
-                if self.root_index >= len(self.roots) - 1:
-                    return results, ""
-                self.root_index += 1
-                self.pending.append(self.roots[self.root_index])
-            root = self.roots[self.root_index]
-            folder = self.pending.popleft()
+                return results, ""
+            root, folder = self.pending.popleft()
             try:
                 with os.scandir(folder) as listed:
                     items = sorted(listed, key=lambda e: e.name.lower())
@@ -331,7 +334,7 @@ class SearchWalk:
                     if _dependency_folder(Path(item.path)):
                         self.skipped += 1
                     else:
-                        self.pending.append(Path(item.path))
+                        self.pending.append((root, Path(item.path)))
             if len(results) >= limit:
                 return results[:limit], "limit"
             if time.monotonic() > deadline:
@@ -1999,6 +2002,35 @@ class SessionHost:
         # passed to Claude Code, so any of these conversations can be continued as it is.
         return conversations(self.conversation_folders(profile), limit=limit,
                              include_robots=include_robots, ours=ours)
+
+    def search_conversations(self, name: str, query: str, everywhere: bool = False) -> dict[str, Any]:
+        """Conversations of this profile (or of every profile) ranked for a topic (2026-10-16).
+
+        As past(): the page names a profile, never a path, so only folders a profile already has are
+        read."""
+        from .convsearch import Cache, search, transcripts
+        from .history import our_conversations, transcript_root
+
+        clock = time.perf_counter()
+        profiles = self.profiles if everywhere else [self.profile(name)]
+        folders: list[str] = []
+        for profile in profiles:
+            for folder in self.conversation_folders(profile):
+                if folder.lower() not in {f.lower() for f in folders}:
+                    folders.append(folder)
+        items = transcripts(folders, transcript_root(), our_conversations(self.sessions_dir))
+        cache = Cache(self.sessions_dir.parent / "search" if self.sessions_dir else None)
+        results = search(items, cache, query)
+        if everywhere:
+            cache.prune(item.path for item in items)
+        return {"results": results, "searched": len(items), "read": cache.read,
+                "ms": round((time.perf_counter() - clock) * 1000)}
+
+    def rank_conversations(self, query: str, results: list[dict[str, Any]]) -> list[dict[str, str]]:
+        """The model's order and reasons for results the page already holds."""
+        from .convsearch import rank_with_model
+
+        return rank_with_model(self.claude, self.base_url, query, results)
 
     def browse(self, name: str = "", root: str = "", path: str = "") -> dict:
         """The file tree of a profile's folders, whether or not its session is running."""

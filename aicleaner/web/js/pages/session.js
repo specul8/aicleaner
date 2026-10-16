@@ -21,6 +21,7 @@ import { begin } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { attachImageReading, imageButton, isReadable, readInto } from '../imagetext.js';
 import { codeEditor } from '../codeeditor.js';
+import { openConversationSearch } from '../convsearch.js';
 import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetTitle, splitPrompt } from '../snippets.js';
 import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
@@ -296,17 +297,71 @@ export function readableInput(input) {
   }).join('\n');
 }
 
+// JSON inside any text, laid out to read (the user, 2026-10-16): every {...} or [...] run that parses
+// - in a tool's output, a sub-agent's report, Claude's reasoning - is pretty-printed in place. Text
+// that only looks like JSON is left as it is. Scanned for balanced brackets outside strings.
+export function prettyJsonIn(text) {
+  const out = [];
+  let i = 0;
+  let copied = 0;
+  while (i < text.length) {
+    const open = text[i];
+    if (open !== '{' && open !== '[') { i += 1; continue; }
+    let depth = 0;
+    let inString = false;
+    let end = -1;
+    for (let j = i; j < text.length; j += 1) {
+      const c = text[j];
+      if (inString) {
+        if (c === '\\') j += 1;
+        else if (c === '"') inString = false;
+      } else if (c === '"') inString = true;
+      else if (c === '{' || c === '[') depth += 1;
+      else if (c === '}' || c === ']') { depth -= 1; if (depth === 0) { end = j; break; } }
+    }
+    if (end < 0) { i += 1; continue; }
+    const candidate = text.slice(i, end + 1);
+    let pretty = null;
+    // Already over several lines means already laid out (and indented where it sits): left alone.
+    if (candidate.length >= 20 && /[:,]/.test(candidate) && !candidate.includes('\n')) {
+      try { pretty = JSON.stringify(JSON.parse(candidate), null, 2); } catch (error) { pretty = null; }
+    }
+    if (pretty && pretty !== candidate) {
+      out.push(text.slice(copied, i), pretty);
+      copied = end + 1;
+      i = end + 1;
+    } else {
+      i += 1;
+    }
+  }
+  out.push(text.slice(copied));
+  return out.join('');
+}
+
+// Filled in when first opened (the user, 2026-10-16): most tool lines are never expanded, so the
+// readable form is worked out on demand rather than for every line drawn.
+// On the summary's click, not the toggle event: toggle fires a task later, so the box opened empty
+// for a moment. Enter and Space on a focused summary are clicks too.
+function fillOnOpen(details, body, text) {
+  details.querySelector('summary').addEventListener('click', () => {
+    if (details.dataset.filled) return;
+    details.dataset.filled = '1';
+    body.replaceChildren(...text());
+  });
+}
+
 function toolDetail(tool) {
   const name = tool.name || 'tool';
   const input = tool.input || {};
   const summary = toolSummary(tool);
   if (!summary && !Object.keys(input).length) return h('div', {}, name);
-  const full = typeof input.command === 'string' && Object.keys(input).length <= 3
+  const body = h('pre', { class: 'mono' });
+  const details = h('details', { class: 'tool-detail' },
+    h('summary', {}, h('strong', {}, name), summary ? ' ' : '', ...withRestoredNames(summary)), body);
+  fillOnOpen(details, body, () => withRestoredNames(typeof input.command === 'string' && Object.keys(input).length <= 3
     ? input.command
-    : readableInput(input);
-  return h('details', { class: 'tool-detail' },
-    h('summary', {}, h('strong', {}, name), summary ? ' ' : '', ...withRestoredNames(summary)),
-    h('pre', { class: 'mono' }, ...withRestoredNames(full)));
+    : prettyJsonIn(readableInput(input))));
+  return details;
 }
 
 // dd/mm HH:MM in the reader's own time zone (feature 66), from epoch seconds.
@@ -353,9 +408,12 @@ function transcript(events, { after = null, placeholder = true } = {}) {
       const thoughts = ((event.message || {}).content || [])
         .filter((c) => c.type === 'thinking' && String(c.thinking || '').trim()).map((c) => c.thinking);
       if (thoughts.length) {
-        lines.push(h('div', { class: 'turn tool thinking-turn' }, h('span', { class: 'who' }, ''),
-          h('details', { class: 'thinking' }, h('summary', {}, 'thinking'),
-            h('div', { class: 'thinking-text' }, thoughts.join('\n\n')))));
+        // Filled when opened, with any JSON in it laid out (2026-10-16). Never rehydrated (D8), so
+        // set as plain text, not through withRestoredNames.
+        const text = h('div', { class: 'thinking-text' });
+        const box = h('details', { class: 'thinking' }, h('summary', {}, 'thinking'), text);
+        fillOnOpen(box, text, () => [prettyJsonIn(thoughts.join('\n\n'))]);
+        lines.push(h('div', { class: 'turn tool thinking-turn' }, h('span', { class: 'who' }, ''), box));
       }
       const parts = ((event.message || {}).content || []).filter((c) => c.type === 'text').map((c) => c.text);
       if (parts.length) {
@@ -2390,6 +2448,40 @@ export async function render(main, context = {}) {
   // error: the page still has to start a new conversation.
   // `quiet` is the poll's reload: the list already showing stays until the new one lands.
   const pastCount = (past) => (past || []).reduce((n, entry) => n + (entry.sessions || []).length, 0);
+  // Finding a conversation by topic (2026-10-16): the dialog hands back the one chosen, which is
+  // added to the Continue list when it is older than the conversations listed, and selected.
+  const chooseConversation = (result) => {
+    if (!view.past) view.past = [];
+    let group = view.past.find((entry) => entry.project === result.project);
+    if (!group) { group = { project: result.project, sessions: [] }; view.past.push(group); }
+    if (!group.sessions.some((row) => row.id === result.id)) {
+      group.sessions.unshift({ id: result.id, title: result.title, last: result.last, branch: result.branch,
+        updated: result.updated, busy: false, project: result.project });
+    }
+    paint();
+    resume.value = result.id;
+    paint();
+    say(current().running
+      ? 'Chosen in Continue. Stop this session to pick that conversation up.'
+      : 'Chosen in Continue: press Start to pick it up.', 'ok');
+  };
+  const openSearch = () => {
+    if (!view.name || document.getElementById('conv-search')) return;
+    openConversationSearch({ name: () => view.name, choose: chooseConversation });
+  };
+  const searchButton = h('button', { type: 'button', id: 'session-search-conversations', class: 'link',
+    title: 'Find a conversation by what it was about (Ctrl+K)' }, 'Search conversations');
+  searchButton.addEventListener('click', (event) => { event.preventDefault(); openSearch(); });
+  view.openSearch = openSearch;
+  if (!view.searchHooked) {
+    view.searchHooked = true;
+    document.addEventListener('keydown', (event) => {
+      if (event.key.toLowerCase() !== 'k' || !(event.ctrlKey || event.metaKey) || event.altKey || !view.openSearch) return;
+      event.preventDefault();
+      view.openSearch();
+    });
+  }
+
   const loadPast = async ({ quiet = false } = {}) => {
     if (!view.name) { view.past = []; paint(); return; }
     const asked = view.name;
@@ -2577,7 +2669,7 @@ export async function render(main, context = {}) {
     h('div', { class: 'form-row session-head' }, heading, clientChip, runningLine,
       h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start'), chat),
     h('div', { class: 'session-controls' },
-      h('label', { class: 'field' }, 'Continue', resume, showAll),
+      h('label', { class: 'field' }, 'Continue', resume, showAll, searchButton),
       h('div', { class: 'field' }, h('span', {}, 'Starts in (home folder)'), homeShown),
       modeField),
     resumeLine,
@@ -3391,4 +3483,5 @@ export function leave() {
   if (view.offConnection) view.offConnection();
   view.offConnection = null;
   view.editing = false;
+  view.openSearch = null;            // Ctrl+K belongs to the Session page only
 }
