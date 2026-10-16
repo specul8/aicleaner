@@ -18,6 +18,7 @@ import { activityItems, noticeActivity, seen } from './activity.js';
 import { begin, setTiming } from './timing.js';
 import { confirmLeave, dirty } from './unsaved.js';
 import { isSealed, openTunnel } from './sealed.js';
+import { openFeedback } from './feedback.js';
 
 const PAGES = { overview, review, clients, global: clients, secrets, settings, session, log: logPage, wiki, setup };
 
@@ -380,6 +381,12 @@ function setupTopFlyouts() {
       wiki.replaceChildren(...(answer.pages || []).map((page) => h('a', { href: `#/wiki/${encodeURIComponent(page)}` },
         page.replace(/-/g, ' '))));
     }).catch(() => {});
+  }
+  // Feedback (2026-10-16): its own menu item, in every layout. A dialog, not a page, so it opens over
+  // whatever is being looked at and can say which page and field that was.
+  const feedbackItem = document.getElementById('nav-feedback');
+  if (feedbackItem) {
+    feedbackItem.addEventListener('click', (event) => { event.preventDefault(); openFeedback(); });
   }
 }
 

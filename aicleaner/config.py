@@ -196,6 +196,7 @@ class Config:
     # on this port, and Claude Code's settings pointed at it. Off until chosen (installer or Settings).
     codetab_enabled: bool = False
     update_auto: bool = False            # install a newer release on its own (2026-10-16), off by default
+    feedback_relay: str = "https://aicleaner-feedback.biosconsulting.com.au"   # where feedback goes (2026-10-16)
     codetab_port: int = 8788
     # EMERGENCY ONLY. When the canary finds a real name after tokenising, send the request anyway
     # (logged, and flagged in the evidence log) instead of refusing it. It exists so a false
@@ -469,6 +470,7 @@ class Config:
         cfg.codetab_enabled = _flag(codetab, "enabled", False, "codetab.enabled")
         cfg.codetab_port = int(codetab.get("port", 8788))
         cfg.update_auto = _flag(data.get("update") or {}, "auto", False, "update.auto")
+        cfg.feedback_relay = str((data.get("feedback") or {}).get("relay") or cfg.feedback_relay).rstrip("/")
         cfg.canary_fail_open = _flag(data.get("canary") or {}, "fail_open", False, "canary.fail_open")
         cfg.proxy_bypass = _flag(data.get("proxy") or {}, "bypass", False, "proxy.bypass")
         rem = data.get("remote") or {}

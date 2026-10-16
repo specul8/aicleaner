@@ -60,6 +60,10 @@
 .PARAMETER RemovePowerToys
     Also uninstall PowerToys (winget). Default: leave it installed, only the remap is removed.
 
+.PARAMETER RemoveFeedbackIdentity
+    Also forget the feedback connection (%LOCALAPPDATA%\aicleaner-feedback). Default: kept, so a
+    reinstall on this machine reconnects to the same tickets without asking again.
+
 .PARAMETER Port
     Proxy port to stop. Default: the port in aicleaner-config.json, else 8787.
 
@@ -88,6 +92,7 @@ param(
     [switch]$RemoveRemote,
     [switch]$RemoteOnly,
     [switch]$RemovePowerToys,
+    [switch]$RemoveFeedbackIdentity,
     [ValidateRange(1024, 65535)][int]$Port = 8787,
     [AllowEmptyString()][string]$LogPath = $(
         $base = if ($PSCommandPath) { [IO.Path]::GetFileNameWithoutExtension($PSCommandPath) } else { 'Uninstall-AiCleaner' }
@@ -1058,6 +1063,19 @@ try {
         } else { Write-Status "Secrets kept at $secrets (pass -RemoveSecrets to delete)" -Level Detail }
     }
     if ((Test-Path -LiteralPath $local) -and -not (Get-ChildItem -LiteralPath $local -Force)) { Remove-Item -LiteralPath $local }
+
+    # --- 9. Feedback identity (2026-10-16): kept, so a reinstall reconnects to the same tickets ----
+    $feedbackHome = Join-Path $env:LOCALAPPDATA 'aicleaner-feedback'
+    if (Test-Path -LiteralPath $feedbackHome) {
+        if ($RemoveFeedbackIdentity) {
+            if ($PSCmdlet.ShouldProcess($feedbackHome, 'Remove the feedback connection')) {
+                Remove-Item -LiteralPath $feedbackHome -Recurse -Force
+                Write-Status 'Feedback connection removed (a reinstall will ask again)' -Level Detail
+            }
+        } else {
+            Write-Status "Feedback connection kept at $feedbackHome, so a reinstall finds your tickets (pass -RemoveFeedbackIdentity to delete it)" -Level Detail
+        }
+    }
 
     if ($policyLeft.Count -gt 0) {
         Write-Status "Uninstall finished EXCEPT the Claude Desktop policy ($($policyLeft -join ', ')); re-run elevated." -Level Warn

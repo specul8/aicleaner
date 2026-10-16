@@ -8,6 +8,7 @@ import { displayName, setMenuLayout } from '../app.js';
 import { rebase, track } from '../unsaved.js';
 import { forgetKey, isSealed } from '../sealed.js';
 import { forgetPreviewChoice } from '../previewjump.js';
+import { openFeedback } from '../feedback.js';
 
 const view = { main: null, ctx: null, config: null, host: null, cards: [], watching: false };
 
@@ -82,7 +83,7 @@ function paintCards() {
     nearMissCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
     view.config.windows ? bashGuardCard(s) : null,
     view.config.windows && !view.config.remote ? codeTabCard(s) : null,
-    toolsCard(s), routingCard(), restartCard(), updatesCard(s),
+    toolsCard(s), routingCard(), restartCard(), updatesCard(s), feedbackCard(),
     foldersCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
     contactCard(status.contact), editorCard(s), autocorrectCard(s), diagnosticsCard(s, status),
@@ -741,6 +742,29 @@ function updatesCard(s) {
     [installedLine, availableLine, h('div', { class: 'form-row' }, check, apply), checkedLine,
       h('div', { class: 'form-row' }, auto)],
     () => ({ 'update.auto': auto.querySelector('input').checked }));
+}
+
+// Feedback (2026-10-16): whether this install is connected to the feedback system, where that is, the
+// short ID to quote, and the way to open it or disconnect. Connecting is asked for in the dialog.
+function feedbackCard() {
+  const line = h('p', { class: 'feedback-state' }, 'Checking...');
+  const open = h('button', { type: 'button', class: 'feedback-open' }, 'Open feedback');
+  const disconnect = h('button', { type: 'button', class: 'feedback-disconnect', hidden: true }, 'Disconnect');
+  const show = (state) => {
+    line.textContent = state.connected
+      ? `Connected to ${state.relay} since ${state.consented_at.replace('T', ' ')} - this install is ${state.client}.`
+      : `Not connected. Opening feedback asks first; nothing is sent to ${state.relay} until you say yes.`;
+    disconnect.hidden = !state.connected;
+  };
+  getJSON('/api/feedback/state').then(show).catch(() => { line.textContent = 'Could not check.'; });
+  open.addEventListener('click', () => openFeedback());
+  disconnect.addEventListener('click', async () => {
+    try { show(await postJSON('/api/feedback/disconnect', {})); say('Disconnected. Your tickets stay where they are.', 'ok'); }
+    catch (error) { sayError(error); }
+  });
+  return card('feedback', 'Feedback',
+    'Raise tickets anonymously and follow the replies. Each ticket carries which settings are on or off, the page and the version - never folders, client names or anything that identifies you. Connecting again later, even after a reinstall on this machine, finds the same tickets.',
+    [line, h('div', { class: 'form-row' }, open, disconnect)], null);
 }
 
 // After an update: wait for a proxy that started after the one that was running (the old one keeps

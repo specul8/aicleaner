@@ -22,6 +22,7 @@ import { attachAutocorrect } from '../autocorrect.js';
 import { attachImageReading, imageButton, isReadable, readInto } from '../imagetext.js';
 import { codeEditor } from '../codeeditor.js';
 import { openConversationSearch } from '../convsearch.js';
+import { openFeedback } from '../feedback.js';
 import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetTitle, splitPrompt } from '../snippets.js';
 import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
@@ -2712,6 +2713,11 @@ export async function render(main, context = {}) {
   const imageSnippet = (text, filename) => makeSnippet({ code: text, lang: 'text', number: snippetNumber(), image: filename });
   attachImageReading(firstBox, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
   const readButton = imageButton((files) => { for (const file of files) readInto(box, { file }, view.name, say, imageSnippet); });
+  // Feedback beside the prompt's own buttons (the user, 2026-10-16): where something goes wrong is
+  // usually where the person is typing.
+  const feedbackButton = h('button', { type: 'button', id: 'session-feedback', class: 'btn feedback-open',
+    title: 'Report a bug or suggest an idea' }, '\u{1F4E3} Feedback');
+  feedbackButton.addEventListener('click', () => openFeedback());
   const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
   const insertCodeButton = h('button', { type: 'button', id: 'session-insert-code', class: 'btn',
     title: 'Paste or type code in an editor with line numbers and no wrapping, then add it to the prompt' }, 'Insert code snippet');
@@ -2724,6 +2730,7 @@ export async function render(main, context = {}) {
       h('button', { type: 'button', id: 'session-send', class: 'primary' }, 'Send'),
       insertCodeButton,
       readButton,
+      feedbackButton,
       autocorrect.toggle,
       // Beside Send, because that is where the eye already is when waiting for a reply,
       // and waiting is when "is this thing still connected?" gets asked (feature 65).

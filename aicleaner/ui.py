@@ -2324,6 +2324,110 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(exc, status=409)
         return web.json_response({"ok": True, "log": str(log_path)})
 
+    # ---- feedback (2026-10-16; spec 2026-10-16-feedback-design.md) ----------------------------------
+
+    from . import feedback as fb
+
+    def feedback_state() -> dict[str, Any]:
+        held = fb.consent()
+        relay = proxy.cfg.feedback_relay if proxy is not None else fb.RELAY
+        return {"connected": bool(held), "relay": relay, "consented_at": (held or {}).get("consented_at", ""),
+                "client": (held or {}).get("client_id", "")[:8]}
+
+    def feedback_server_context(request: web.Request, include_log: bool) -> dict[str, Any]:
+        """The proxy's half of a ticket's context: versions, on/off settings, counts - no values."""
+        from . import __version__, updates
+        mine = updates.installed(root=proxy.install_root()) if proxy is not None else {"repo": ""}
+        host = proxy.session if proxy is not None else None
+        context: dict[str, Any] = {
+            "version": __version__, "channel": fb.channel_of(mine.get("repo", "")), **fb.system_info(),
+            "reached": "remote access (Cloudflare Access)" if request.get(REMOTE) else "this machine (127.0.0.1)",
+            "settings": fb.settings_summary(proxy.cfg.settings()) if proxy is not None else {},
+            "counts": {
+                "profiles": len(host.profiles) if host is not None else 0,
+                "running_sessions": len([s for s in host.sessions.values() if s.running]) if host is not None else 0,
+                "clients": len(getattr(proxy.mapper, "clients", []) or []) if proxy is not None else 0,
+            },
+            "proxy": {"uptime_s": int(time.time() - getattr(proxy, "started_at", time.time())),
+                      "requests_seen": getattr(proxy, "requests_seen", 0)} if proxy is not None else {},
+        }
+        if include_log and proxy is not None:
+            tokenise = getattr(proxy.mapper, "tokenise", lambda text: text)
+            context["recent_log"] = fb.recent_log_lines(Path(proxy.cfg.log_dir), tokenise)
+        return context
+
+    def feedback_context(request: web.Request, body: dict[str, Any]) -> dict[str, Any]:
+        page = body.get("page") if isinstance(body.get("page"), dict) else {}
+        return fb.build_context(page, feedback_server_context(request, bool(body.get("include_log"))))
+
+    def feedback_text(text: str, limit: int) -> str:
+        """The person's own words, through the client-name filter: they are about to leave the machine."""
+        tokenise = getattr(proxy.mapper, "tokenise", None) if proxy is not None else None
+        text = str(text or "")[:limit]
+        return tokenise(text) if tokenise else text
+
+    async def feedback_relay(method: str, path: str, body: dict | None = None) -> dict[str, Any]:
+        held = fb.consent()
+        if not held:
+            raise fb.FeedbackError("connect to the feedback system first", status=409)
+        return await asyncio.to_thread(fb.call, proxy.cfg.feedback_relay, method, path, held["client_id"], body)
+
+    async def feedback_get_state(request: web.Request) -> web.Response:
+        return web.json_response(feedback_state())
+
+    async def feedback_connect(request: web.Request) -> web.Response:
+        """The person said yes: register this install's ID, and remember the answer."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        try:
+            cid = await asyncio.to_thread(fb.client_id)
+            await asyncio.to_thread(fb.call, proxy.cfg.feedback_relay, "POST", "/v1/register", cid, {})
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+        fb.save_consent(cid, proxy.cfg.feedback_relay, time.strftime("%Y-%m-%dT%H:%M:%S"))
+        return web.json_response(feedback_state())
+
+    async def feedback_disconnect(request: web.Request) -> web.Response:
+        fb.forget_consent()
+        return web.json_response(feedback_state())
+
+    async def feedback_preview(request: web.Request) -> web.Response:
+        """Exactly what would go with a ticket, shown before sending."""
+        return web.json_response({"context": feedback_context(request, await request.json())})
+
+    async def feedback_tickets(request: web.Request) -> web.Response:
+        state = "closed" if request.query.get("state") == "closed" else "open"
+        try:
+            return web.json_response(await feedback_relay("GET", f"/v1/tickets?state={state}"))
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+
+    async def feedback_send(request: web.Request) -> web.Response:
+        from . import __version__, updates
+        body = await request.json()
+        title = feedback_text(str(body.get("title") or "").strip(), fb.TITLE_MAX)
+        if not title:
+            return err(ValueError("a title is needed"))
+        mine = updates.installed(root=proxy.install_root()) if proxy is not None else {"repo": ""}
+        payload = {"title": title, "body": feedback_text(body.get("body") or "", fb.BODY_MAX),
+                   "kind": "idea" if body.get("kind") == "idea" else "bug",
+                   "channel": fb.channel_of(mine.get("repo", "")), "version": __version__,
+                   "context": feedback_context(request, body)}
+        try:
+            return web.json_response(await feedback_relay("POST", "/v1/tickets", payload), status=201)
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+
+    async def feedback_ticket_action(request: web.Request) -> web.Response:
+        number = int(request.match_info["number"])
+        action = request.match_info["action"]
+        body = await request.json() if action == "comments" else {}
+        payload = {"body": feedback_text(body.get("body") or "", fb.BODY_MAX)} if action == "comments" else {}
+        try:
+            return web.json_response(await feedback_relay("POST", f"/v1/tickets/{number}/{action}", payload))
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+
     # ---- updates (2026-10-16) ----------------------------------------------------------------------
 
     async def updates_info(request: web.Request) -> web.Response:
@@ -2959,6 +3063,13 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/codetab", codetab_get)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
+    app.router.add_get("/api/feedback/state", feedback_get_state)
+    app.router.add_post("/api/feedback/connect", feedback_connect)
+    app.router.add_post("/api/feedback/disconnect", feedback_disconnect)
+    app.router.add_post("/api/feedback/preview", feedback_preview)
+    app.router.add_get("/api/feedback/tickets", feedback_tickets)
+    app.router.add_post("/api/feedback/tickets", feedback_send)
+    app.router.add_post(r"/api/feedback/tickets/{number:\d+}/{action:comments|close}", feedback_ticket_action)
     app.router.add_get("/api/updates", updates_info)
     app.router.add_post("/api/updates/apply", updates_apply)
     app.router.add_get("/api/setup/dns", setup_dns)
