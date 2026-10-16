@@ -95,16 +95,18 @@ function commandBefore(box, start) {
 
 function candidates(box, language, where, extra) {
   const lower = where.word.toLowerCase();
-  const seen = new Set();
   const out = [];
   const add = (label, kind, rank, insert = label, snippet = false) => {
-    const key = `${kind}|${label.toLowerCase()}`;
-    if (seen.has(key) || label === where.word) return;
     const low = label.toLowerCase();
+    // The typed word in another capitalisation is not offered (the user, 2026-10-16): having typed
+    // Foo it offered foo, and after taking that offered Foo again - the prompt flipped between them.
+    if (low === lower) return;
     const at = low.indexOf(lower);
     if (at < 0) return;
-    seen.add(key);
-    out.push({ label, kind, insert, snippet, score: [at === 0 ? 0 : 1, rank, label.length, low] });
+    // The spelling that starts the way it was typed comes first: "Sessi" offers Session, "sessi"
+    // offers session, when the file has both (the user, 2026-10-16).
+    const sameCase = label.startsWith(where.word) ? 0 : 1;
+    out.push({ label, kind, insert, snippet, score: [at === 0 ? 0 : 1, rank, sameCase, label.length, low] });
   };
   for (const s of SNIPPETS[language] || []) add(s.label, 'snippet', 0, s.body, true);
   for (const p of extra || []) add(p, 'parameter', 1);
@@ -129,7 +131,16 @@ function candidates(box, language, where, extra) {
     }
     return 0;
   });
-  return out.slice(0, MAX_SHOWN);
+  // One entry per kind and word whatever its case, after sorting, so the one kept is the spelling
+  // that matches what was typed.
+  const seen = new Set();
+  const unique = out.filter((item) => {
+    const key = `${item.kind}|${item.label.toLowerCase()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return unique.slice(0, MAX_SHOWN);
 }
 
 // ---- snippets -------------------------------------------------------------------------------------
@@ -236,6 +247,10 @@ export function attachCompletion(box, language, stack) {
     const where = wordAt(box, language);
     close();
     if (!item) return;
+    // A word just chosen is finished: the input event the insert fires must not open the list again
+    // on it (the user, 2026-10-16). The next key typed opens it as usual.
+    state.accepted = true;
+    setTimeout(() => { state.accepted = false; }, 0);    // the insert's input event is synchronous
     if (!item.snippet) { insertText(box, where.start, where.end, item.insert); return; }
     const text = box.value;
     const lineStart = text.lastIndexOf('\n', where.start - 1) + 1;
@@ -263,6 +278,7 @@ export function attachCompletion(box, language, stack) {
   };
 
   box.addEventListener('input', (event) => {
+    if (state.accepted) { state.accepted = false; return; }
     if (event.inputType === 'insertText' || event.inputType === 'deleteContentBackward' || !list.hidden) open(false);
   });
   box.addEventListener('blur', () => setTimeout(close, 150));

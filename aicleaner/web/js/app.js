@@ -116,14 +116,30 @@ function setupSignOut() {
   link.hidden = false;
 }
 
+// The theme button shows the theme in use (the user, 2026-10-15): sun, moon, or half of each for
+// "as the system does".
+const THEME_ICON = { light: 'sun', dark: 'moon', system: 'sun-moon' };
+const THEME_NAME = { light: 'Light', dark: 'Dark', system: 'As the system' };
+
+function paintThemeButton(theme) {
+  const cog = document.getElementById('cog');
+  cog.replaceChildren(icon(THEME_ICON[theme] || 'sun-moon'));
+  cog.title = `Theme: ${THEME_NAME[theme] || theme}`;
+  cog.setAttribute('aria-label', cog.title);
+}
+
+// Menu layout (Side / Top) is a setting now (2026-10-15); Settings calls this to apply a choice.
+export function setMenuLayout(layout) {
+  writePref('aicleaner.layout', layout);
+  applyLayout(layout);
+}
+
 function setupPrefs() {
   const cog = document.getElementById('cog');
   const panel = document.getElementById('prefs');
-  cog.append(icon('cog'));
   const theme = readPref('aicleaner.theme', 'system');
-  const layout = readPref('aicleaner.layout', 'side');
+  paintThemeButton(theme);
   panel.querySelector(`input[name=theme][value=${theme}]`).checked = true;
-  panel.querySelector(`input[name=layout][value=${layout === 'top' ? 'top' : 'side'}]`).checked = true;
   const close = () => { panel.hidden = true; cog.setAttribute('aria-expanded', 'false'); };
   cog.addEventListener('click', (event) => {
     event.stopPropagation();
@@ -138,9 +154,7 @@ function setupPrefs() {
     if (input.name === 'theme') {
       writePref('aicleaner.theme', input.value);
       applyTheme(input.value);
-    } else if (input.name === 'layout') {
-      writePref('aicleaner.layout', input.value);
-      applyLayout(input.value);
+      paintThemeButton(input.value);
     }
   });
   if (darkQuery) {
@@ -282,12 +296,16 @@ function renderNav(status) {
   const rows = [{ id: 'global', label: 'Global' }, ...status.clients];
   list.replaceChildren(
     ...rows.map((row) =>
-      h('a', { href: clientHref(row.id), class: problems.has(row.id) ? 'bad' : null,
+      h('a', { href: clientHref(row.id), class: problems.has(row.id) ? 'bad' : null, title: displayName(row),
         dataset: { clientId: row.id, route: row.id === 'global' ? 'global' : null } },
-        problems.has(row.id) ? icon('cross', 'problem') : null, displayName(row))),
+        problems.has(row.id) ? icon('cross', 'problem') : null,
+        // Collapsed to the rail, the first two letters stand in for the name; the title has it whole
+        // (the user, 2026-10-15).
+        h('span', { class: 'nav-client-initial', 'aria-hidden': 'true' }, displayName(row).slice(0, 2)),
+        h('span', { class: 'nav-client-name' }, displayName(row)))),
     // Not "add-client": the Clients page already has a button by that name, and two elements
     // with one id is a lookup that quietly finds the wrong one.
-    h('button', { type: 'button', id: 'nav-add-client', class: 'nav-add' }, '+ Add new client'));
+    navAdd('nav-add-client', 'Add new client', 'Add a new client filter'));
   const toggle = document.getElementById('clients-toggle');
   // Global lives in this list now, so being on it is a reason to have the list open.
   const inClients = app.route && (app.route.name === 'clients' || app.route.name === 'global');
@@ -301,6 +319,13 @@ function renderNav(status) {
   markCurrent();
 }
 
+// "+ Add new ..." at the foot of a list; on the collapsed rail just "+", its action on hover (the
+// user, 2026-10-15).
+function navAdd(id, words, action) {
+  return h('button', { type: 'button', id, class: 'nav-add', title: action, 'aria-label': action },
+    h('span', { class: 'nav-add-plus', 'aria-hidden': 'true' }, '+'), h('span', { class: 'nav-add-text' }, ` ${words}`));
+}
+
 // The running sessions under Project Sessions, each a link to its chat (the user, 2026-10-06):
 // switching session used to mean scrolling up to the picker and back down to the conversation.
 // Redrawn only when the list changes, so a poll does not replace a link under the pointer.
@@ -312,6 +337,8 @@ function renderNavSessions(status) {
   const sig = running.map((s) => `${s.name}|${s.waiting ? 1 : 0}`).join('/');
   if (list.dataset.sig === sig) return;
   list.dataset.sig = sig;
+  // The way to make another one, at the foot of the list as under the clients (the user, 2026-10-15).
+  const add = navAdd('nav-add-session', 'Add new session', 'Add a new session: a project profile to name, give folders and start');
   list.replaceChildren(...running.map((s) => h('a', {
     href: `#/session/${encodeURIComponent(s.name)}/chat`, class: s.waiting ? 'waiting' : null,
     title: s.waiting ? `${s.name} is waiting on you` : `${s.name} - open its chat`,
@@ -320,7 +347,55 @@ function renderNavSessions(status) {
   // Collapsed to the icon rail, the first letter stands in for the name (the user, 2026-10-13: the
   // sessions vanished); the title gives the whole name on hover.
   h('span', { class: 'nav-session-initial', 'aria-hidden': 'true' }, s.name.slice(0, 1).toUpperCase()),
-  h('span', { class: 'nav-session-name' }, s.name))));
+  h('span', { class: 'nav-session-name' }, s.name))), add);
+}
+
+// The top menu's fly-outs (the user, 2026-10-15): in the top layout, the running sessions, the
+// clients and the wiki's pages are panels under their link rather than rows that widen the bar. CSS
+// shows a panel while its link or the panel is hovered (or focused); this lines each one up under its
+// link, and fills the wiki's list once.
+function setupTopFlyouts() {
+  const nav = document.getElementById('nav');
+  const pairs = [
+    [document.getElementById('group-sessions'), document.getElementById('nav-sessions')],
+    [document.getElementById('group-clients'), document.getElementById('nav-clients')],
+    [nav.querySelector('a[data-route=wiki]'), document.getElementById('nav-wiki')],
+  ];
+  const place = (trigger, panel) => {
+    if (!trigger || !panel || document.documentElement.dataset.layout !== 'top') return;
+    const room = window.innerWidth - nav.getBoundingClientRect().left - 8;
+    const left = Math.max(0, Math.min(trigger.offsetLeft, room - panel.offsetWidth));
+    panel.style.left = `${left}px`;
+  };
+  for (const [trigger, panel] of pairs) {
+    if (!trigger || !panel) continue;
+    for (const kind of ['mouseenter', 'focusin']) trigger.addEventListener(kind, () => place(trigger, panel));
+  }
+  // The clients panel also opens on its caret, as it always has; it lines up the same way.
+  const caret = document.getElementById('clients-toggle');
+  if (caret) caret.addEventListener('click', () => requestAnimationFrame(() => place(pairs[1][0], pairs[1][1])));
+  const wiki = document.getElementById('nav-wiki');
+  if (wiki) {
+    getJSON('/api/wiki-index').then((answer) => {
+      wiki.replaceChildren(...(answer.pages || []).map((page) => h('a', { href: `#/wiki/${encodeURIComponent(page)}` },
+        page.replace(/-/g, ' '))));
+    }).catch(() => {});
+  }
+}
+
+// "+ Add new session": the Session page, with the profile editor open on a new profile. Delegated,
+// as the list is rebuilt when the running sessions change. Said through sessionStorage so it works
+// whether the Session page is already showing or is drawn by the navigation.
+function setupAddSession() {
+  const list = document.getElementById('nav-sessions');
+  if (!list) return;
+  list.addEventListener('click', (event) => {
+    if (!event.target.closest('#nav-add-session')) return;
+    event.preventDefault();
+    try { sessionStorage.setItem('aicleaner.addSession', '1'); } catch (e) { /* the event still does it */ }
+    if (app.route && app.route.name === 'session') window.dispatchEvent(new CustomEvent('aicleaner:add-session'));
+    else window.location.hash = '#/session';
+  });
 }
 
 function markCurrent() {
@@ -360,6 +435,30 @@ function setupNavToggle() {
       localStorage.setItem('aicleaner.nav', rail ? 'full' : 'rail');
     } catch (e) { /* private window or policy: it just will not be remembered */ }
     say();
+  });
+}
+
+// The running sessions fold away on their caret, as the clients do; open unless folded on this
+// browser before (the user, 2026-10-15: open by default).
+function setupSessionsToggle() {
+  const toggle = document.getElementById('sessions-toggle');
+  const list = document.getElementById('nav-sessions');
+  if (!toggle || !list) return;
+  toggle.append(icon('chevron'));
+  const paint = () => {
+    const open = !list.hidden;
+    toggle.setAttribute('aria-expanded', String(open));
+    const what = open ? 'Hide running sessions' : 'Show running sessions';
+    toggle.setAttribute('aria-label', what);
+    toggle.title = what;
+  };
+  list.hidden = readPref('aicleaner.sessions-open', 'yes') === 'no';
+  paint();
+  toggle.addEventListener('click', (event) => {
+    event.stopPropagation();
+    list.hidden = !list.hidden;
+    writePref('aicleaner.sessions-open', list.hidden ? 'no' : 'yes');
+    paint();
   });
 }
 
@@ -500,6 +599,9 @@ async function start() {
   setupPrefs();
   setupNavToggle();
   setupClientsToggle();
+  setupAddSession();
+  setupSessionsToggle();
+  setupTopFlyouts();
   watchTables(document.getElementById('page'));
   window.addEventListener('hashchange', guardedRoute);
   // A page that rewrote the address for what it shows (the session page, D118) has already drawn

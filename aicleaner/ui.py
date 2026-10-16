@@ -122,7 +122,7 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # this lets through what tokenising has already been applied to, one refusal at a
                    # time, each one logged with its context and the person who turned it on.
                    "canary.fail_open",
-                   "highlight.terminal", "session.enabled",
+                   "highlight.terminal", "session.enabled", "session.max_running", "update.auto",
                    "detect.auto_map_client_resources",
                    "detect.near_miss", "detect.placeholder_kinds",
                    # Accepted from Review's offer, which is where triage happens - on the phone as
@@ -1636,6 +1636,15 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         text = await asyncio.to_thread(path.read_text, encoding="utf-8")
         return web.json_response({"page": page, "text": text})
 
+    async def wiki_index(request: web.Request) -> web.Response:
+        """The wiki's page names, Home first then A to Z: the top menu's "?" lists them (2026-10-15)."""
+        folder = Path(__file__).resolve().parent.parent / "docs" / "wiki"
+        names = sorted((p.stem for p in folder.glob("*.md") if WIKI_PAGE.fullmatch(p.stem)), key=str.lower)
+        if "Home" in names:
+            names.remove("Home")
+            names.insert(0, "Home")
+        return web.json_response({"pages": names})
+
     async def others_additions(request: web.Request) -> web.Response:
         """Forms someone else added to a shared client, not yet kept on this PC (DECISIONS 67)."""
         return web.json_response({"me": mf.author,
@@ -2218,6 +2227,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             proxy.notifier.footer_enabled = proxy.cfg.notify_footer
             proxy.notifier.toast_enabled = proxy.cfg.notify_toast
             await proxy.apply_session_enabled()
+            # The running host takes a new limit at once (2026-10-16); lowering it stops nothing.
+            if proxy.session is not None:
+                proxy.session.max_running = proxy.cfg.session_max_running
             # One control (feature 36). The setting governs the pipe and the CLAUDE.md rule
             # governs the agent, and only the rule is in front of the model - so leaving them to
             # disagree meant the setting appeared to do nothing. Flipping it rewrites the block.
@@ -2277,6 +2289,29 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(ValueError("this proxy was not started from an installed config; restart it by hand"))
         try:
             log_path = restart(proxy.cfg.path.parent, proxy.cfg.port, Path(proxy.cfg.log_dir))
+        except RestartError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True, "log": str(log_path)})
+
+    # ---- updates (2026-10-16) ----------------------------------------------------------------------
+
+    async def updates_info(request: web.Request) -> web.Response:
+        """Installed and available. `?check=1` asks the repository now rather than within the hour."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        return web.json_response(await proxy.update_info(force=request.query.get("check") == "1"))
+
+    async def updates_apply(request: web.Request) -> web.Response:
+        """Update now: the installed Deploy-AiCleaner.ps1 -Action Update, handed off. On this machine
+        only - it runs the installer, as the setup wizard does (guard.REMOTE_REFUSED_PREFIXES)."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        if request.get(REMOTE):
+            return err(ValueError("Update now runs the installer, so it is offered on the machine aicleaner "
+                                  "runs on; through the tunnel, turn on Update automatically instead"), status=403)
+        from .restart import RestartError
+        try:
+            log_path = proxy.start_update()
         except RestartError as exc:
             return err(exc, status=409)
         return web.json_response({"ok": True, "log": str(log_path)})
@@ -2871,6 +2906,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/clients/join", join_client)
     app.router.add_post("/api/clients/{cid}/index", renumber_client)
     app.router.add_get("/api/additions", others_additions)
+    app.router.add_get("/api/wiki-index", wiki_index)
     app.router.add_get("/api/wiki/{page}", wiki_page)
     app.router.add_post("/api/additions", answer_addition)
     app.router.add_post("/api/mapping/form", add_form)
@@ -2890,6 +2926,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/codetab", codetab_get)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
+    app.router.add_get("/api/updates", updates_info)
+    app.router.add_post("/api/updates/apply", updates_apply)
     app.router.add_get("/api/setup/dns", setup_dns)
     app.router.add_post("/api/setup/enable", setup_enable)
     app.router.add_get("/api/client-drafts", draft_list)

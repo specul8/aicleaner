@@ -519,13 +519,24 @@ function entryRow(cid, form, reason, readOnly) {
   return tr;
 }
 
-function addEntryForm(cid) {
-  const real = h('input', { type: 'text', name: 'real', placeholder: 'real identifier', 'aria-label': 'Real identifier' });
-  const token = h('input', { type: 'text', name: 'token', placeholder: 'token (blank = automatic)', 'aria-label': 'Token' });
-  const submit = h('button', { type: 'submit', class: 'primary' }, icon('plus'), 'Add entry');
+// The add half of the box at the top of the entries (the user, 2026-10-15): `real` is the filter.
+// Add is offered only for something not already an entry, so a name found is never added twice.
+function addEntryForm(cid, real, table) {
+  const token = h('input', { type: 'text', name: 'token', class: 'add-token', placeholder: 'token (blank = automatic)', 'aria-label': 'Token' });
+  const submit = h('button', { type: 'submit', class: 'primary' }, icon('plus'), 'Add');
   const message = h('span', { class: 'error-text' });
   const form = h('form', { class: 'add-entry form-row' }, real, token, submit, message);
-  const check = () => validity([real, token], message, submit);
+  const check = () => {
+    if (!validity([real, token], message, submit)) return false;
+    const typed = real.value.trim().toLowerCase();
+    const there = [...table.querySelectorAll('tr.entry')].some((tr) => (tr.dataset.real || '').toLowerCase() === typed);
+    if (there) {
+      submit.disabled = true;
+      message.textContent = 'Already an entry of this client - it is the row showing below.';
+    }
+    submit.title = submit.disabled ? '' : `Add "${real.value.trim()}" to this client's entries`;
+    return !submit.disabled;
+  };
   real.addEventListener('input', check);
   token.addEventListener('input', check);
   check();
@@ -536,9 +547,9 @@ function addEntryForm(cid) {
       await postJSON('/api/mapping/form', { client: cid, real: real.value.trim(), token: token.value.trim() || null });
       const added = real.value.trim();
       await reloadClient(cid, { saved: added });
-      // Back to the left-hand box, ready for the next one: entering a list of identifiers should
-      // feel like filling in a spreadsheet, not like clicking into the same field a hundred times.
-      focusFirst('form.add-entry');
+      // Back to the box, ready for the next one: entering a list of identifiers should feel like
+      // filling in a spreadsheet, not like clicking into the same field a hundred times.
+      focusFirst(`section.client[data-client-id="${CSS.escape(cid)}"] form.add-entry`);
     } catch (error) {
       sayError(error, refusalHandlers(cid));
     }
@@ -958,7 +969,12 @@ function bulkEntries(cid, table) {
 }
 
 function tools(cid, clientView, table, readOnly) {
-  const filter = h('input', { type: 'search', class: 'entry-filter', placeholder: 'Filter entries (real value, token, kind, ignored)', 'aria-label': 'Filter entries' });
+  // One box to find an entry or add it (the user, 2026-10-15): it filters as before, and when no
+  // entry is exactly what was typed, Add beside it makes one. Named "real" so it is the add form's
+  // real identifier; a query typed and not added is not unsaved work, so it is not tracked (D98).
+  const filter = h('input', { type: 'search', name: 'real', class: 'entry-filter', 'data-unsaved-ignore': '',
+    placeholder: readOnly ? 'Filter entries (real value, token, kind, ignored)' : 'Filter entries, or type a new one and Add it',
+    'aria-label': readOnly ? 'Filter entries' : 'Filter entries, or a new real identifier to add' });
   filter.addEventListener('input', () => {
     const q = filter.value.trim().toLowerCase();
     for (const tr of table.querySelectorAll('tr.entry')) {
@@ -1009,7 +1025,7 @@ function tools(cid, clientView, table, readOnly) {
     }))
     : null;
 
-  const bar = h('div', { class: 'tools' }, filter, kindToggles);
+  const bar = h('div', { class: 'tools' }, readOnly ? filter : addEntryForm(cid, filter, table), kindToggles);
   // The headings stick BELOW the bar, so they need its height. Measured rather than assumed,
   // because the bar wraps to two lines on a narrow window and to one on a wide one, and a wrong
   // offset either overlaps the first row or leaves a gap the rows scroll through (32).
@@ -1177,12 +1193,11 @@ async function loadBody(cid, body) {
     h('tbody', {}, listed.map(({ form, i }) => entryRow(cid, form, reasonFor(form, i), readOnly))));
   const entriesCard = h('div', { class: 'card' }, tools(cid, clientView, table, readOnly),
     readOnly ? h('p', { class: 'hint' }, 'Showing the last good version, read-only until the file is restored or fixed.') : null,
-    clientView.forms.length ? table : h('p', { class: 'empty' }, 'No entries yet.'),
-    readOnly ? null : addEntryForm(cid));
+    clientView.forms.length ? table : h('p', { class: 'empty' }, 'No entries yet - type one in the box above and Add it.'));
   if (!clientView.forms.length) entriesCard.append(h('table', { class: 'entries', hidden: true }));
   const scopeValues = ((ignores.scopes || {})[cid === 'global' ? 'global' : cid]) || [];
   // Global is not an engagement, so there is no repo of theirs to scan for it.
-  const scanCard = cid === 'global' ? null : scanBlock(cid);
+  const scanCard = cid === 'global' ? null : scanBlock(cid, displayName(row));
   // setChildren, not replaceChildren: on Global scanCard and keyCard are null by design, and the
   // native method turns a non-Node into a text node, reading as 'nullnull' (D46). h() drops null,
   // and setChildren drops what h() drops.
@@ -1212,7 +1227,12 @@ function emailRulesCard(cid, rules, forms, readOnly) {
       await reloadClient(cid);
     } catch (error) { button.disabled = false; sayError(error); }
   };
-  const rows = [...new Set([...rules.map((r) => r.domain), ...domains])].sort().map((domain) => {
+  const all = [...new Set([...rules.map((r) => r.domain), ...domains])].sort();
+  // Up front, only what needs a decision (the user, 2026-10-15): a domain with addresses listed here
+  // and no rule yet. Rules already made, and domains with no addresses, are folded away below.
+  const pending = all.filter((domain) => !ruled.has(domain) && at(domain) > 0);
+  const rest = all.filter((domain) => !pending.includes(domain));
+  const rowFor = (domain) => {
     const on = ruled.has(domain);
     const button = h('button', { type: 'button', class: on ? 'email-rule-off' : 'email-rule-on', disabled: readOnly },
       on ? 'Remove rule' : 'Make a rule');
@@ -1222,11 +1242,19 @@ function emailRulesCard(cid, rules, forms, readOnly) {
       h('td', {}, h('code', {}, `*@${domain}`)),
       h('td', {}, on ? `${count} address${count === 1 ? '' : 'es'}, not listed one by one` : `no rule - ${count} address${count === 1 ? '' : 'es'} listed below`),
       h('td', { class: 'actions' }, button));
-  });
+  };
+  const made = rest.filter((domain) => ruled.has(domain)).length;
+  const empty = rest.length - made;
+  const folded = rest.length ? h('details', { class: 'email-rules-more' },
+    h('summary', {}, [made ? `${made} rule${made === 1 ? '' : 's'} made` : '',
+      empty ? `${empty} domain${empty === 1 ? '' : 's'} with no addresses yet` : ''].filter(Boolean).join(', ')),
+    h('table', { class: 'entries email-rules-table' }, h('tbody', {}, rest.map(rowFor)))) : null;
   return h('div', { class: 'card email-rules' },
     h('h3', {}, 'Email rules'),
     h('p', { class: 'hint' }, 'A rule says every address at the domain is this client\'s: each is replaced the first time it is seen, whatever the email setting, with a token that is the same on every machine sharing this client. Addresses already here keep their tokens. Removing a rule lists them again; nothing is deleted.'),
-    h('table', { class: 'entries email-rules-table' }, h('tbody', {}, rows)));
+    pending.length ? h('table', { class: 'entries email-rules-table' }, h('tbody', {}, pending.map(rowFor)))
+      : h('p', { class: 'hint' }, 'Nothing to decide: no domain here has addresses listed without a rule.'),
+    folded);
 }
 
 async function reloadClient(cid, opts = {}) {

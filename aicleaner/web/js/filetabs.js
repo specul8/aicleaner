@@ -344,15 +344,46 @@ export function fileTabs(ctx) {
       const answer = await postJSON('/api/session/file/stat', {
         name: ctx.name(), files: s.tabs.map((t) => ({ root: t.root, path: t.path })) });
       let changed = false;
+      const fresh = [];
       for (const found of answer.files || []) {
         const tab = s.tabs.find((t) => t.root === found.root && t.path === found.path);
         if (!tab || !tab.data) continue;
         const gone = !found.exists;
         const stale = !gone && found.modified > tab.modified;
+        // Nothing of the reader's to lose (the user, 2026-10-16): reload at once rather than offer
+        // Reload. Edits in progress (unsaved, saving, conflict) keep the chip and the conflict bar.
+        if (stale && (!tab.editor || (tab.saveState === 'saved' && !tab.saving))) { fresh.push(tab); continue; }
         if (gone !== tab.gone || stale !== tab.stale) { tab.gone = gone; tab.stale = stale; changed = true; }
       }
       if (changed) paint();
+      for (const tab of fresh) await reloadInPlace(tab);
     } catch (error) { /* a missed check is caught by the next one */ }
+  }
+
+  // A fresh read that leaves the reader where they were: the scroll position, and in the editor
+  // the caret and the focus, as near as the new text allows.
+  function scrollerOf(tab) {
+    if (tab.editor && ctx.pane.contains(tab.editor)) return tab.editor;
+    return ctx.pane.querySelector('.file-scroll') || ctx.pane.querySelector('.file-body');
+  }
+
+  async function reloadInPlace(tab) {
+    const shown = activeTab() === tab ? scrollerOf(tab) : null;
+    const box = tab.editor;
+    const keep = shown ? {
+      top: shown.scrollTop,
+      caret: box ? [box.selectionStart, box.selectionEnd] : null,
+      focused: Boolean(box) && document.activeElement === box,
+    } : null;
+    await load(tab);
+    if (!keep || activeTab() !== tab) return;
+    const again = scrollerOf(tab);
+    if (again) again.scrollTop = keep.top;
+    if (keep.caret && tab.editor) {
+      const end = tab.editor.value.length;
+      tab.editor.setSelectionRange(Math.min(keep.caret[0], end), Math.min(keep.caret[1], end));
+      if (keep.focused) tab.editor.focus({ preventScroll: true });
+    }
   }
 
   function startChecking() {

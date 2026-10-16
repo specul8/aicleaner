@@ -248,21 +248,46 @@ function emails(wiz, { changed, go }) {
     nextButton(go)];
 }
 
+// "Select all" above a list of tick boxes (the user, 2026-10-15: "much easier to tick 1 than 30").
+// Ticks or clears every box through its own change handler, so each is recorded as if clicked; shows
+// a dash when only some are ticked, and follows the boxes as they are clicked one by one.
+function selectAll(boxes) {
+  const all = h('input', { type: 'checkbox', class: 'wizard-select-all' });
+  const sync = () => {
+    const ticked = boxes.filter((b) => b.checked).length;
+    all.checked = boxes.length > 0 && ticked === boxes.length;
+    all.indeterminate = ticked > 0 && ticked < boxes.length;
+  };
+  all.addEventListener('change', () => {
+    const want = all.checked;
+    for (const box of boxes) {
+      if (box.checked !== want) { box.checked = want; box.dispatchEvent(new Event('change')); }
+    }
+    sync();
+  });
+  for (const box of boxes) box.addEventListener('change', sync);
+  sync();
+  return h('label', { class: 'check wizard-select-all-row' }, all, h('b', {}, ' Select all'));
+}
+
 function others(wiz, { changed, go, paint }) {
   const d = wiz.draft;
   const suggestions = Object.values(wiz.lookups).flatMap((l) => (l.suggestions || []).map((s) => ({ ...s, from: l.domain })));
   const target = (s) => (s.kind === 'domain' ? d.domains : s.kind === 'name' ? d.names : d.urls);
+  const boxes = [];
+  const rows = suggestions.map((s) => {
+    const box = h('input', { type: 'checkbox', checked: target(s).includes(s.value) });
+    box.addEventListener('change', () => {
+      const list = target(s);
+      if (box.checked && !list.includes(s.value)) list.push(s.value);
+      if (!box.checked && list.includes(s.value)) list.splice(list.indexOf(s.value), 1);
+      changed();
+    });
+    boxes.push(box);
+    return h('label', { class: 'check' }, box, ` ${s.value} `, h('span', { class: 'hint' }, `(${kindLabel(s.kind)}: ${s.why}, from ${s.from})`));
+  });
   const ticks = suggestions.length ? h('fieldset', { class: 'wizard-suggestions' }, h('legend', {}, 'Found at Microsoft - tick what is theirs'),
-    ...suggestions.map((s) => {
-      const box = h('input', { type: 'checkbox', checked: target(s).includes(s.value) });
-      box.addEventListener('change', () => {
-        const list = target(s);
-        if (box.checked && !list.includes(s.value)) list.push(s.value);
-        if (!box.checked && list.includes(s.value)) list.splice(list.indexOf(s.value), 1);
-        changed();
-      });
-      return h('label', { class: 'check' }, box, ` ${s.value} `, h('span', { class: 'hint' }, `(${kindLabel(s.kind)}: ${s.why}, from ${s.from})`));
-    })) : null;
+    suggestions.length > 1 ? selectAll(boxes) : null, ...rows) : null;
   return [
     h('h2', {}, 'Other identifiers'),
     h('p', {}, 'Anything else that points at this client alone: the Azure DevOps organisation (dev.azure.com/<org>), '
@@ -282,16 +307,20 @@ function scan(wiz, { changed, go, paint }) {
     if (!wiz.finds) return;
     if (!wiz.finds.length) { setChildren(results, h('p', { class: 'hint' }, 'Nothing new turned up.')); return; }
     const kinds = [...new Set(wiz.finds.map((f) => f.kind))];
-    setChildren(results, ...kinds.map((kind) => h('fieldset', {}, h('legend', {}, kindLabel(kind)),
-      ...wiz.finds.filter((f) => f.kind === kind).map((f) => {
+    setChildren(results, ...kinds.map((kind) => {
+      const boxes = [];
+      const rows = wiz.finds.filter((f) => f.kind === kind).map((f) => {
         const box = h('input', { type: 'checkbox', checked: d.found.includes(f.value) });
         box.addEventListener('change', () => {
           if (box.checked && !d.found.includes(f.value)) d.found.push(f.value);
           if (!box.checked) d.found = d.found.filter((v) => v !== f.value);
           changed();
         });
+        boxes.push(box);
         return h('label', { class: 'check wizard-find' }, box, ` ${f.value} `, h('span', { class: 'hint' }, `(${f.count}x${f.theirs ? ', carries their name' : ''})`));
-      }))));
+      });
+      return h('fieldset', {}, h('legend', {}, kindLabel(kind)), rows.length > 1 ? selectAll(boxes) : null, ...rows);
+    }));
   };
   run.addEventListener('click', async () => {
     run.disabled = true;

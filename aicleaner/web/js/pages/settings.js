@@ -4,7 +4,7 @@
 
 import { getJSON, postJSON, say, sayError } from '../api.js';
 import { h, icon, kindLabel, savingButton, shortTime } from '../dom.js';
-import { displayName } from '../app.js';
+import { displayName, setMenuLayout } from '../app.js';
 import { rebase, track } from '../unsaved.js';
 import { forgetKey, isSealed } from '../sealed.js';
 import { forgetPreviewChoice } from '../previewjump.js';
@@ -77,11 +77,12 @@ function paintCards() {
   // The same page near and far while the filter is being debugged (see ui.REMOTE_SETTINGS).
   const everyday = [
     view.config.remote ? null : setupCard(),
+    menuLayoutCard(),
     loggingCard(s), notificationsCard(s, Boolean(view.config.remote)), kindsCard(s, kinds),
     nearMissCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
     view.config.windows ? bashGuardCard(s) : null,
     view.config.windows && !view.config.remote ? codeTabCard(s) : null,
-    toolsCard(s), routingCard(), restartCard(),
+    toolsCard(s), routingCard(), restartCard(), updatesCard(s),
     foldersCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
     contactCard(status.contact), editorCard(s), autocorrectCard(s), diagnosticsCard(s, status),
@@ -95,6 +96,39 @@ function paintCards() {
   const dangerous = [bypassCard(s), imagesCard(s), failOpenCard(s)];
   view.cards = [...everyday, ...dangerous].filter(Boolean);   // a card with nothing to show is null
   dealCards(view.host, view.cards);
+}
+
+// A button per card at the top of the page (the user, 2026-10-15: "too hard to find things"): its
+// title on the button, its description on hover, and a click goes straight to it - as a link to
+// #/settings/<card> does. In the page's own order, so the dangerous ones are last here too.
+function paintJump() {
+  if (!view.jump) return;
+  view.jump.replaceChildren(...view.cards.map((section) => {
+    const key = section.dataset.card;
+    const title = (section.querySelector(':scope > h2') || {}).textContent || key;
+    const hint = (section.querySelector(':scope > p.hint') || {}).textContent || '';
+    const button = h('button', { type: 'button', class: `chip settings-jump-to${section.classList.contains('bad') ? ' bad' : ''}`,
+      dataset: { card: key }, title: hint || title }, title);
+    button.addEventListener('click', () => showCard(key));
+    return button;
+  }));
+}
+
+// Where the menu sits (the user, 2026-10-15: moved here from the header's display button). A choice
+// for this browser, kept in its storage like the theme, so it applies at once and needs no Save. A
+// phone has the menu across the top whatever is chosen (D48).
+function menuLayoutCard() {
+  let current = 'side';
+  try { current = localStorage.getItem('aicleaner.layout') === 'top' ? 'top' : 'side'; } catch (e) { /* default */ }
+  const choice = (value, label) => h('label', {}, h('input', { type: 'radio', name: 'menu-layout', value,
+    checked: current === value ? true : null }), label);
+  const group = h('div', { class: 'segmented' }, choice('side', 'Side'), choice('top', 'Top'));
+  group.addEventListener('change', (event) => {
+    setMenuLayout(event.target.value);
+    say(`The menu is ${event.target.value === 'top' ? 'across the top' : 'down the side'} now (this browser).`, 'ok');
+  });
+  return card('menu-layout', 'Menu layout', 'Where the menu sits: down the side, or across the top. For this browser; applies at once.',
+    [group], null);
 }
 
 // The setup wizard (feature 106), opened again from here: on this machine only, as it runs its scripts.
@@ -389,10 +423,17 @@ function kindsCard(s, kinds) {
 // The Session page, on or off, now: switching it off stops every session running from it.
 function sessionCard(s) {
   const on = checkbox('session', 'Drive Claude Code sessions from the Session page', s['session.enabled']);
+  // How many may run at once (the user, 2026-10-16): 4 by default, 0 for no cap.
+  const most = h('input', { type: 'number', name: 'max_running', min: '0', max: '64', step: '1',
+    value: String(s['session.max_running'] ?? 4) });
   return card('session', 'Session page',
     'On: the Session page can start Claude Code on this machine in your profiles\' folders, with every request filtered and every action waiting for your approval. Through the tunnel it works from your phone. Off: the page and its API refuse, and switching it off stops any session that is running. Takes effect straight away.',
-    [h('div', { class: 'form-row' }, on)],
-    () => ({ 'session.enabled': on.querySelector('input').checked }));
+    [h('div', { class: 'form-row' }, on),
+      h('div', { class: 'form-row' }, h('label', { class: 'field' },
+        'Sessions running at once (0 = no cap; the machine is the limit). Lowering it stops nothing - it only refuses new starts until enough have stopped.', most))],
+    () => ({ 'session.enabled': on.querySelector('input').checked,
+      // A cleared box is the default, never "no cap" by accident.
+      'session.max_running': most.value.trim() === '' ? 4 : Math.max(0, Math.floor(Number(most.value) || 0)) }));
 }
 
 // The encrypted tunnel (feature 21, DECISIONS 57 and 60): on or off, where a device keeps the key,
@@ -656,6 +697,69 @@ function routingCard() {
         : 'Nothing has come through since the proxy started.')], null);
 }
 
+// Version and updates (2026-10-16): what is installed, the newest release on the repository it came
+// from, Update now (the installed Deploy-AiCleaner.ps1 -Action Update, handed off as Restart is), and
+// whether the proxy installs a newer release on its own.
+function updatesCard(s) {
+  const installedLine = h('p', { class: 'updates-installed' }, 'Installed: ...');
+  const availableLine = h('p', { class: 'updates-available' }, 'Checking for a newer release...');
+  const checkedLine = h('p', { class: 'hint updates-checked' });
+  const check = h('button', { type: 'button', class: 'updates-check' }, 'Check now');
+  const apply = h('button', { type: 'button', class: 'primary updates-apply', hidden: true }, 'Update now');
+  const auto = checkbox('update-auto', 'Update automatically (every 6 hours, when no session is mid-turn)', s['update.auto']);
+  const show = (info) => {
+    const from = info.repo ? ` - from ${info.repo}${info.ref ? ` (${info.ref})` : ''}` : '';
+    installedLine.textContent = `Installed: v${info.version}${from}`;
+    availableLine.className = `updates-available${info.newer ? ' ok' : ''}`;
+    availableLine.textContent = info.error ? `Could not check: ${info.error}`
+      : info.updating ? 'An update is under way - see logs/update.log.'
+        : info.newer ? `${info.latest} is available.` : info.latest ? `Up to date (newest release: ${info.latest}).` : 'No releases found.';
+    checkedLine.textContent = info.checked_at ? `Last checked ${shortTime(new Date(info.checked_at * 1000).toISOString())}.` : '';
+    // Not offered through the tunnel: it runs the installer (Update automatically is).
+    apply.hidden = !info.newer || info.updating || Boolean(view.config && view.config.remote);
+    apply.textContent = info.newer ? `Update now to ${info.latest}` : 'Update now';
+  };
+  const load = (force) => getJSON(`/api/updates${force ? '?check=1' : ''}`).then(show)
+    .catch((error) => { availableLine.textContent = `Could not check: ${error.message || error}`; });
+  check.addEventListener('click', async () => { check.disabled = true; await load(true); check.disabled = false; });
+  apply.addEventListener('click', async () => {
+    apply.disabled = true;
+    const was = view.ctx.status && view.ctx.status.started_at;
+    try {
+      await postJSON('/api/updates/apply', {});
+      say('Updating: Deploy-AiCleaner.ps1 -Action Update. The page reloads when the new version answers.', 'ok');
+      await waitForNewProxy(was);
+      window.location.reload();
+    } catch (error) {
+      sayError(error);
+      apply.disabled = false;
+    }
+  });
+  load(false);
+  return card('updates', 'Version and updates',
+    'Updates come from the repository this install came from: the newest vX.Y.Z release there. Update now runs the installer\'s own update (Deploy-AiCleaner.ps1 -Action Update) on this machine, which stops the proxy, installs the release and starts it again; sessions carry on. Output goes to logs/update.log.',
+    [installedLine, availableLine, h('div', { class: 'form-row' }, check, apply), checkedLine,
+      h('div', { class: 'form-row' }, auto)],
+    () => ({ 'update.auto': auto.querySelector('input').checked }));
+}
+
+// After an update: wait for a proxy that started after the one that was running (the old one keeps
+// answering while the installer downloads), for up to ten minutes.
+async function waitForNewProxy(startedAt) {
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    await new Promise((resolve) => { setTimeout(resolve, 2000); });
+    try {
+      const response = await fetch('/api/status', { cache: 'no-store' });
+      if (response.ok) {
+        const status = await response.json();
+        if (!startedAt || (status.started_at && status.started_at !== startedAt)) return;
+      }
+    } catch (error) {
+      // stopped for the install, or starting
+    }
+  }
+}
+
 async function waitForProxy() {
   // Give the old process time to go, then wait for the new one to answer.
   await new Promise((resolve) => { setTimeout(resolve, 3000); });
@@ -817,8 +921,10 @@ export async function render(main, ctx) {
     return;
   }
   view.host = h('div', { class: 'settings-columns' });
-  main.append(view.host);
+  view.jump = h('nav', { class: 'settings-jump', 'aria-label': 'Go to a setting' });
+  main.append(view.jump, view.host);
   paintCards();
+  paintJump();
   showCard(ctx.route && ctx.route.id);
   // One listener for the life of the page module, which does nothing once this page has been
   // navigated away from: the alternative is a teardown hook the router does not have.

@@ -381,7 +381,7 @@ def cmd_preflight(cfg: Config, root: str, min_count: int, add_to: str, queue: st
     if folders:
         for folder in folders:
             sessions = len(list(folder.glob("*.jsonl")))
-            print(f"  history: {folder.name}  ({sessions} session{'s' if sessions != 1 else ''})")
+            print(f"  history: {folder}  ({sessions} session{'s' if sessions != 1 else ''})")
     else:
         print("  history: none found under %USERPROFILE%\\.claude\\projects (nothing has been "
               "worked on here with Claude Code yet)")

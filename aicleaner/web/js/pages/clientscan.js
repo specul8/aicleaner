@@ -18,12 +18,12 @@ function host() {
 }
 
 const ACTIONS = [
-  ['scan', 'add', 'Scan and map',
+  ['scan', 'add', 'Scan Repo and map',
    'Reads the folder and maps every high-confidence find to this client. Writes to the mapping.'],
-  ['preflight', 'add', 'Preflight and map',
+  ['preflight', 'add', 'Scan Repo + Previous Chats and map',
    'The same, over the folder AND the Claude Code history for it - so picking up existing work '
    + 'does not send a first request full of identifiers the mapping has never seen.'],
-  ['scan', 'queue', 'Scan for review',
+  ['scan', 'queue', 'Scan Repo for review',
    'Reads the folder and puts the finds in Review, already marked as this client\'s, to decide '
    + 'by hand. Writes nothing to the mapping.'],
 ];
@@ -62,7 +62,22 @@ function progressBlock(job) {
       + (job.now ? ` - reading ${job.now}` : '')));
 }
 
-function report(job) {
+// What the scan did with what it found, in the success message (the user, 2026-10-15): "Scan
+// completed successfully. 15 reals added to the Fabrikam client filter."
+function outcomeText(job, clientName) {
+  const n = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+  if (job.mode === 'add') {
+    return job.added ? `${n(job.added, 'real', 'reals')} added to the ${clientName} client filter.`
+      : `Nothing new to add to the ${clientName} client filter.`;
+  }
+  if (job.mode === 'queue') {
+    return job.queued ? `${n(job.queued, 'find', 'finds')} sent to Review, marked as ${clientName}'s.`
+      : 'Nothing new to send to Review.';
+  }
+  return '';
+}
+
+function report(job, clientName) {
   if (!job) return h('p', { class: 'hint' }, 'Nothing scanned yet.');
   if (job.state === 'running') {
     return h('div', {},
@@ -70,16 +85,19 @@ function report(job) {
       progressBlock(job));
   }
   // Only finished jobs reach here: the states that are still going returned above.
-  const head = h('p', { class: `chip ${job.state === 'failed' ? 'bad' : 'ok'}` },
-    `${job.kind} of ${job.folder}: ${job.state}`);
+  const failed = job.state === 'failed';
+  const head = h('p', { class: `chip ${failed ? 'bad' : 'ok'} scan-outcome` },
+    failed ? `The scan failed.` : `Scan completed successfully. ${outcomeText(job, clientName || job.client)}`);
   return h('div', {},
     head,
+    // The whole path, not just the folder's name (the user, 2026-10-15).
+    h('p', { class: 'hint scan-folder' }, 'Repo folder: ', h('span', { class: 'mono' }, job.folder)),
     job.error ? h('p', { class: 'error-text' }, job.error) : null,
     job.lines && job.lines.length ? h('pre', { class: 'mono scan-report' }, job.lines.join('\n')) : null,
     job.truncated ? h('p', { class: 'hint' }, 'Report shortened; the full one is in the terminal.') : null);
 }
 
-export function scanBlock(cid) {
+export function scanBlock(cid, clientName = cid) {
   const folder = h('input', {
     type: 'text', name: 'folder', class: 'wide',
     placeholder: 'C:\\Repos\\their-project   (quotes are fine)',
@@ -93,7 +111,7 @@ export function scanBlock(cid) {
   // visible reason is indistinguishable from a dead page: that is how three buttons ended up doing
   // nothing, silently, after the proxy was restarted and took the job with it.
   const show = (job) => {
-    out.replaceChildren(report(job));
+    out.replaceChildren(report(job, clientName));
     const busy = Boolean(job && job.state === 'running');
     for (const button of buttons) button.disabled = busy;
   };

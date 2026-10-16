@@ -37,7 +37,7 @@ from .config import Config, session_profiles
 from .attachments import scrub
 from .convert import image_converter, pdftotext_converter
 from .contact import ContactSource
-from . import bashguard, codetab_settings, deliver, rules, who
+from . import bashguard, codetab_settings, deliver, rules, updates, who
 from .codetab import CODETAB, CodeTab
 from .codetab_ca import Authority, AuthorityError
 from .guard import REMOTE, make_guard
@@ -223,6 +223,9 @@ class Proxy:
                             home=Path(client_home) if client_home else None)
         # The Claude Desktop app's Code tab (feature 117): its listeners while the switch is on.
         self.codetab: CodeTab | None = None
+        # Updates from the Settings page (2026-10-16): the last check, and update.auto's loop.
+        self.updates = updates.UpdateState()
+        self._auto_update: asyncio.Task | None = None
         self.codetab_error = ""
         # Candidates are per host: the folder may be OneDrive-synced between machines.
         self.store = (CandidateStore(Path(cfg.mapping).parent / f"candidates-{evidence.host}.jsonl")
@@ -920,6 +923,53 @@ class Proxy:
                 await self.session.reattach_all()
             except Exception as exc:  # noqa: BLE001 - a proxy that cannot re-attach still starts
                 log.warning("could not re-attach running sessions: %s", exc)
+        self._auto_update = asyncio.create_task(self._auto_update_loop())
+
+    # ---- updates (2026-10-16) ---------------------------------------------------------------------
+
+    def install_root(self) -> Path | None:
+        return self.cfg.path.parent if self.cfg.path else None
+
+    async def update_info(self, force: bool = False) -> dict[str, Any]:
+        """Installed and available, checked at most hourly unless forced."""
+        mine = updates.installed(root=self.install_root())
+        await asyncio.to_thread(self.updates.check, mine["repo"], force)
+        return self.updates.view(mine, self.cfg.update_auto)
+
+    def busy_sessions(self) -> list[str]:
+        if self.session is None:
+            return []
+        return [name for name, s in self.session.sessions.items() if s.running and s.busy]
+
+    def start_update(self) -> Path:
+        """Hand the update off. Refused mid-turn, and while one is already under way."""
+        root = self.install_root()
+        if root is None:
+            raise updates.RestartError("this proxy was not started from an installed config; update it by hand")
+        busy = self.busy_sessions()
+        if busy:
+            raise updates.RestartError(f"{', '.join(busy)} {'is' if len(busy) == 1 else 'are'} in the middle of "
+                                       "a turn; update when the turn has finished")
+        if self.updates.view(updates.installed(root=root), self.cfg.update_auto)["updating"]:
+            raise updates.RestartError("an update is already under way; see logs/update.log")
+        log_path = updates.start_update(root, Path(self.cfg.log_dir))
+        self.updates.started_at = time.time()
+        log.info("update handed off to Deploy-AiCleaner.ps1 -Action Update (log: %s)", log_path)
+        return log_path
+
+    async def _auto_update_loop(self) -> None:
+        """update.auto: every six hours, a newer release with no turn in progress is installed."""
+        while True:
+            await asyncio.sleep(updates.AUTO_EVERY_S)
+            if not self.cfg.update_auto:
+                continue
+            try:
+                info = await self.update_info(force=True)
+                if info["newer"] and not self.busy_sessions():
+                    log.info("update.auto: %s is available (running %s); updating", info["latest"], info["version"])
+                    self.start_update()
+            except Exception as exc:  # noqa: BLE001 - a failed check waits for the next one
+                log.warning("update.auto: %s", exc)
 
     def _add_forms(self, items: list[tuple[str, str, str]]) -> list[dict[str, str]]:
         """Auto-add every form, (client, value, kind) each; run in a thread. No cap (DECISIONS 38):
@@ -988,6 +1038,9 @@ class Proxy:
             await host.stop_all()
 
     async def _stop(self, app: web.Application) -> None:
+        if self._auto_update is not None:
+            self._auto_update.cancel()
+            self._auto_update = None
         if self.codetab is not None:
             await self.codetab.stop()
             self.codetab = None

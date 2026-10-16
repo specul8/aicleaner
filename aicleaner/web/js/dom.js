@@ -78,8 +78,14 @@ const ICONS = {
   // Ignore instead: an eye, struck through.
   ignore: ['M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z', 'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6', 'M3 3l18 18'],
   lock: ['M6 11h12v10H6z', 'M8 11V7a4 4 0 0 1 8 0v4'],
-  // Log out: a door with an arrow leaving it.
+  // Log out: a door with an arrow leaving it (the user chose it, 2026-10-15).
   signout: ['M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4', 'M16 17l5-5-5-5', 'M21 12H9'],
+  // The theme button (2026-10-15): the sun for light, the moon for dark, half of each for "as the
+  // system does".
+  sun: ['M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8z', 'M12 2v2', 'M12 20v2', 'M4.9 4.9l1.4 1.4', 'M17.7 17.7l1.4 1.4',
+    'M2 12h2', 'M20 12h2', 'M4.9 19.1l1.4-1.4', 'M17.7 6.3l1.4-1.4'],
+  moon: ['M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'],
+  'sun-moon': ['M12 3a9 9 0 1 0 0 18z', 'M12 3a9 9 0 0 1 0 18', 'M12 8a4 4 0 0 1 0 8'],
 };
 
 // One emoji per DISCRETE ACTION (defect D21, feature 39, decided 2026-09-27).
@@ -132,7 +138,6 @@ const EMOJI = {
   shuffle: '\uD83D\uDD00',     // move an ignore between lists
   ignore: '\uD83D\uDE48',      // see-no-evil - stop watching for this
   lock: '\uD83D\uDD12',
-  signout: '\uD83D\uDEAA',     // door
 };
 
 export function icon(name, label) {

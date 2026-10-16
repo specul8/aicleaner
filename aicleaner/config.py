@@ -159,7 +159,7 @@ class Config:
     # always left alone, `prompt_autocorrect_skip` adds "clients", "used", "capitalised"; the user's
     # own words carry their casing (powershell -> PowerShell).
     prompt_autocorrect: bool = True     # on until a person turns it off (D152)
-    prompt_autocorrect_skip: list[str] = field(default_factory=list)
+    prompt_autocorrect_skip: list[str] = field(default_factory=lambda: list(AUTOCORRECT_SKIPS))
     prompt_autocorrect_words: list[str] = field(default_factory=lambda: ["PowerShell", "SharePoint", "aicleaner"])
     # The user's own replacements, "typed = replacement" (keyvault = Key Vault): a habit, not a typo,
     # so the dictionary would never offer it (the user, 2026-10-08).
@@ -195,6 +195,7 @@ class Config:
     # The Claude Desktop app's Code tab through aicleaner (feature 117, codetab*.py): a forward proxy
     # on this port, and Claude Code's settings pointed at it. Off until chosen (installer or Settings).
     codetab_enabled: bool = False
+    update_auto: bool = False            # install a newer release on its own (2026-10-16), off by default
     codetab_port: int = 8788
     # EMERGENCY ONLY. When the canary finds a real name after tokenising, send the request anyway
     # (logged, and flagged in the evidence log) instead of refusing it. It exists so a false
@@ -251,6 +252,7 @@ class Config:
         "remote.key_storage": ("remote_key_storage", str),
         "session.projects": ("session_projects", list),
         "session.permission_mode": ("session_permission_mode", str),
+        "session.max_running": ("session_max_running", int),
         "detect.placeholder_kinds": ("placeholder_kinds", list),
         "attachments.allow_images": ("allow_images", bool),
         "attachments.ocr": ("ocr", bool),
@@ -267,6 +269,7 @@ class Config:
         "claude.deliver_between_tools": ("claude_deliver_between_tools", bool),
         "claude.collapse_guard": ("claude_collapse_guard", bool),
         "codetab.enabled": ("codetab_enabled", bool),
+        "update.auto": ("update_auto", bool),
         "codetab.port": ("codetab_port", int),
         "canary.fail_open": ("canary_fail_open", bool),
         "proxy.bypass": ("proxy_bypass", bool),
@@ -333,6 +336,8 @@ class Config:
                 raise ValueError("codetab.port must be between 1024 and 65535")
             if key == "logs.detail_retention_days" and value < 0:
                 raise ValueError("retention must be 0 (keep forever) or more")
+            if key == "session.max_running" and not 0 <= value <= 64:
+                raise ValueError("sessions running at once must be 0 (no cap) to 64")
             if key == "folders.roots":
                 # Absolute only: a relative path resolves against whatever the proxy's working
                 # directory happens to be, so "repos" would mean different folders depending on how
@@ -425,8 +430,11 @@ class Config:
         cfg.editor_preview_dblclick = dbl if dbl in PREVIEW_DBLCLICK else "ask"
         prompt_cfg = data.get("prompt") or {}
         cfg.prompt_autocorrect = _flag(prompt_cfg, "autocorrect", True, "prompt.autocorrect")
-        cfg.prompt_autocorrect_skip = [str(v) for v in (prompt_cfg.get("autocorrect_skip") or [])
-                                       if str(v) in AUTOCORRECT_SKIPS]
+        # Every skip on until a person changes them (the user, 2026-10-16: out of the box it was too
+        # noisy); a saved list - even an empty one - is kept as chosen.
+        if "autocorrect_skip" in prompt_cfg:
+            cfg.prompt_autocorrect_skip = [str(v) for v in (prompt_cfg.get("autocorrect_skip") or [])
+                                           if str(v) in AUTOCORRECT_SKIPS]
         if "autocorrect_words" in prompt_cfg:
             cfg.prompt_autocorrect_words = [str(v).strip() for v in (prompt_cfg.get("autocorrect_words") or [])
                                             if str(v).strip()]
@@ -443,7 +451,11 @@ class Config:
         cfg.session_claude = os.path.expandvars(str(ses.get("claude", "claude")))
         cfg.session_projects = [os.path.expandvars(str(p)) for p in (ses.get("projects") or [])]
         cfg.session_permission_mode = str(ses.get("permission_mode", "manual"))
-        cfg.session_max_running = max(1, int(ses.get("max_running", 4) or 4))
+        # 0 = no cap (the user, 2026-10-16); missing or not a number = the default of 4.
+        try:
+            cfg.session_max_running = max(0, int(ses.get("max_running", 4)))
+        except (TypeError, ValueError):
+            cfg.session_max_running = 4
         cfg.session_thinking_display = str(ses.get("thinking_display", "summarized") or "")
         cfg.session_profiles = session_profiles(ses, cfg.session_projects)
         hl = data.get("highlight") or {}
@@ -456,6 +468,7 @@ class Config:
         codetab = data.get("codetab") or {}
         cfg.codetab_enabled = _flag(codetab, "enabled", False, "codetab.enabled")
         cfg.codetab_port = int(codetab.get("port", 8788))
+        cfg.update_auto = _flag(data.get("update") or {}, "auto", False, "update.auto")
         cfg.canary_fail_open = _flag(data.get("canary") or {}, "fail_open", False, "canary.fail_open")
         cfg.proxy_bypass = _flag(data.get("proxy") or {}, "bypass", False, "proxy.bypass")
         rem = data.get("remote") or {}

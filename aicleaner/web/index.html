@@ -25,19 +25,25 @@
   <nav id="nav" aria-label="Main">
     <a data-route="overview" href="#/overview"><span class="nav-mark" aria-hidden="true">&#x1F4CA;</span><span class="nav-text">Overview</span></a>
     <a data-route="review" href="#/review"><span class="nav-mark" aria-hidden="true">&#x1F50E;</span><span class="nav-text">Review</span> <span class="count" hidden></span></a>
-    <div class="group">
+    <div class="group" id="group-clients">
       <a data-route="clients" href="#/clients"><span class="nav-mark" aria-hidden="true">&#x1F3E2;</span><span class="nav-text">Client Filters</span></a>
       <button id="clients-toggle" class="caret" type="button" aria-expanded="false" aria-controls="nav-clients" aria-label="Show clients"></button>
     </div>
     <!-- Global is built into this list as its first entry, so folding the clients away folds it
          away too. It used to sit outside and stay behind. -->
     <div id="nav-clients" hidden></div>
-    <a data-route="session" href="#/session"><span class="nav-mark" aria-hidden="true">&#x1F4AC;</span><span class="nav-text">Project Sessions</span></a>
+    <!-- A caret as the clients have (the user, 2026-10-15): the running sessions open by default. -->
+    <div class="group" id="group-sessions">
+      <a data-route="session" href="#/session"><span class="nav-mark" aria-hidden="true">&#x1F4AC;</span><span class="nav-text">Project Sessions</span></a>
+      <button id="sessions-toggle" class="caret" type="button" aria-expanded="true" aria-controls="nav-sessions" aria-label="Hide running sessions"></button>
+    </div>
     <!-- The running sessions, each a link straight to its chat (the user, 2026-10-06). -->
     <div id="nav-sessions"></div>
     <a data-route="log" href="#/log"><span class="nav-mark" aria-hidden="true">&#x1F4DC;</span><span class="nav-text">Log</span></a>
     <a data-route="secrets" href="#/secrets"><span class="nav-mark" aria-hidden="true">&#x1F511;</span><span class="nav-text">Secrets</span></a>
-    <a data-route="wiki" href="#/wiki"><span class="nav-mark" aria-hidden="true">&#x1F4D6;</span><span class="nav-text">Wiki</span></a>
+    <a data-route="wiki" href="#/wiki" title="Wiki"><span class="nav-mark" aria-hidden="true">&#x1F4D6;</span><span class="nav-wiki-q" aria-hidden="true">?</span><span class="nav-text">Wiki</span></a>
+    <!-- The wiki's pages, flying out from "?" in the top menu (the user, 2026-10-15); filled by app.js. -->
+    <div id="nav-wiki" class="nav-flyout"></div>
     <a data-route="settings" href="#/settings"><span class="nav-mark" aria-hidden="true">&#x2699;&#xFE0F;</span><span class="nav-text">Settings</span></a>
   </nav>
   <div class="address" id="address"></div>
@@ -45,16 +51,11 @@
 <div id="content">
   <div class="toolbar">
     <div id="message" role="status" aria-live="polite"></div>
-    <a id="signout" href="/cdn-cgi/access/logout" hidden title="Log out of Cloudflare Access on this device">Log out</a>
-    <button id="cog" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="prefs" title="Display settings"></button>
+    <!-- Icon-only, the words kept for screen readers and as the tooltip (the user, 2026-10-15). -->
+    <a id="signout" href="/cdn-cgi/access/logout" hidden title="Log out of Cloudflare Access on this device" aria-label="Log out"></a>
+    <!-- The theme: its icon is the theme in use. Menu layout moved to Settings (2026-10-15). -->
+    <button id="cog" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="prefs" title="Theme"></button>
     <div id="prefs" hidden>
-      <fieldset>
-        <legend>Layout</legend>
-        <div class="segmented">
-          <label><input type="radio" name="layout" value="side">Side</label>
-          <label><input type="radio" name="layout" value="top">Top</label>
-        </div>
-      </fieldset>
       <fieldset>
         <legend>Theme</legend>
         <div class="segmented">

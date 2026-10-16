@@ -95,7 +95,7 @@ the AI service directly until then.
    - in `%USERPROFILE%\.claude\settings.json`: `skipWebFetchPreflight`, and Claude Code's telemetry
      and error reporting off (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) - Claude Code still
      updates itself; VS Code's telemetry off too (local and VS Code Server settings);
-   - writes the aicleaner rules block into your user `CLAUDE.md` (files converted locally, never sent);
+   - writes the aicleaner rules block into your user `CLAUDE.md` (images and PDFs are read on this machine and only their text is sent; Office files are converted first; client names are used exactly as written);
    - removes opt-out variables and the weekly update task an earlier install left, reviews
      OpenTelemetry variables that would capture content around the proxy, and checks for settings
      that would route around it;

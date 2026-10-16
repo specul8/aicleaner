@@ -246,6 +246,9 @@ async function openPicker(input, opts) {
   let start = '';
   if (opts.value) start = ((await folderRoots()).roots || [])[0] || '';
   else start = (input.value.trim().split('\n')[0] || '').trim() || (opts.start ? opts.start() : '');
+  // Nothing to start beside (a profile with no folders yet, 2026-10-15): the first allowed location,
+  // where the repos usually are, rather than the bare list of roots.
+  if (!start && opts.firstRoot) start = ((await folderRoots()).roots || [])[0] || '';
   await reveal(start);
 }
 

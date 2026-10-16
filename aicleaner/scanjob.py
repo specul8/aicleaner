@@ -15,6 +15,7 @@ what `aicleaner scan` would have printed, not a second implementation of it that
 """
 from __future__ import annotations
 
+import re
 import sys
 import threading
 import time
@@ -62,6 +63,10 @@ class Job:
     # and then sat there, for the better part of an hour, while the mapping was still being built.
     total_writes: int = 0
     done_writes: int = 0
+    # What the scan did with its finds, read off its report when it ends (the user, 2026-10-15: the
+    # success message should say "15 reals added to the client filter"). None when it did not say.
+    added: int | None = None
+    queued: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {"id": self.id, "kind": self.kind, "folder": self.folder, "client": self.client,
@@ -72,7 +77,21 @@ class Job:
                 "total_files": self.total_files, "total_bytes": self.total_bytes,
                 "done_files": self.done_files, "done_bytes": self.done_bytes, "now": self.now,
                 "total_writes": self.total_writes, "done_writes": self.done_writes,
-                "phase": self.phase}
+                "phase": self.phase, "added": self.added, "queued": self.queued}
+
+
+def outcome(lines: list[str]) -> tuple[int | None, int | None]:
+    """(added, queued) read off a scan's report: "added 15 form(s)" and "4 new candidate(s) queued".
+    None for what the report did not say."""
+    added = queued = None
+    for line in lines:
+        hit = re.match(r"\s*added (\d+) form", line)
+        if hit:
+            added = int(hit.group(1))
+        hit = re.match(r"\s*(\d+) new candidate\(s\) queued", line)
+        if hit:
+            queued = int(hit.group(1))
+    return added, queued
 
 
 class ScanRunner:
@@ -189,6 +208,7 @@ class ScanRunner:
                 if len(job.lines) < MAX_LINES:
                     job.lines.append(line)
             job.code = child.returncode
+            job.added, job.queued = outcome(job.lines)
             # The child queued its finds through a store of its own, so this one is a scan behind.
             # Without this the Review page shows nothing new until the proxy restarts.
             if job.mode == "queue" and self.queue_store is not None:

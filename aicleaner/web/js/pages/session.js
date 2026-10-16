@@ -187,8 +187,20 @@ function paintLog(log, events, key) {
     // the earlier lines no longer join what is drawn, so they go.
     if (log.head && (log.headKey !== key || log.earlierFrom)) clearEarlier(log);
     log.headKey = key;
-    keepingPlace(log, () => log.replaceChildren(...(log.head ? [log.head] : []), ...transcript(list)));
+    const redraw = () => log.replaceChildren(...(log.head ? [log.head] : []), ...transcript(list));
+    if (log.paintedKey !== key) {
+      // Switched to another session (2026-10-16): its latest message, always. keepingPlace kept the
+      // previous session's anchor - event numbers are per session - so the view landed mid-log or at
+      // the top. Again on the next frame, for content that lays out after the redraw.
+      redraw();
+      log.unseen = 0;
+      log.scrollTop = log.scrollHeight;
+      requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+    } else {
+      keepingPlace(log, redraw);
+    }
   }
+  log.paintedKey = key;
   log.drawnSeqs = list.length && list.every((e) => e.seq !== undefined)
     ? { key, first: list[0].seq, last: list[list.length - 1].seq } : null;
   // New content arriving while the reader is away from the bottom is exactly when the way back
@@ -261,6 +273,29 @@ function toolSummary(tool) {
   return said.length > TOOL_LINE ? `${said.slice(0, TOOL_LINE)}...` : said;
 }
 
+// A tool's input as something to read (the user, 2026-10-16): JSON.stringify kept a long multi-line
+// value - an agent's prompt, a message, a file's content - on one line full of \n. Each field gets a
+// line; a multi-line text is shown as its lines, indented under its name; a text that is itself JSON
+// is pretty-printed; anything else is indented JSON.
+export function readableInput(input) {
+  const indent = (text) => text.split('\n').map((line) => `  ${line}`).join('\n');
+  const asJson = (text) => {
+    const trimmed = text.trim();
+    if (!/^[[{]/.test(trimmed)) return null;
+    try { return JSON.stringify(JSON.parse(trimmed), null, 2); } catch (error) { return null; }
+  };
+  return Object.entries(input).map(([key, value]) => {
+    if (typeof value === 'string') {
+      const json = asJson(value);
+      if (json) return `${key}:\n${indent(json)}`;
+      const text = value.replace(/\r\n?/g, '\n');
+      return text.includes('\n') ? `${key}:\n${indent(text)}` : `${key}: ${text}`;
+    }
+    const json = JSON.stringify(value, null, 2);
+    return json && json.includes('\n') ? `${key}:\n${indent(json)}` : `${key}: ${json}`;
+  }).join('\n');
+}
+
 function toolDetail(tool) {
   const name = tool.name || 'tool';
   const input = tool.input || {};
@@ -268,7 +303,7 @@ function toolDetail(tool) {
   if (!summary && !Object.keys(input).length) return h('div', {}, name);
   const full = typeof input.command === 'string' && Object.keys(input).length <= 3
     ? input.command
-    : JSON.stringify(input, null, 2);
+    : readableInput(input);
   return h('details', { class: 'tool-detail' },
     h('summary', {}, h('strong', {}, name), summary ? ' ' : '', ...withRestoredNames(summary)),
     h('pre', { class: 'mono' }, ...withRestoredNames(full)));
@@ -1051,7 +1086,7 @@ function sessionRow(profile, state) {
     'aria-pressed': profile.name === view.name ? 'true' : 'false',
   },
     h('span', { class: 'session-name' }, profile.name),
-    profile.label && profile.label !== profile.name ? h('span', { class: 'chip' }, profile.label) : null,
+    // No client chip (the user, 2026-10-16): the profile name already says which project it is.
     // The one chip that survives: a session paused on a permission prompt is the only thing on
     // this page that needs answering, and it can only ever happen to a running one.
     waiting ? h('span', { class: 'chip warn' }, `${waiting} waiting`) : null);
@@ -1075,6 +1110,18 @@ const LAST_SESSION = 'aicleaner.session.last';
 
 function rememberedSession() {
   try { return localStorage.getItem(LAST_SESSION) || ''; } catch (error) { return ''; }
+}
+
+// The running session with the newest activity, or '' when none runs.
+export function mostRecentlyActive(state) {
+  const sessions = (state && state.sessions) || {};
+  let best = '';
+  let bestAt = -1;
+  for (const name of (state && state.running) || []) {
+    const at = Number((sessions[name] || {}).last_active) || 0;
+    if (at > bestAt) { best = name; bestAt = at; }
+  }
+  return best;
 }
 
 function rememberSession(name) {
@@ -1104,7 +1151,9 @@ function sessionList(state) {
   return [
     h('div', { class: 'form-row session-pick-row' }, picker),
     active.length
-      ? h('div', { class: 'active-sessions' }, ...active.map((profile) => sessionRow(profile, state)))
+      ? h('div', { class: 'active-sessions' },
+        h('span', { class: 'active-sessions-label' }, 'Active Sessions:'),
+        ...active.map((profile) => sessionRow(profile, state)))
       : h('p', { class: 'muted active-sessions empty' }, 'Nothing running. Pick a project, then press Start beside it.'),
     profiles.length ? null : h('p', { class: 'muted' }, 'No project profiles yet. Add one with Edit project profiles.'),
     h('button', { type: 'button', id: 'session-edit-profiles', class: 'link' },
@@ -1398,7 +1447,30 @@ function homeField(values, workspace, row) {
   // The whole path, beside the heading, so it can be checked at a glance (the user, 2026-10-05).
   const shown = h('span', { class: 'mono p-home' }, home.folder || '(none yet)');
   const how = h('span', { class: 'p-home-how' }, home.folder ? ` (${howOf()})` : '');
-  override.addEventListener('input', () => {
+  // A profile with no folders yet (the user, 2026-10-15): the first home folder sets it up rather than
+  // recording an override. A workspace file in it goes into Workspace files - which brings its folders
+  // into the folders box (D132) and decides the home (its cwd, else its first folder) - otherwise the
+  // folder goes into the folders box, and as the first folder it is the home.
+  const noFolders = () => !linesOf(row.querySelector('.p-projects')).length
+    && !linesOf(row.querySelector('.p-workspaces')).length;
+  override.addEventListener('input', async () => {
+    if (noFolders() && override.value.trim()) {
+      const folder = override.value.trim();
+      override.value = '';
+      let files = [];
+      try {
+        files = (await getJSON(`/api/session/workspace-files?folder=${encodeURIComponent(folder)}`)).files || [];
+      } catch (error) { /* read as none: the folder still goes in */ }
+      const target = row.querySelector(files.length ? '.p-workspaces' : '.p-projects');
+      target.value = files.length ? files[0] : folder;
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+      shown.textContent = files.length ? `(from ${lastSegment(files[0])})` : folder;
+      how.textContent = files.length ? ' (from workspace file - save the project profile to use it)'
+        : ' (first profile folder - save the project profile to use it)';
+      if (files.length > 1) say(`${lastSegment(folder)} holds ${files.length} workspace files; ${lastSegment(files[0])} was added. Add the others under Workspace files if they belong.`, 'info');
+      row.dispatchEvent(new Event('hints-stale'));
+      return;
+    }
     was.value = home.derived || '';
     shown.textContent = override.value;
     how.textContent = ' (set by you - save the project profile to use it)';
@@ -1429,7 +1501,8 @@ function homeField(values, workspace, row) {
       h('div', { class: 'p-home-line' }, override, was,
         // Together, so the pair moves to the next line as one rather than splitting.
         h('span', { class: 'p-home-buttons' },
-          folderPicker(override, { label: 'Choose another home folder', start: () => besideHome(workspace) }),
+          folderPicker(override, { label: home.folder ? 'Choose another home folder' : 'Choose a home folder', firstRoot: true,
+            start: () => besideHome(workspace) }),
           reset))),
     drift,
   };
@@ -1931,12 +2004,16 @@ export async function render(main, context = {}) {
   // a profile and falls back to its own choice when it is not.
   // With no name in the address - the menu's Project Sessions, a hard refresh of #/session - the
   // session last looked at, rather than the server's pick, which is the first alphabetically when
-  // nothing runs (the user, 2026-10-06).
-  const asked = (context.route && context.route.id) || rememberedSession();
+  // nothing runs (the user, 2026-10-06). When something is running, the running session that was
+  // active most recently instead (the user, 2026-10-16) - the one being worked in.
+  const named = context.route && context.route.id;
+  const asked = named || rememberedSession();
   const toChat = Boolean(context.route && context.route.chat);
   let state;
   try {
     state = await fetchSessionState(asked);
+    const latest = named ? '' : mostRecentlyActive(state);
+    if (latest && latest !== state.selected) state = await fetchSessionState(latest);
   } catch (error) {
     main.replaceChildren(h('p', { class: 'muted' }, 'Driving a session is switched off (session.enabled in the config).'));
     return;
@@ -2211,7 +2288,11 @@ export async function render(main, context = {}) {
     // A poll answered before an event the stream has already drawn must not take that event away
     // (D111): the log redrew without it, then put it back on the next poll - lines vanished for a
     // few seconds. What the stream added beyond the answer's last event is kept.
-    const had = view.state && view.state.selected === answer.selected ? (view.state.events || []) : [];
+    // Only from the same buffer: a new epoch (a start, a restart, a resume) begins empty, so straight
+    // after a Start the answer's last number was 0, every event of the previous conversation counted
+    // as "newer", and the new conversation showed the old one (2026-10-16).
+    const sameBuffer = view.state && view.state.selected === answer.selected && view.state.epoch === answer.epoch;
+    const had = sameBuffer ? (view.state.events || []) : [];
     const theirs = answer.events || [];
     const lastSeq = theirs.length ? theirs[theirs.length - 1].seq : 0;
     const newer = had.filter((event) => event.seq !== undefined && event.seq > lastSeq);
@@ -2979,6 +3060,31 @@ export async function render(main, context = {}) {
     const row = event.target.closest('button.session-row');
     if (row) await selectSession(row.dataset.session).catch(sayError);
   });
+
+  // "+ Add new session" in the sidebar (the user, 2026-10-15): the profile editor opened on a new,
+  // blank profile, as its own "Add a project profile" does. Asked for before this page was drawn
+  // (sessionStorage) or while it shows (the event); hooked once, for whichever render is current.
+  view.addSession = async () => {
+    try { sessionStorage.removeItem('aicleaner.addSession'); } catch (e) { /* nothing to clear */ }
+    if (!view.editing) {
+      document.getElementById('session-edit-profiles').click();
+      for (let i = 0; i < 50 && !document.getElementById('profile-add'); i += 1) {
+        await new Promise((done) => { setTimeout(done, 100); });
+      }
+    }
+    const add = document.getElementById('profile-add');
+    if (add) {
+      add.click();
+      document.getElementById('session-profiles').scrollIntoView({ block: 'start' });
+    }
+  };
+  if (!view.addSessionHooked) {
+    view.addSessionHooked = true;
+    window.addEventListener('aicleaner:add-session', () => { if (view.addSession) view.addSession(); });
+  }
+  let askedToAdd = false;
+  try { askedToAdd = sessionStorage.getItem('aicleaner.addSession') === '1'; } catch (e) { /* not asked */ }
+  if (askedToAdd) setTimeout(() => view.addSession(), 0);
 
   editorSlot.addEventListener('click', async (event) => {
     const rows = document.getElementById('profile-rows');

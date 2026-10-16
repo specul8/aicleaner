@@ -1531,7 +1531,7 @@ function Select-InstallerChange {
         if ($VSCodeArgs -notcontains '-SkipVSCode') { $where += 'this PC' }
         if ($VSCodeArgs -notcontains '-SkipVSCodeServer') { $where += 'VS Code Server' }
         if ($where.Count) { $items.Add([pscustomobject]@{ Topic = 'vscode-telemetry'; Text = "VS Code telemetry off (settings for $($where -join ' and '))" }) }
-        $items.Add([pscustomobject]@{ Topic = 'claude-md'; Text = 'The aicleaner rules block in your CLAUDE.md (files converted locally, never sent)' })
+        $items.Add([pscustomobject]@{ Topic = 'claude-md'; Text = 'The aicleaner rules block in your CLAUDE.md (images and PDFs read here and only their text sent; client names kept exact)' })
         $items.Add([pscustomobject]@{ Topic = 'desktop-commander'; Text = 'Desktop Commander telemetry off, if it is installed' })
         $items.Add([pscustomobject]@{ Topic = 'telemetry-vars'; Text = 'User-scope telemetry variables kept (removing them is a No by default)' })
     }
@@ -1861,6 +1861,53 @@ function Test-ClaudeDesktop {
     Write-Status 'Claude Desktop is not installed on this machine.' -Level Warn
     Write-Status 'Install it first: winget install Anthropic.Claude (or claude.ai/download)' -Level Detail
     return $false
+}
+
+function Install-ClaudeCodeCli {
+    <#
+    .SYNOPSIS
+        Answer 5 with no Claude Code command line: offers to install it, makes it usable in this
+        window, and opens its sign-in (the user, 2026-10-15; spec 2026-10-15-code-tab-to-cli-design).
+    .DESCRIPTION
+        The Code tab is Claude Code inside the Desktop app; aicleaner's Session page and VS Code need
+        the command line. Routing is not switched on here - Enable-AiCleaner.ps1 does that once a
+        client exists - so only what is already set for the user is copied into this window.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+    if (Get-Command claude -ErrorAction SilentlyContinue) { return }
+    Write-Status 'Claude Code (the command line) is not on this machine' -Level Step
+    Write-Status 'aicleaner''s Session page and VS Code use it; the Code tab in the Desktop app does not need it.' -Level Detail
+    if (-not (Confirm-Action -Message 'Install Claude Code as well, so you can move from the Code tab to aicleaner''s Session page or VS Code?' -Default 'Yes')) {
+        Write-Status 'Left out. Install it later with: winget install -e --id Anthropic.ClaudeCode' -Level Detail
+        return
+    }
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if (-not $winget) {
+        Write-Status 'winget is not here, so Claude Code was not installed. Install it with Anthropic''s installer (https://docs.anthropic.com/claude-code), then run claude to sign in.' -Level Warn
+        return
+    }
+    if (-not $PSCmdlet.ShouldProcess('Anthropic.ClaudeCode', 'winget install')) { return }
+    & $winget.Source install -e --id Anthropic.ClaudeCode --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Null
+    # This window: PATH as the machine and the user have it now, and the user's routing if it is on.
+    $env:Path = (@([Environment]::GetEnvironmentVariable('Path', 'Machine'), [Environment]::GetEnvironmentVariable('Path', 'User')) |
+        Where-Object { $_ }) -join ';'
+    $base = [Environment]::GetEnvironmentVariable('ANTHROPIC_BASE_URL', 'User')
+    if ($base) { $env:ANTHROPIC_BASE_URL = $base }
+    $claude = Get-Command claude -ErrorAction SilentlyContinue
+    if (-not $claude) {
+        Write-Status 'winget finished but claude is not on PATH yet: open a new PowerShell window and run claude to sign in.' -Level Warn
+        return
+    }
+    Write-Status "Claude Code installed: $($claude.Source)" -Level Done
+    if ($script:Unattended -or -not (Confirm-Action -Message 'Open Claude Code now to sign in (a new window; it opens your browser)?' -Default 'Yes')) {
+        Write-Status 'Sign in later: run claude in a PowerShell window and follow its prompts.' -Level Detail
+        return
+    }
+    $shell = (Get-Process -Id $PID).Path
+    $say = "Write-Host 'Sign in to Claude Code below (your browser opens). Type /exit when you are done.' -ForegroundColor Cyan; claude"
+    Start-Process -FilePath $shell -ArgumentList @('-NoExit', '-NoProfile', '-Command', $say) | Out-Null
+    Write-Status 'A window opened for the sign-in; finish it there.' -Level Done
 }
 
 function Confirm-Agent {
@@ -2704,6 +2751,7 @@ function Invoke-Install {
         Write-Status "Already deployed to $($folders.App): checking and adding wiring, not installing again. -Action Update changes the code." -Level Detail
         Add-Target -Record $existing[0] -Wanted $targets -Role $role -Clients ([string]$folders.Clients)
         if ($script:CodeTabWanted) { Set-CodeTab -AppRoot $folders.App -State $script:CodeTabWanted }
+        if ($script:CodeTabWanted -eq 'On') { Install-ClaudeCodeCli }
         return
     }
     # A second deployment elsewhere is fine; wiring the same role twice is not.
@@ -2769,6 +2817,7 @@ function Invoke-Install {
     # A statement, never captured: it runs Enable-AiCleaner.ps1, whose output belongs on the console.
     Invoke-Activation -AppRoot $folders.App -Targets $targets
     if ($script:CodeTabWanted -and -not $workstationOnly) { Set-CodeTab -AppRoot $folders.App -State $script:CodeTabWanted }
+    if ($script:CodeTabWanted -eq 'On' -and -not $workstationOnly) { Install-ClaudeCodeCli }
     $port = Get-ConfiguredPort -AppRoot $folders.App
     $setupUrl = "http://127.0.0.1:$port/#/setup"
     Write-SummaryBox -Title "aicleaner $($release.Ref) is installed" -Lines @(

@@ -711,6 +711,9 @@ class Session:
             "project": self.project,
             "projects": [str(p) for p in self.projects],
             "started_at": self.started_at,
+            # When this session last did anything (2026-10-16): the page opens on the running
+            # session with the newest, when the address names none.
+            "last_active": float((self.events[-1].get("at") if self.events else 0) or self.started_at or 0),
             "permission_mode": self.permission_mode,
             "pending": [{"id": p.id, "tool": p.tool, "detail": p.detail, "asked_at": p.asked_at}
                         for p in self.pending.values()],
@@ -1636,7 +1639,7 @@ class SessionHost:
         self.permission_mode = permission_mode
         self.approve_timeout_s = approve_timeout_s
         self.approve_url = approve_url
-        self.max_running = max(1, int(max_running or 1))
+        self.max_running = max(0, int(max_running or 0))     # 0 = no cap: the machine is the limit
         self.profiles: list[Profile] = list(profiles or [])
         self.sessions: dict[str, Session] = {}
         # What the tree needs from outside the host, set by whoever owns it: the allowed folder
@@ -1899,10 +1902,10 @@ class SessionHost:
                 return existing.state()
             raise SessionError(f"{profile.name} is already running a different conversation; stop it first")
         running = sum(1 for s in self.sessions.values() if s.running)
-        if running >= self.max_running:
+        if self.max_running and running >= self.max_running:      # 0 = no cap (2026-10-16)
             raise SessionError(
                 f"{running} sessions are already running and the limit is {self.max_running} "
-                "(session.max_running); stop one first")
+                "(session.max_running - Settings, Session page card); stop one first")
         session = self._session(profile.name, create=True)
         # A session object outlives its process, so it may still hold the profile as it was at its
         # first start. Every start uses the profile as it is now: an edited brief, folder list or

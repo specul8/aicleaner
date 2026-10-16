@@ -209,8 +209,12 @@ body { display: grid; grid-template-columns: 228px minmax(0, 1fr); }
 :root[data-nav="rail"] #nav-toggle::before { content: "\00BB"; }
 :root[data-nav="rail"] .brand .title,
 :root[data-nav="rail"] .nav-text,
-:root[data-nav="rail"] #nav .caret,
 :root[data-nav="rail"] #address { display: none; }
+/* The carets stay on the rail (the user, 2026-10-15), small beside their mark. */
+:root[data-nav="rail"] #nav .group { width: 100%; }
+:root[data-nav="rail"] #nav .group a { padding-left: 2px; padding-right: 0; }
+:root[data-nav="rail"] #nav .caret { padding: 4px 2px; }
+:root[data-nav="rail"] #nav .caret svg { width: 11px; height: 11px; }
 :root[data-nav="rail"] #nav { width: 100%; }
 :root[data-nav="rail"] #nav a { justify-content: center; padding: 7px 4px; }
 :root[data-nav="rail"] .nav-mark { font-size: 17px; width: auto; }
@@ -218,8 +222,15 @@ body { display: grid; grid-template-columns: 228px minmax(0, 1fr); }
    it is the one indicator saying whether the filter is on, and a rail is no reason to lose it. */
 :root[data-nav="rail"] .status { padding: 5px; justify-content: center; }
 :root[data-nav="rail"] .status .status-text { display: none; }
-/* The clients sub-list has no room and no marks of its own; the Clients link still reaches it. */
-:root[data-nav="rail"] #nav-clients { display: none; }
+/* The clients on the rail: their first two letters, the whole name on hover (the user, 2026-10-15).
+   Folded unless the caret opens them, as in the full menu. */
+.nav-client-initial { display: none; }
+:root[data-nav="rail"] #nav-clients a { justify-content: center; padding: 5px 2px; }
+:root[data-nav="rail"] #nav-clients .nav-client-name { display: none; }
+:root[data-nav="rail"] #nav-clients .nav-client-initial { display: inline; font-weight: 600; font-size: 12px; }
+/* "+ Add new ..." is just "+" on the rail; what it does shows on hover (its title). */
+:root[data-nav="rail"] button.nav-add { text-align: center; padding: 5px 2px; font-size: 16px; font-weight: 700; }
+:root[data-nav="rail"] button.nav-add .nav-add-text { display: none; }
 #nav .caret[aria-expanded="true"] svg { transform: rotate(90deg); }
 #nav .sub, #nav-clients a { padding-left: 22px; font-size: 13px; }
 #nav-clients { display: flex; flex-direction: column; gap: 1px; }
@@ -368,17 +379,53 @@ main#page:focus { outline: none; }
   :root[data-layout="top"] #shell { position: static; }
   #inbox-wrap { overflow-x: auto; }
 }
-/* Wraps: on a phone the top layout is forced (D48, D49, D66) and eight links do not fit 390px. */
-:root[data-layout="top"] #nav { flex-direction: row; flex-wrap: wrap; margin: 0; gap: 2px; align-items: center; position: relative; }
+/* The top menu (the user, 2026-10-15: badly aligned and too wide for 1920x1080). One row: the
+   brand, the links, the status, and the theme and Log out buttons at the right of the same row.
+   The running sessions, the clients and the wiki's pages are panels under their link, shown while
+   it (or the panel) is hovered or focused, instead of rows that widened the bar. On a phone the bar
+   still wraps (D48, D49, D66). */
+:root[data-layout="top"] #shell { flex-wrap: nowrap; padding-right: 120px; }
+:root[data-layout="top"] #nav-toggle, :root[data-layout="top"] #sessions-toggle { display: none; }
+:root[data-layout="top"] #nav { flex-direction: row; flex-wrap: nowrap; margin: 0; gap: 2px; align-items: center; position: relative; }
+:root[data-layout="top"] #nav > a, :root[data-layout="top"] #nav .group a { white-space: nowrap; padding: 6px 8px; }
 :root[data-layout="top"] #nav .sub { padding-left: 8px; }
-:root[data-layout="top"] #nav-clients {
-  position: absolute; top: 34px; left: 150px; z-index: 30; min-width: 190px;
+:root[data-layout="top"] .toolbar {
+  position: fixed; top: 0; right: 0; z-index: 11; padding: 8px 16px; min-height: 0; gap: 6px;
+}
+:root[data-layout="top"] .toolbar #message { display: none; }
+.nav-flyout { display: none; }
+.nav-wiki-q { display: none; }
+:root[data-layout="top"] #nav a[data-route=wiki] .nav-mark,
+:root[data-layout="top"] #nav a[data-route=wiki] .nav-text { display: none; }
+:root[data-layout="top"] #nav a[data-route=wiki] .nav-wiki-q {
+  display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; font-weight: 700;
+  border: 1px solid var(--side-border); border-radius: 50%;
+}
+:root[data-layout="top"] #nav-clients,
+:root[data-layout="top"] #nav-sessions,
+:root[data-layout="top"] #nav-wiki {
+  position: absolute; top: 100%; left: 0; z-index: 30; min-width: 200px; max-height: 70vh; overflow-y: auto;
+  flex-direction: column; flex-wrap: nowrap; gap: 1px;
   background: var(--side-bg); border: 1px solid var(--side-border); border-radius: 8px; padding: 6px;
   box-shadow: var(--shadow);
 }
-:root[data-layout="top"] #nav-clients a { padding-left: 8px; }
-:root[data-layout="top"] #nav-sessions { flex-direction: row; flex-wrap: wrap; }
-:root[data-layout="top"] #nav-sessions a { padding-left: 8px; }
+:root[data-layout="top"] #nav-sessions, :root[data-layout="top"] #nav-wiki { display: none; }
+:root[data-layout="top"] #group-sessions:hover + #nav-sessions,
+:root[data-layout="top"] #group-sessions:focus-within + #nav-sessions,
+:root[data-layout="top"] #nav-sessions:hover,
+:root[data-layout="top"] #nav-sessions:focus-within,
+:root[data-layout="top"] #nav a[data-route=wiki]:hover + #nav-wiki,
+:root[data-layout="top"] #nav a[data-route=wiki]:focus + #nav-wiki,
+:root[data-layout="top"] #nav-wiki:hover,
+:root[data-layout="top"] #nav-wiki:focus-within { display: flex; }
+:root[data-layout="top"] #nav-clients a, :root[data-layout="top"] #nav-sessions a,
+:root[data-layout="top"] #nav-wiki a { padding: 5px 8px; white-space: nowrap; }
+:root[data-layout="top"] #nav-sessions button.nav-add { display: block; padding-left: 8px; }
+@media (max-width: 40rem) {
+  :root[data-layout="top"] #shell { flex-wrap: wrap; padding-right: 16px; }
+  :root[data-layout="top"] #nav { flex-wrap: wrap; }
+  :root[data-layout="top"] .toolbar { position: static; }
+}
 :root[data-layout="top"] #shell .address { display: none; }
 
 /* ---- Common components ----------------------------------------------------------------- */
@@ -798,6 +845,8 @@ form.rename { margin: 0; }
 /* The running sessions, as wide as their text and side by side, wrapping onto another line inside
    the card only when the line is full (the user, 2026-10-05). */
 .active-sessions:not(.empty) { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .25rem; }
+/* "Active Sessions:" on its own line under the picker, the buttons below it (the user, 2026-10-16). */
+.active-sessions-label { flex-basis: 100%; font-size: .85rem; color: var(--muted); }
 .session-row { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .35rem; max-width: 100%;
   padding: .4rem .6rem; border: 1px solid var(--border); border-radius: 6px;
   background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
@@ -920,6 +969,11 @@ input.wide { width: 100%; box-sizing: border-box; }
 button.nav-add { display: block; width: 100%; text-align: left; background: none; border: 0;
   color: var(--accent); cursor: pointer; font: inherit; padding: .35rem .5rem .35rem 1.1rem; }
 button.nav-add:hover { background: var(--row-hover, rgba(127, 127, 127, .15)); }
+/* The same at the foot of the running sessions, lined up with them (the user, 2026-10-15). On the icon
+   rail it is "+" alone, centred like the rest. */
+#nav-sessions button.nav-add { padding-left: 22px; font-size: 13px; }
+:root[data-nav="rail"] #nav-sessions button.nav-add { padding-left: 2px; font-size: 16px; }
+
 
 /* A decision with a few answers, taken over the top of whatever is behind it. */
 /* --surface, the same as .card: there is no --card variable, and var(--card) with no fallback is
@@ -944,6 +998,10 @@ dialog.sheet .field { margin-bottom: .7rem; }
 .settings-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
   align-items: start; }
 .settings-column { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+/* A button per card, to jump to it (the user, 2026-10-15). Wraps to as many rows as it needs. */
+.settings-jump { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+.settings-jump .settings-jump-to { cursor: pointer; font: inherit; font-size: 12.5px; }
+.settings-jump .settings-jump-to:hover { border-color: var(--accent); }
 @media (max-width: 1000px) { .settings-columns { grid-template-columns: minmax(0, 1fr); } }
 
 /* Scan progress. The bar is sized from the bytes that will really be read, so it moves evenly
