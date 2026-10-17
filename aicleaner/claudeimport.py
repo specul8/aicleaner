@@ -40,6 +40,7 @@ QUERY_WORDS = 80
 MEMORY_WORDS = 60
 TICK_SHARE = 0.5               # a chat is pre-ticked when it scores this share of the best one or more
 SECTION = "## From claude.ai"
+REMEMBERED = "last-export.json"   # the export used last, in <state>/claude-ai-import/
 PICK_TIMEOUT_S = 240
 
 
@@ -412,6 +413,11 @@ def write_import(home: Path, transcripts: Path, project: dict[str, Any], chats: 
             continue
         lines = convert(chat, str(home), pairs)
         _write(path, "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines), roots)
+        # Dated as the chat was last updated on claude.ai (2026-10-17): Continue sorts by it, and a file
+        # written moments ago reads as "busy" - delete refused it for five minutes after an import.
+        last = _when(chat.get("updated_at") or chat.get("created_at") or "")
+        if last:
+            os.utime(path, (last, last))
         imported.append(chat["uuid"])
     return {"written": written, "chats_imported": imported, "chats_left_alone": kept, "transcripts": str(target)}
 
@@ -431,6 +437,9 @@ class Job:
     started: float = field(default_factory=time.time)
     seen: dict[str, tuple[int, float]] = field(default_factory=dict)
     _conversations: list[dict[str, Any]] | None = None
+    doc: Any = None                  # the manifest as chosen, kept to remember the export by
+    extra: Path | None = None        # a folder this export's zips are looked for in, besides Downloads
+    source: str = ""                 # the folder the zips were taken from, when one was
 
     def file(self, name: str) -> dict[str, Any]:
         for entry in self.manifest["files"]:
@@ -498,14 +507,66 @@ class Imports:
         self.jobs: dict[str, Job] = {}
         self.lock = threading.Lock()
 
-    def start(self, manifest_doc: Any) -> Job:
+    def start(self, manifest_doc: Any, extra: Path | None = None) -> Job:
         manifest = read_manifest(manifest_doc)
+        if extra is None:
+            # The same export as last time (its manifest made at the same moment): its zips are looked
+            # for where they were, so they are not downloaded again (the user, 2026-10-17).
+            known = self.remembered()
+            if known and known["complete"] and known["created_at"] and known["created_at"] == manifest["created_at"]:
+                extra = Path(known["folder"])
         job_id = uuid.uuid4().hex[:12]
-        job = Job(job_id, self.root / job_id, manifest)
+        job = Job(job_id, self.root / job_id, manifest, doc=manifest_doc, extra=extra)
         job.folder.mkdir(parents=True, exist_ok=True)
         with self.lock:
             self.jobs[job_id] = job
         return job
+
+    # ---- the export remembered (the user, 2026-10-17) ----
+    # After an import, where its zips were is kept with its manifest, so the next import can use the
+    # same export again without downloading it; a new manifest can always be chosen instead.
+
+    def start_from_folder(self, folder: Path) -> Job:
+        """An export already on this machine: the newest manifest-*.json in the folder, its zips beside it."""
+        folder = Path(str(folder).strip().strip('"'))
+        if not folder.is_dir():
+            raise ClaudeImportError(f"{folder} is not a folder on this machine")
+        manifests = sorted(folder.glob("manifest-*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not manifests:
+            raise ClaudeImportError(f"{folder} holds no manifest-....json from a claude.ai export")
+        try:
+            doc = json.loads(manifests[0].read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ClaudeImportError(f"{manifests[0].name} could not be read: {exc}") from exc
+        return self.start(doc, extra=folder)
+
+    def _remember(self, folder: str, doc: Any, created_at: str) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        record = {"folder": folder, "manifest": doc, "created_at": created_at, "remembered_at": time.time()}
+        tmp = self.root / (REMEMBERED + ".tmp")
+        tmp.write_text(json.dumps(record), encoding="utf-8")
+        os.replace(tmp, self.root / REMEMBERED)
+
+    def remembered(self) -> dict[str, Any] | None:
+        """The export used last: its folder, when it was made, and whether its needed zips are still there."""
+        try:
+            record = json.loads((self.root / REMEMBERED).read_text(encoding="utf-8"))
+            files = read_manifest(record["manifest"])["files"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        folder = Path(str(record.get("folder", "")))
+        there = folder.is_dir() and all(_candidates(folder, f["filename"]) for f in files if f["required"])
+        return {"folder": str(folder), "created_at": record.get("created_at", ""),
+                "remembered_at": record.get("remembered_at", 0), "complete": there}
+
+    def start_remembered(self) -> Job:
+        found = self.remembered()
+        if not found:
+            raise ClaudeImportError("no earlier export is remembered: choose its manifest")
+        if not found["complete"]:
+            raise ClaudeImportError(f"the earlier export's zips are no longer all in {found['folder']}: choose a manifest")
+        record = json.loads((self.root / REMEMBERED).read_text(encoding="utf-8"))
+        return self.start(record["manifest"], extra=Path(found["folder"]))
 
     def get(self, job_id: str) -> Job:
         job = self.jobs.get(str(job_id))
@@ -523,17 +584,22 @@ class Imports:
             mine = job.folder / name
             state, problem = ("received", "") if mine.is_file() else ("waiting", "")
             if state == "waiting":
-                for folder in watch or []:
+                for folder in [*([job.extra] if job.extra else []), *(watch or [])]:
                     found = _candidates(folder, name) if folder.is_dir() else []
                     if not found:
                         continue
-                    size = found[0].stat().st_size
+                    stat = found[0].stat()
+                    size = stat.st_size
                     before = job.seen.get(name)
-                    if before and before[0] == size and now - before[1] >= STABLE_S:
+                    # Already there and not being written (unchanged for STABLE_S): taken at once, so
+                    # an export already on this machine is not waited on (2026-10-17).
+                    settled = now - stat.st_mtime >= STABLE_S
+                    if settled or (before and before[0] == size and now - before[1] >= STABLE_S):
                         problem = zip_problem(found[0], entry["category"])
                         if not problem:
                             shutil.copyfile(found[0], mine)
                             state = "received"
+                            job.source = str(folder)
                         else:
                             state = "bad"
                     elif not before or before[0] != size:
@@ -627,6 +693,12 @@ class Imports:
         if with_memories and job.path_of("memories") is not None:
             memories = memories_for(read_memories(job.path_of("memories")), project_uuid)
         report = write_import(home, transcripts, project, chats, memories, pairs)
+        # Remembered for next time: the folder the zips came from, or - uploaded and kept - the copies.
+        # Uploaded and not kept leaves nothing on this machine to point at, so the last record stays.
+        kept_at = job.source or (str(job.folder) if keep_zips else "")
+        if kept_at and job.doc is not None:
+            self._remember(kept_at, job.doc, job.manifest.get("created_at", ""))
+        report["remembered"] = kept_at
         if not keep_zips:
             self.finish(job)
         report["zips_kept"] = str(job.folder) if keep_zips else ""

@@ -7,6 +7,7 @@
 import { postJSON, say, sayError } from './api.js';
 import { h } from './dom.js';
 import { sendInPieces } from './pieces.js';
+import { arrangeSheet } from './sheet.js';
 
 // The folder a row stands for: a folder row itself, a file row its folder.
 function folderOf(row) {
@@ -67,6 +68,7 @@ function askClashes(clashes) {
         h('span', {}, button('Skip them', 'skip'), ' ', button('Keep both', 'keep'), ' ', button('Replace', 'replace', true))));
     dialog.addEventListener('cancel', (event) => { event.preventDefault(); choose(null); });
     document.body.append(dialog);
+    arrangeSheet(dialog, { dirty: () => false });
     dialog.showModal();
   });
 }
@@ -82,6 +84,7 @@ function progressSheet(total) {
   stop.addEventListener('click', () => { sheet.stopped = true; stop.disabled = true; stop.textContent = 'Stopping after this file...'; });
   dialog.addEventListener('cancel', (event) => { event.preventDefault(); stop.click(); });
   document.body.append(dialog);
+  arrangeSheet(dialog, { dirty: () => true });        // copying: a stray click behind must not stop it
   dialog.showModal();
   return sheet;
 }

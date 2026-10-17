@@ -2079,12 +2079,14 @@ class SessionHost:
         except RuntimeError as exc:
             raise SessionError(str(exc)) from exc
 
-    def suggest_titles(self, name: str) -> int:
-        """Titles for this profile's untitled conversations (newest 25), in a background thread."""
+    def suggest_titles(self, name: str, every: bool = False) -> int:
+        """Titles, in a background thread, for the untitled conversations Continue lists: the newest 25,
+        or with "all" ticked every one (the user, 2026-10-17)."""
         from .titles import load
         labels = load(self.state_dir())
-        untitled = [row["id"] for group in self.past(name) for row in group["sessions"]
-                    if row["id"].lower() not in labels][:25]
+        listed = self.past(name, 5000 if every else 25)
+        untitled = [row["id"] for group in listed if not group.get("outside") for row in group["sessions"]
+                    if row["id"].lower() not in labels]
 
         def work() -> None:
             for conv_id in untitled:
@@ -2114,7 +2116,9 @@ class SessionHost:
             items.append((path, label or _head(path, (path.stat().st_size, path.stat().st_mtime))[0] or conv_id))
         if not hasattr(self, "_consolidations"):
             self._consolidations = Jobs()
-        return self._consolidations.start(items, self.claude, self.base_url)
+        # The full summaries go to a file in the home, which the short brief names (2026-10-17).
+        home = self.home_of(self.profile(name)).get("folder") or ""
+        return self._consolidations.start(items, self.claude, self.base_url, home=Path(home) if home else None)
 
     def consolidation(self, job: str) -> dict[str, Any]:
         found = getattr(self, "_consolidations", None)

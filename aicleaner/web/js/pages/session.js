@@ -29,6 +29,7 @@ import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetT
 import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
   viewableFiles } from '../treeselect.js';
+import { arrangeSheet } from '../sheet.js';
 
 const view = { stream: null, state: null, name: '', poll: null, editing: false, profiles: null,
   past: [], commands: null, slashRows: [], slashAt: 0, transition: false };
@@ -1660,6 +1661,7 @@ function askText(question, value = '') {
     input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); finish(input.value); } });
     dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(null); });
     document.body.append(dialog);
+    arrangeSheet(dialog);
     dialog.showModal();
     input.focus();
     input.select();
@@ -1677,6 +1679,7 @@ function confirmDialog(text, okText) {
     no.addEventListener('click', () => finish(false));
     dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(false); });
     document.body.append(dialog);
+    arrangeSheet(dialog);
     dialog.showModal();
     no.focus();
   });
@@ -1716,6 +1719,7 @@ async function openRecentlyDeleted(name, changed) {
     } catch (error) { status.textContent = `Could not load it: ${error.message || error}`; }
   };
   document.body.append(dialog);
+  arrangeSheet(dialog, { dirty: () => false });
   dialog.showModal();
   load();
 }
@@ -1764,6 +1768,7 @@ async function trustGate(profile) {
     });
     dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish('cancel'); });
     document.body.append(dialog);
+    arrangeSheet(dialog, { dirty: () => false });
     dialog.showModal();
   });
 }
@@ -2292,9 +2297,11 @@ export async function render(main, context = {}) {
   const resume = h('select', { id: 'session-resume', 'aria-label': 'Conversation to continue' });
   // Conversations a program started are hidden - except the ones started here, which are listed
   // (2026-09-30). This shows the rest too, including Session-page ones from before that fix.
+  // Every conversation you or aicleaner started, not just the newest 25 (the user, 2026-10-17). Ones a
+  // program started are never listed.
   const showAll = h('label', { class: 'check hint', id: 'session-show-all',
-    title: 'Also list conversations started by programs (automated reviews, and Session-page conversations from before 30 Sep)' },
-    h('input', { type: 'checkbox' }), ' all', h('span', { id: 'session-all-note', class: 'muted' }, ''));
+    title: 'List every conversation in this profile, not just the newest 25 (ones a program started are never listed)' },
+    h('input', { type: 'checkbox' }), ' all - every conversation, not just the newest 25', h('span', { id: 'session-all-note', class: 'muted' }, ''));
   // What "all" added, so ticking it visibly does something even when it finds nothing (D86).
   const allNote = showAll.querySelector('#session-all-note');
   const resumeLine = h('div', { class: 'hint warn', id: 'session-resume-hint' }, '');
@@ -2447,6 +2454,8 @@ export async function render(main, context = {}) {
     }
   });
 
+  // Set once the consolidation note exists, further down (2026-10-17); paint() redraws it per session.
+  let showConsolidation = () => {};
   const paint = () => {
     // A refresh that lands after the page was left - another page routed in while it was in flight,
     // or the reconnect after a restart (D138) - has nothing to paint, and its elements are gone.
@@ -2456,6 +2465,7 @@ export async function render(main, context = {}) {
     const session = current();
     const profile = profileOf(view.name);
     repaint(list, sessionList(state_).filter(Boolean));
+    showConsolidation();
     // Each session has its own tabs; redrawn only when the session changes, never on a poll -
     // a PDF frame redrawn every 5 s would reload every 5 s.
     if (view.tabsShownFor !== view.name && view.tabs) {
@@ -2543,6 +2553,16 @@ export async function render(main, context = {}) {
       ? [h('option', { value: '' }, 'Loading conversations...')]
       : pastOptions(view.past, homeFolder));
     if (held && Array.from(resume.options).some((option) => option.value === held)) resume.value = held;
+    // The newest conversation chosen to start from (the user, 2026-10-17), until the person makes a
+    // choice of their own - "Start a new conversation" included - or the session runs. Only from
+    // this profile's own folders, never the "not in this profile yet" group.
+    // Not while a new chat started from earlier ones is waiting here: its brief needs a NEW conversation.
+    else if (!session.running && !view.pastLoading && view.resumeChosen !== view.name
+             && !(view.consolidations && view.consolidations.has(view.name))) {
+      const newest = (view.past || []).filter((entry) => !entry.outside).flatMap((entry) => entry.sessions || [])
+        .sort((a, b) => b.updated - a.updated)[0];
+      if (newest && Array.from(resume.options).some((option) => option.value === newest.id)) resume.value = newest.id;
+    }
     resume.disabled = Boolean(session.running || view.pastLoading);
     // Across every folder, not just the selected one: the chosen conversation may belong to
     // another of this profile's folders now that Continue offers them all.
@@ -2692,67 +2712,112 @@ export async function render(main, context = {}) {
   // Consolidating (2026-10-16, item F): the chosen conversations are summarised in the background, and
   // the brief goes into the prompt box of a new conversation - nothing is sent until Start and Send.
   // The originals are untouched; deleting them is offered once the new conversation runs.
+  // Each run belongs to the session it was started from (2026-10-17): its progress, its note and its
+  // brief show there only - switching away hides them, switching back shows them again. One note
+  // element per session name; showConsolidation() puts the one for the session on screen in place.
+  view.consolidations = view.consolidations || new Map();
+  const consolidateNote = h('div', { id: 'session-consolidate-note', class: 'callout consolidate-note', hidden: true });
+  showConsolidation = () => {
+    const mine = view.consolidations.get(view.name);
+    consolidateNote.hidden = !mine;
+    consolidateNote.replaceChildren(...(mine ? [mine] : []));         // the held element itself, so it keeps its children
+    if (mine) consolidateNote.dataset.session = view.name;
+  };
+  const setConsolidation = (name, ...nodes) => {
+    const held = view.consolidations.get(name) || document.createElement('div');
+    held.replaceChildren(...nodes);
+    view.consolidations.set(name, held);
+    if (name === view.name) showConsolidation();
+  };
+  const endConsolidation = (name) => {
+    view.consolidations.delete(name);
+    if (name === view.name) showConsolidation();
+  };
   const consolidateConversations = async (chosen) => {
+    const started = view.name;
     if (current().running) { say('Stop this session first: the brief starts a new conversation.', 'warn'); return; }
     let job;
     try {
-      job = (await postJSON('/api/session/consolidate', { name: view.name, ids: chosen.map((r) => r.id) })).job;
+      job = (await postJSON('/api/session/consolidate', { name: started, ids: chosen.map((r) => r.id) })).job;
     } catch (error) { sayError(error); return; }
     const titles = chosen.map((r) => r.label || r.title);
-    consolidateNote.hidden = false;
-    consolidateNote.replaceChildren(h('span', {}, `Summarising ${chosen.length} conversations...`));
+    setConsolidation(started, h('span', {}, `Summarising ${chosen.length} conversations for a new chat...`));
+    const runningThere = () => Boolean(((view.state && view.state.sessions) || {})[started] && view.state.sessions[started].running);
     const poll = async () => {
       let state;
       try { state = await getJSON(`/api/session/consolidate?job=${encodeURIComponent(job)}`); }
-      catch (error) { consolidateNote.replaceChildren(h('span', {}, `The consolidation stopped: ${error.message || error}`)); return; }
+      catch (error) { setConsolidation(started, h('span', {}, `Starting a new chat stopped: ${error.message || error}`)); return; }
       if (state.status !== 'done') {
-        consolidateNote.replaceChildren(h('span', {}, `Summarising ${Math.min(state.done + 1, state.total)} of ${state.total}...`));
+        setConsolidation(started, h('span', {}, `Summarising ${Math.min(state.done + 1, state.total)} of ${state.total} for a new chat...`));
         setTimeout(poll, 2000);
         return;
       }
-      resume.value = '';
-      paint();
-      if (view.setDraftFor) view.setDraftFor(view.name, state.brief);
+      if (started === view.name) { resume.value = ''; view.resumeChosen = started; paint(); }
+      if (view.setDraftFor) view.setDraftFor(started, state.brief);
       const remove = h('button', { type: 'button', class: 'consolidate-delete' }, `Delete the ${chosen.length} originals`);
       const keep = h('button', { type: 'button', class: 'consolidate-keep' }, 'Keep them');
       remove.addEventListener('click', async () => {
-        if (!current().running) { say('Start the new conversation first; then the originals can go.', 'warn'); return; }
+        if (!runningThere()) { say('Start the new conversation first; then the originals can go.', 'warn'); return; }
         for (const row of chosen) {
-          try { await postJSON('/api/session/conversations/delete', { name: view.name, id: row.id }); }
+          try { await postJSON('/api/session/conversations/delete', { name: started, id: row.id }); }
           catch (error) { sayError(error); }
         }
         say('The originals are in Recently deleted.', 'ok');
-        consolidateNote.hidden = true;
-        loadPast({ quiet: true });
+        endConsolidation(started);
+        if (started === view.name) loadPast({ quiet: true });
       });
-      keep.addEventListener('click', () => { consolidateNote.hidden = true; });
-      consolidateNote.replaceChildren(
-        h('p', {}, h('strong', {}, 'The brief is in the prompt box. '), 'Read or edit it, then press Start and Send. Made from: ',
+      keep.addEventListener('click', () => endConsolidation(started));
+      setConsolidation(started,
+        h('p', {}, h('strong', {}, 'The new chat\'s brief is in the prompt box. '), 'Read or edit it, then press Start and Send. Made from: ',
           titles.join('; '), '.'),
+        state.file ? h('p', { class: 'hint' }, 'The full summaries, and the ids of the conversations they came from, are in ',
+          h('span', { class: 'mono' }, state.file), '.') : null,
         ...(state.failed || []).map((f) => h('p', { class: 'hint' }, `No summary for ${f} - its opening and last turns are used instead.`)),
         h('div', { class: 'form-row' }, remove, keep));
     };
     poll();
   };
-  const consolidateNote = h('div', { id: 'session-consolidate-note', class: 'callout consolidate-note', hidden: true });
   const recentRows = (limit = 25) => (view.past || []).flatMap((entry) => (entry.sessions || []).map((row) => ({ ...row, project: entry.project })))
     .sort((a, b) => b.updated - a.updated).slice(0, limit);
-  const consolidateAction = { verb: 'Consolidate', min: 2, run: consolidateConversations };
-  // The search dialog with ticks: consolidate (item F) by default, or delete several (2026-10-17).
-  const openSearch = (withRecent = false, action = consolidateAction, limit = 25) => {
-    if (!view.name || document.getElementById('conv-search')) return;
-    openConversationSearch({ name: () => view.name, choose: chooseConversation, action,
-      initial: withRecent ? recentRows(limit) : null });
+  // Named for what it does (the user, 2026-10-17): the originals are summarised into a NEW chat.
+  const consolidateAction = {
+    verb: 'Consolidate', min: 2, run: consolidateConversations,
+    heading: 'Start a new chat from existing chats', label: 'Start from these',
+    // The user's own wording, 2026-10-17.
+    explain: [
+      h('ul', {},
+        h('li', {}, 'Each selected chat is summarised by the model through aicleaner.'),
+        h('li', {}, 'A short, high-level summary goes into the prompt box for you to review.'),
+        h('li', {}, 'The full summaries are written to Markdown files in the project\'s home folder (consolidations\\) '
+          + 'and referenced in the prompt.'),
+        h('li', {}, 'Original chats are not changed, but can be deleted from within the new session once satisfied.'))],
   };
-  const consolidateButton = h('button', { type: 'button', id: 'session-consolidate', class: 'link',
-    title: 'Start a new conversation from summaries of several earlier ones' }, 'Consolidate...');
+  // The search dialog with ticks: consolidate (item F) by default, or delete several (2026-10-17).
+  // With the list: every conversation of the profile, not only the 25 newest per folder that Continue
+  // shows (2026-10-17: of 216 imported chats about 50 could be reached). Read when the dialog opens.
+  const allRows = async () => {
+    const answer = await getJSON(`/api/session/past?name=${encodeURIComponent(view.name)}&limit=5000`);
+    return (answer.projects || []).flatMap((entry) => (entry.sessions || []).map((row) => ({ ...row, project: entry.project })))
+      .sort((a, b) => b.updated - a.updated);
+  };
+  const openSearch = async (withRecent = false, action = consolidateAction) => {
+    if (!view.name || document.getElementById('conv-search')) return;
+    let initial = null;
+    if (withRecent) {
+      try { initial = await allRows(); } catch (error) { initial = recentRows(Infinity); }
+    }
+    if (document.getElementById('conv-search')) return;
+    openConversationSearch({ name: () => view.name, choose: chooseConversation, action, initial });
+  };
+  const consolidateButton = h('button', { type: 'button', id: 'session-consolidate', class: 'conv-action',
+    title: 'Start a new conversation from summaries of several earlier ones' }, 'Start a new chat from existing chats...');
   consolidateButton.addEventListener('click', (event) => { event.preventDefault(); openSearch(true); });
-  const searchButton = h('button', { type: 'button', id: 'session-search-conversations', class: 'link',
+  const searchButton = h('button', { type: 'button', id: 'session-search-conversations', class: 'conv-action',
     title: 'Find a conversation by what it was about (Ctrl+K)' }, 'Search conversations');
   // Deleting a conversation (2026-10-16, item D): to Recently deleted for 30 days, put back from there.
-  const deleteButton = h('button', { type: 'button', id: 'session-delete-conversation', class: 'link',
+  const deleteButton = h('button', { type: 'button', id: 'session-delete-conversation', class: 'conv-action',
     title: 'Choose conversations to move to Recently deleted (kept 30 days)' }, 'Delete...');
-  const binButton = h('button', { type: 'button', id: 'session-recently-deleted', class: 'link' }, 'Recently deleted');
+  const binButton = h('button', { type: 'button', id: 'session-recently-deleted', class: 'conv-action' }, 'Recently deleted');
   // Delete opens the conversations with ticks and an All tick (the user, 2026-10-17), the one chosen
   // in Continue ticked already; then one question, and each goes to Recently deleted.
   const deleteConversations = async (chosen) => {
@@ -2771,22 +2836,22 @@ export async function render(main, context = {}) {
     if (chosen.some((row) => row.id === resume.value)) resume.value = '';
     await loadPast({ quiet: true });
   };
-  deleteButton.addEventListener('click', (event) => {
+  deleteButton.addEventListener('click', async (event) => {
     event.preventDefault();
     if (!view.name) return;
-    openSearch(true, { verb: 'Delete', min: 1, run: deleteConversations }, Infinity);
+    await openSearch(true, { verb: 'Delete', min: 1, run: deleteConversations });
     const chosen = resume.value && document.querySelector(`#conv-search .conv-pick[data-id='${resume.value}']`);
     if (chosen && !chosen.disabled) chosen.click();
   });
   binButton.addEventListener('click', (event) => { event.preventDefault(); openRecentlyDeleted(view.name, () => loadPast({ quiet: true })); });
   // Titles (2026-10-16, item E): rename the chosen one (yours always wins), ask the model for it, or
   // for every untitled one.
-  const renameButton = h('button', { type: 'button', id: 'session-rename-conversation', class: 'link',
+  const renameButton = h('button', { type: 'button', id: 'session-rename-conversation', class: 'conv-action',
     title: 'Give the chosen conversation your own title (empty puts the automatic one back)' }, 'Rename');
-  const retitleButton = h('button', { type: 'button', id: 'session-retitle-conversation', class: 'link',
+  const retitleButton = h('button', { type: 'button', id: 'session-retitle-conversation', class: 'conv-action',
     title: 'Ask the model for a title saying what the chosen conversation most recently worked on' }, 'Retitle');
-  const suggestButton = h('button', { type: 'button', id: 'session-suggest-titles', class: 'link',
-    title: 'Ask the model for titles for this profile\'s conversations that have none (newest 25)' }, 'Suggest titles');
+  const suggestButton = h('button', { type: 'button', id: 'session-suggest-titles', class: 'conv-action',
+    title: 'Ask the model for titles for the conversations listed in Continue that have none (the newest 25, or every one with "all" ticked)' }, 'Suggest titles');
   const chosenRow = () => (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id === resume.value);
   renameButton.addEventListener('click', async (event) => {
     event.preventDefault();
@@ -2823,7 +2888,9 @@ export async function render(main, context = {}) {
   suggestButton.addEventListener('click', async (event) => {
     event.preventDefault();
     try {
-      const answer = await postJSON('/api/session/conversations/suggest-titles', { name: view.name });
+      // What Continue lists: the newest 25, or every one with "all" ticked (the user, 2026-10-17).
+      const answer = await postJSON('/api/session/conversations/suggest-titles',
+        { name: view.name, all: showAll.querySelector('input').checked });
       say(answer.started ? `Writing titles for ${answer.started} conversations in the background - they show as they are written.`
         : 'Every conversation listed already has a title.', 'ok');
       if (answer.started) setTimeout(() => loadPast({ quiet: true }), 20000);
@@ -2982,6 +3049,7 @@ export async function render(main, context = {}) {
     saveDraft();                        // what was typed here stays with this session
     view.name = name;
     view.noneChosen = !name;
+    view.resumeChosen = '';             // Continue offers this session's newest conversation again
     rememberSession(name);
     // The address follows the session shown, so a notice naming it is a change of address only
     // when it names another one (D118). Replaced, not pushed: switching is not a page to go back to.
@@ -3027,10 +3095,14 @@ export async function render(main, context = {}) {
     h('div', { class: 'form-row session-head' }, heading, conversationTitle, clientChip, runningLine,
       h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start'), chat),
     h('div', { class: 'session-controls' },
-      h('label', { class: 'field' }, 'Continue', resume, showAll, searchButton, renameButton, retitleButton,
-        suggestButton, consolidateButton, deleteButton, binButton),
+      h('label', { class: 'field' }, 'Continue', resume, showAll),
       h('div', { class: 'field' }, h('span', {}, 'Starts in (home folder)'), homeShown),
       modeField),
+    // What can be done with conversations: buttons across the card's width, side by side first and then
+    // wrapping, a label on one or two lines each (the user, 2026-10-17). In the Continue field - a third
+    // of the card - they stood one under another.
+    h('div', { class: 'conv-actions' }, searchButton, renameButton, retitleButton,
+      suggestButton, consolidateButton, deleteButton, binButton),
     resumeLine,
     worktreeSlot);
   view.nonePicked = nonePicked;
@@ -3085,7 +3157,6 @@ export async function render(main, context = {}) {
     prompt.element,
     slash,
     readChip,
-    consolidateNote,
     h('div', { class: 'form-row' },
       h('button', { type: 'button', id: 'session-send', class: 'primary' }, 'Send'),
       insertCodeButton,
@@ -3236,7 +3307,8 @@ export async function render(main, context = {}) {
     filePane,
     // Waiting prompts above the prompt card, as the background tools are, not inside it: in the card
     // they pushed Send and the indicators out of its fixed height (the user, 2026-10-12).
-    h('div', { class: 'session-mid' }, background, cards, queueBox),
+    // A new chat being started from earlier ones shows here too, as the background tools do (2026-10-17).
+    h('div', { class: 'session-mid' }, background, consolidateNote, cards, queueBox),
     promptBar,
     promptPane);
   const band = h('div', { class: `session-band${filesOpen ? ' rail-open' : ''}`, id: 'session-band' },
@@ -3281,7 +3353,8 @@ export async function render(main, context = {}) {
   showAll.querySelector('input').addEventListener('change', () => { loadPast().catch(() => {}); });
   // Picking a conversation no longer moves a Folder choice: every session starts in the home, and
   // a conversation filed elsewhere is found where it is (DECISIONS 64).
-  resume.addEventListener('change', paint);
+  // A choice made here - "Start a new conversation" included - is kept until the session changes.
+  resume.addEventListener('change', () => { view.resumeChosen = view.name; paint(); });
 
   // What Send does, so the key and the button cannot drift apart (feature 48).
   async function sendPrompt() {

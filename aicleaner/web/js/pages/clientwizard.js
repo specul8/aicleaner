@@ -10,6 +10,7 @@ import { getJSON, postJSON, say, sayError } from '../api.js';
 import { refreshStatus } from '../app.js';
 import { h, kindLabel, setChildren } from '../dom.js';
 import { folderPicker } from '../picker.js';
+import { arrangeSheet } from '../sheet.js';
 
 export const SKIP_KEY = 'aicleaner.clientWizard';
 const PAGES = ['Intro', 'Client name', 'Alternate names', 'Domains', 'Email domains', 'Other identifiers', 'Scan a repository', 'Finish'];
@@ -38,10 +39,12 @@ export function openClientWizard(onCreated) {
   const back = h('button', { type: 'button', class: 'wizard-back', 'aria-label': 'Back', title: 'Back' }, '<');
   const forward = h('button', { type: 'button', class: 'wizard-forward', 'aria-label': 'Forward', title: 'Forward' }, '>');
   const where = h('span', { class: 'wizard-where hint' });
-  const close = h('button', { type: 'button', class: 'wizard-close', 'aria-label': 'Close' }, 'Close');
+  // Cancel, on the left at the foot (2026-10-17); the draft is saved as typed, so nothing is lost.
+  const close = h('button', { type: 'button', class: 'wizard-close', title: 'Close the wizard - the draft is kept' }, 'Cancel');
   const dialog = h('dialog', { id: 'client-wizard', class: 'sheet wizard' },
     h('div', { class: 'wizard-head' }, back, forward, where, close), body);
   document.body.append(dialog);
+  arrangeSheet(dialog, { head: dialog.querySelector('.wizard-head'), cancel: close, dirty: () => false });
   close.addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => dialog.remove());
   back.addEventListener('click', () => go(-1));

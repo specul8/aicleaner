@@ -8,6 +8,7 @@ import { postJSON, say, sayError } from '../api.js';
 import { refreshStatus } from '../app.js';
 import { h } from '../dom.js';
 import { openClientWizard, setWizardSkipped, wizardSkipped } from './clientwizard.js';
+import { arrangeSheet } from '../sheet.js';
 
 // The short form (feature 111): the id and display name, with the wizard's help. The index is not
 // asked for: it is worked out from the id, every time.
@@ -45,6 +46,7 @@ export function askForNewClient(onCreated) {
       h('button', { type: 'button', class: 'cancel' }, 'Cancel')));
   const dialog = h('dialog', { id: 'new-client-dialog', class: 'sheet' }, form);
   document.body.append(dialog);
+  arrangeSheet(dialog);
 
   form.querySelector('.cancel').addEventListener('click', () => dialog.close());
   form.querySelector('.use-wizard').addEventListener('click', () => {

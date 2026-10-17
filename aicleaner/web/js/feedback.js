@@ -6,6 +6,7 @@
 
 import { getJSON, postJSON, say, sayError } from './api.js';
 import { h } from './dom.js';
+import { arrangeSheet } from './sheet.js';
 
 const TEMPLATES = {
   bug: '## What happened\n\n\n## How to make it happen again\n1. \n',
@@ -208,11 +209,13 @@ export async function openFeedback() {
   // One row at the foot (the user, 2026-10-16): Cancel far left, Send far right (on New only).
   const cancelButton = h('button', { type: 'button', class: 'fb-dismiss' }, 'Cancel');
   const sendSlot = h('span', { class: 'fb-send-slot' });
-  const footer = h('div', { class: 'fb-footer', hidden: true }, cancelButton, sendSlot);
+  // Always shown (2026-10-17): every dialog has its Cancel in view, the consent step included.
+  const footer = h('div', { class: 'fb-footer' }, cancelButton, sendSlot);
   const dialog = h('dialog', { id: 'feedback-dialog', class: 'sheet feedback-dialog', 'aria-label': 'Feedback' }, body, footer);
   const finish = () => { dialog.close(); dialog.remove(); };
   cancelButton.addEventListener('click', finish);
   dialog.addEventListener('close', () => { if (dialog.isConnected) dialog.remove(); });
+  arrangeSheet(dialog);
 
   const showTabs = () => {
     const tabs = { new: null, open: listTab('open'), closed: listTab('closed') };

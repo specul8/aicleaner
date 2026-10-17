@@ -6,6 +6,7 @@
 // the forms and goes on, Stay keeps everything as it is.
 
 import { h } from './dom.js';
+import { arrangeSheet } from './sheet.js';
 
 let tracked = [];
 let asking = null;
@@ -51,6 +52,8 @@ function dialog() {
       h('button', { type: 'button', class: 'unsaved-stay primary' }, 'Stay on this page'),
       h('button', { type: 'button', class: 'unsaved-leave' }, 'Leave and lose the changes')));
   document.body.append(found);
+  // Stay is its Cancel: on the left, and what a click behind or Escape does.
+  arrangeSheet(found, { cancel: found.querySelector('.unsaved-stay'), dirty: () => false });
   return found;
 }
 

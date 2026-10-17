@@ -986,8 +986,31 @@ button.nav-add:hover { background: var(--row-hover, rgba(127, 127, 127, .15)); }
 /* --surface, the same as .card: there is no --card variable, and var(--card) with no fallback is
    invalid at computed-value time, which is transparent rather than an error - so the dialog showed
    the page straight through its own text. */
+/* Sized by its content, up to 90% of the window (95% on a small screen) - no set widths (the user,
+   2026-10-17). Taller than the window, the dialog itself scrolls: its content is one page, not boxes
+   that scroll inside it. */
 dialog.sheet { border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
-  color: inherit; padding: 1rem 1.2rem 1.2rem; max-width: 34rem; width: calc(100vw - 2rem); }
+  color: inherit; padding: 1rem 1.2rem 1rem; width: fit-content; min-width: min(24rem, 95vw);
+  max-width: 90vw; max-height: 90vh; overflow: hidden; box-sizing: border-box; }
+/* What it is for at the top, its buttons at the bottom, the content scrolling between (sheet.js,
+   the user, 2026-10-17). */
+dialog.sheet[open], dialog.sheet .sheet-form { display: flex; flex-direction: column; min-height: 0; }
+dialog.sheet .sheet-form { flex: 1 1 auto; overflow: hidden; margin: 0; }
+.sheet-head { flex: none; padding-bottom: .5rem; border-bottom: 1px solid var(--border); margin-bottom: .5rem; }
+.sheet-head h2 { margin: 0; }
+.sheet-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+.sheet-foot { flex: none; display: flex; justify-content: space-between; align-items: center; gap: .5rem;
+  margin-top: .6rem; padding-top: .6rem; border-top: 1px solid var(--border); }
+/* Cancel on the left and uncoloured; every other action on the right; Save green, Delete red (the
+   user, 2026-10-17). Classes set by sheet.js from the label, so a label that changes recolours. */
+.sheet-actions { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; margin-left: auto; }
+.sheet-foot .sheet-cancel-button, .sheet-foot .sheet-cancel-button:hover { background: var(--surface); color: var(--text);
+  border-color: var(--border); }
+.sheet-foot button.sheet-save { background: #1f8a4c; border-color: #1f8a4c; color: #fff; }
+.sheet-foot button.sheet-save:hover { background: #18703d; border-color: #18703d; }
+.sheet-foot button.sheet-delete { background: #c0392b; border-color: #c0392b; color: #fff; }
+.sheet-foot button.sheet-delete:hover { background: #a93226; border-color: #a93226; }
+@media (max-width: 40rem) { dialog.sheet { max-width: 95vw; } }
 dialog.sheet::backdrop { background: rgba(0, 0, 0, .45); }
 dialog.sheet h2 { margin-top: 0; }
 dialog.sheet .field { margin-bottom: .7rem; }
@@ -1389,7 +1412,6 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
 .setup-remote-guide ol { margin: .25rem 0 .5rem; }
 
 /* Feature 111: the Add Client wizard. */
-dialog.wizard { width: min(46rem, 94vw); }
 .wizard-head { display: flex; align-items: center; gap: .4rem; margin-bottom: .6rem; }
 .wizard-head .wizard-where { flex: 1; }
 .wizard-back, .wizard-forward { min-width: 2.2rem; font-weight: 700; }
@@ -1409,11 +1431,11 @@ dialog.wizard { width: min(46rem, 94vw); }
 .card .form-row > textarea { flex: 1 1 18rem; min-width: 0; }
 
 /* Searching conversations by topic (2026-10-16): a wide sheet, the query on top, the cards below. */
-dialog.conv-search { width: min(56rem, 94vw); max-height: 88vh; display: flex; flex-direction: column; }
 dialog.conv-search:not([open]) { display: none; }
 .conv-bar { flex-wrap: wrap; gap: .5rem; align-items: center; }
 .conv-query { flex: 1 1 22rem; min-width: 12rem; font-size: 1rem; }
-.conv-results { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1 1 auto; min-height: 6rem; }
+/* Part of the dialog's page, not a box that scrolls inside it (the user, 2026-10-17). */
+.conv-results { list-style: none; margin: 0; padding: 0; }
 .conv-card { border: 1px solid var(--border); border-radius: 6px; padding: .5rem .7rem; margin-bottom: .45rem;
   cursor: pointer; background: var(--surface); }
 .conv-card:hover, .conv-card.active { border-color: var(--accent); background: var(--surface-2); }
@@ -1424,10 +1446,8 @@ dialog.conv-search:not([open]) { display: none; }
 .conv-passage { margin: .3rem 0 0; font-size: .85rem; overflow-wrap: anywhere; white-space: pre-wrap; }
 .conv-passage mark { background: var(--warn-bg); color: inherit; border-radius: 2px; padding: 0 1px; }
 .conv-who { font-size: .75rem; color: var(--muted); }
-#session-search-conversations { margin-left: .5rem; }
 
 /* Feedback (2026-10-16): a sheet with New / Open / Closed tabs. */
-dialog.feedback-dialog { width: min(48rem, 94vw); max-height: 90vh; overflow-y: auto; }
 .fb-tabs { display: flex; gap: .3rem; border-bottom: 1px solid var(--border); margin-bottom: .7rem; }
 .fb-tab { border: 1px solid var(--border); border-bottom: 0; border-radius: 6px 6px 0 0; background: var(--surface-2); }
 .fb-tab[aria-selected="true"] { background: var(--surface); font-weight: 600; }
@@ -1447,31 +1467,31 @@ dialog.feedback-dialog { width: min(48rem, 94vw); max-height: 90vh; overflow-y: 
 .agent-report summary { cursor: pointer; }
 .agent-report-body { margin-top: .3rem; padding-left: .5rem; border-left: 3px solid var(--border); overflow-wrap: anywhere; }
 /* Claude Code's trusted folders on profile Save (2026-10-16, item C). */
-dialog.trust-dialog { width: min(52rem, 94vw); }
 .trust-grid { border-collapse: collapse; width: 100%; margin: .5rem 0; font-size: .85rem; }
 .trust-grid th, .trust-grid td { border: 1px solid var(--border); padding: .25rem .4rem; text-align: left; }
 .trust-grid td.mono { overflow-wrap: anywhere; }
 .trust-missing { color: var(--bad, #c0392b); font-weight: 600; }
 /* Recently deleted conversations (2026-10-16, item D). */
-#session-delete-conversation, #session-recently-deleted, #session-rename-conversation,
-#session-retitle-conversation, #session-suggest-titles { margin-left: .5rem; }
-dialog.bin-dialog { width: min(44rem, 94vw); }
+/* The Continue row's actions: buttons in a row that wraps, a label on one or two lines (2026-10-17). */
+.conv-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; }
+.conv-actions > button.conv-action { flex: 0 1 9.5rem; min-height: 2.6rem; justify-content: center; text-align: center;
+  white-space: normal; line-height: 1.25; padding: 4px 8px; }
 .bin-list { list-style: none; margin: 0; padding: 0; }
 .bin-row { padding: .35rem 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
-dialog.confirm-dialog { width: min(32rem, 92vw); }
 .conv-label { font-weight: 700; margin: .15rem 0; overflow-wrap: anywhere; }
 /* The conversation title beside the profile name (item E, 2026-10-17). */
 .session-conversation-title { font-weight: 600; color: var(--muted); max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Consolidating conversations (2026-10-16, item F). */
-#session-consolidate { margin-left: .5rem; }
 .consolidate-note { margin: .4rem 0; }
 .conv-pick { margin-right: .3rem; }
 /* All: every card shown ticked, or none (2026-10-17). */
 .conv-all { display: block; margin: .2rem 0 .4rem; font-weight: 600; }
 .conv-all[hidden] { display: none; }
+.conv-explain { font-size: .9rem; margin-bottom: .4rem; }
+.conv-explain ul { margin: .2rem 0 .2rem 1.1rem; padding: 0; }
 /* Importing a project from claude.ai (2026-10-16, item H). */
 #session-claude-import { display: block; margin-top: .3rem; }
-dialog.ci-dialog { width: min(60rem, 96vw); max-height: 92vh; display: flex; flex-direction: column; }
+
 dialog.ci-dialog:not([open]) { display: none; }
 .ci-steps { display: flex; flex-wrap: wrap; gap: .3rem; list-style: none; margin: 0 0 .6rem; padding: 0; counter-reset: ci; }
 .ci-steps li { counter-increment: ci; padding: .2rem .55rem; border: 1px solid var(--border); border-radius: var(--radius);
@@ -1479,7 +1499,7 @@ dialog.ci-dialog:not([open]) { display: none; }
 .ci-steps li::before { content: counter(ci) ". "; }
 .ci-steps li.current { color: var(--text); border-color: var(--accent); font-weight: 600; }
 .ci-steps li.done { color: var(--ok-text); border-color: var(--ok-border); }
-.ci-body { overflow: auto; flex: 1 1 auto; min-height: 12rem; }
+.ci-body { min-height: 12rem; }
 .ci-drop { border: 2px dashed var(--border); border-radius: var(--radius); padding: 1rem; margin: .5rem 0; }
 .ci-drop.over { border-color: var(--accent); }
 .ci-files, .ci-projects { list-style: none; margin: .4rem 0; padding: 0; }
@@ -1493,7 +1513,7 @@ dialog.ci-dialog:not([open]) { display: none; }
 .ci-instructions { white-space: pre-wrap; font-size: .8rem; margin: .2rem 0 0; color: var(--muted); max-height: 6em; overflow: hidden; }
 .ci-chat-tools { align-items: center; gap: .5rem; flex-wrap: wrap; }
 .ci-count { color: var(--muted); font-size: .85rem; margin-left: auto; }
-.ci-chat-scroll { max-height: 52vh; overflow: auto; margin-top: .4rem; }
+.ci-chat-scroll { margin-top: .4rem; }
 .ci-chats { border-collapse: collapse; width: 100%; font-size: .85rem; }
 .ci-chats th, .ci-chats td { border-bottom: 1px solid var(--border); padding: .25rem .4rem; text-align: left; vertical-align: top; }
 .ci-chats tr.ci-imported td { color: var(--muted); }

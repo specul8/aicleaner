@@ -8,6 +8,7 @@
 
 import { getJSON, postJSON } from './api.js';
 import { h } from './dom.js';
+import { arrangeSheet } from './sheet.js';
 
 const AI_KEY = 'aicleaner-conversation-search-ai';
 const WAIT_MS = 300;
@@ -63,7 +64,7 @@ function card(result, index, several, picked, verb) {
 }
 
 // opts: { name: () => profile shown, choose(result), initial: rows shown while nothing is typed (optional),
-//         action: { verb, min, run(results) } (optional) - ticks on the cards, an All tick, and a button
+//         action: { verb, min, run(results), heading?, label?, explain? } (optional) - ticks on the cards, an All tick, and a button
 //         that acts on the ticked ones: Consolidate (item F, 2 or more) or Delete (1 or more) }
 export function openConversationSearch(opts) {
   const input = h('input', { type: 'search', class: 'conv-query', placeholder: 'What was it about? e.g. code signing certificates',
@@ -79,18 +80,20 @@ export function openConversationSearch(opts) {
   const verb = action ? action.verb : '';
   const actButton = h('button', { type: 'button', class: `primary conv-act conv-${verb.toLowerCase() || 'none'}`, hidden: true }, verb);
   // Every card shown ticked, or none (the user, 2026-10-17).
-  const all = action ? h('label', { class: 'check conv-all' }, h('input', { type: 'checkbox', class: 'conv-all-tick' }), ' All') : null;
+  const all = action ? h('label', { class: 'check conv-all' }, h('input', { type: 'checkbox', class: 'conv-all-tick' }), ' All - tick every conversation listed') : null;
   const dialog = h('dialog', { id: 'conv-search', class: 'sheet conv-search', 'aria-label': 'Search conversations' },
-    h('h2', {}, verb ? `${verb} conversations` : 'Search conversations'),
+    h('h2', {}, (action && action.heading) || (verb ? `${verb} conversations` : 'Search conversations')),
+    action && action.explain ? h('div', { class: 'conv-explain' }, ...action.explain) : null,
     h('div', { class: 'form-row conv-bar' }, input, scope, ai),
     status, all, list, h('div', { class: 'fb-footer' }, close, actButton));
   document.body.append(dialog);
+  arrangeSheet(dialog, { dirty: () => false });      // ticks are a choice, not changes to save
 
   const state = { results: [], active: 0, timer: null, asked: 0, picked: new Map() };
   const tickable = () => state.results.filter((r) => !(verb === 'Delete' && r.busy));
   const showPicked = () => {
     actButton.hidden = !action || state.picked.size < action.min;
-    actButton.textContent = `${verb} (${state.picked.size})`;
+    actButton.textContent = `${action.label || verb} (${state.picked.size})`;
     if (all) {
       const box = all.querySelector('input');
       const shown = tickable();

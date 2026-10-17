@@ -7,6 +7,7 @@
 import { getJSON, postJSON, say, sayError } from './api.js';
 import { h } from './dom.js';
 import { sendInPieces } from './pieces.js';
+import { arrangeSheet } from './sheet.js';
 
 const STEPS = ['Ask for the export', 'The manifest', 'Download the files', 'The project', 'Its chats', 'Where it goes', 'Import'];
 const EXPORT_PAGE = 'https://claude.ai/settings/data-privacy-controls';
@@ -29,7 +30,7 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
   const state = {
     step: 0, job: '', files: [], watching: [], folder: '', projects: [], project: null, chats: [], ticked: new Set(),
     filter: '', client: '', place: '', share: 'create', sharePath: '', pairs: [['', '']], memories: true, keepZips: false,
-    report: null,
+    report: null, remembered: null, local: false, source: '',
   };
   let timer = 0;
   const steps = h('ol', { class: 'ci-steps' });
@@ -71,6 +72,14 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
       + 'The export holds every chat the account has; only the project you choose is imported, and the copies '
       + 'aicleaner takes are deleted afterwards.'));
 
+  // A job begun, whichever way: a manifest chosen, the export used last, or a folder on this machine.
+  const begin = (answer) => {
+    if (state.job && state.job !== answer.job) postJSON('/api/claude-import/cancel', { job: state.job }).catch(() => {});
+    Object.assign(state, { job: answer.job, files: answer.files, watching: answer.watching || [], source: answer.folder || '',
+      projects: [], project: null, chats: [], ticked: new Set() });
+    if (answer.folder) state.folder = answer.folder;
+    render();
+  };
   const manifestStep = () => {
     const input = h('input', { type: 'file', accept: '.json,application/json', class: 'ci-manifest-file' });
     const drop = h('div', { class: 'ci-drop' }, 'Drop the manifest here, or ', input);
@@ -78,12 +87,29 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
       if (!file) return;
       try {
         const doc = JSON.parse(await file.text());
-        const answer = await postJSON('/api/claude-import/manifest', { manifest: doc });
-        if (state.job) postJSON('/api/claude-import/cancel', { job: state.job }).catch(() => {});
-        Object.assign(state, { job: answer.job, files: answer.files, watching: answer.watching || [] });
-        render();
+        begin(await postJSON('/api/claude-import/manifest', { manifest: doc }));
       } catch (error) { sayError(error instanceof SyntaxError ? new Error('That file is not JSON: choose the manifest-....json file') : error); }
     };
+    // The export used last, and any export already on this machine (2026-10-17): no download needed.
+    const known = state.remembered;
+    const again = h('button', { type: 'button', class: 'ci-reuse', disabled: known && known.complete ? null : true }, 'Use it again');
+    again.addEventListener('click', async () => {
+      try { begin(await postJSON('/api/claude-import/reuse', {})); } catch (error) { sayError(error); }
+    });
+    const place = h('input', { type: 'text', class: 'ci-export-folder', placeholder: 'C:\\Users\\me\\Downloads\\Claude export',
+      value: known ? known.folder : '' });
+    const useFolder = h('button', { type: 'button', class: 'ci-use-folder' }, 'Use this folder');
+    useFolder.addEventListener('click', async () => {
+      if (!place.value.trim()) return;
+      try { begin(await postJSON('/api/claude-import/folder', { folder: place.value.trim() })); } catch (error) { sayError(error); }
+    });
+    const reuse = state.local ? h('div', { class: 'ci-reuse-box' },
+      known ? h('p', { class: 'ci-remembered' }, 'Last time: the export made ', h('strong', {}, dateOf(known.created_at) || 'earlier'),
+        ', from ', h('span', { class: 'mono' }, known.folder), '. ', again,
+        known.complete ? null : h('span', { class: 'hint' }, ' (its zips are no longer all there)')) : null,
+      h('label', { class: 'field' }, 'Or an export already on this machine - the folder holding its manifest and zips',
+        h('div', { class: 'form-row' }, place, useFolder)),
+      h('p', { class: 'hint' }, 'Or, for a new export, choose its manifest:')) : null;
     input.addEventListener('change', () => take(input.files[0]));
     drop.addEventListener('dragover', (event) => { event.preventDefault(); drop.classList.add('over'); });
     drop.addEventListener('dragleave', () => drop.classList.remove('over'));
@@ -96,8 +122,11 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
           : ' - not needed for the import'))));
     });
     return h('div', {},
+      reuse,
       h('p', {}, 'The e-mail\'s link downloads a manifest - ', h('span', { class: 'mono' }, 'manifest-....json'), '. Choose it here.'),
       drop,
+      state.source ? h('p', { class: 'hint ci-source' }, 'Its files are looked for in ', h('span', { class: 'mono' }, state.source),
+        ' as well as Downloads.') : null,
       rows.length ? h('ul', { class: 'ci-files' }, ...rows) : null);
   };
 
@@ -280,6 +309,13 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
 
   const enter = async (step) => {
     try {
+      // Every file the import needs is here already (a folder on this machine, the export used last, or
+      // Downloads): nothing to download, so that step is passed over (the user, 2026-10-17).
+      if (step === 2 && ticked().length && ticked().every((f) => f.state === 'received')) {
+        say('The export\'s files are already on this machine - nothing to download.', 'ok');
+        await enter(3);
+        return;
+      }
       if (step === 3 && !state.projects.length) {
         state.projects = (await getJSON(`/api/claude-import/projects?job=${state.job}`)).projects || [];
       }
@@ -347,6 +383,13 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
   cancel.addEventListener('click', () => close(Boolean(state.report)));
   dialog.addEventListener('cancel', (event) => { event.preventDefault(); close(Boolean(state.report)); });
   document.body.append(dialog);
+  // Title and steps fixed at the top, the buttons at the bottom; a click behind cancels only before
+  // anything has been started, or once it is done (2026-10-17).
+  arrangeSheet(dialog, { head: [dialog.querySelector('h2'), steps], dirty: () => Boolean(state.job) && !state.report });
   dialog.showModal();
   render();
+  getJSON('/api/claude-import/remembered').then((answer) => {
+    Object.assign(state, { remembered: answer.remembered || null, local: Boolean(answer.local) });
+    if (state.step === 1) render();
+  }).catch(() => {});
 }

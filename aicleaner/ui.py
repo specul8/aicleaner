@@ -747,9 +747,20 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         from .session import SessionError
 
         name = request.query.get("name", "")
+        # Continue lists the newest 25 per folder (reading many cold is slow); the Delete and new-chat
+        # dialogs ask for every one when they open (2026-10-17: 216 imported, about 50 reachable).
+        try:
+            limit = max(1, min(int(request.query.get("limit") or 25), 5000))
+        except ValueError:
+            limit = 25
         try:
             # Off the loop: this opens and reads transcripts looking for their opening message.
-            past = await asyncio.to_thread(session_host().past, name, 25, request.query.get("all") == "1")
+            # "all" is every conversation a person or aicleaner started, not just the newest 25 (the
+            # user, 2026-10-17). Ones a program started (PR review bots) are never listed: nobody
+            # opens them, and they used to be what "all" added.
+            if request.query.get("all") == "1":
+                limit = 5000
+            past = await asyncio.to_thread(session_host().past, name, limit, False)
             return web.json_response({"projects": past})
         except SessionError as problem:
             return err(problem, status=404)
@@ -805,7 +816,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             elif action == "retitle":
                 answer = await asyncio.to_thread(host.retitle_conversation, name, conv_id)
             else:
-                answer = {"started": await asyncio.to_thread(host.suggest_titles, name)}
+                answer = {"started": await asyncio.to_thread(host.suggest_titles, name, bool(body.get("all")))}
         except SessionError as problem:
             return err(problem, status=409)
         return web.json_response(answer)
@@ -905,8 +916,28 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             host, imports = claude_imports()
             if step == "manifest":
                 job = imports.start((await request.json()).get("manifest"))
+                # Looked for at once - in Downloads, and where this export was last time - so files
+                # already here are not offered for download again (2026-10-17).
                 return web.json_response({"job": job.id, "created_at": job.manifest["created_at"],
-                                          "files": imports.status(job), "watching": [str(p) for p in _import_watch(request)]})
+                                          "files": await asyncio.to_thread(imports.status, job, _import_watch(request)),
+                                          "watching": [str(p) for p in _import_watch(request)],
+                                          "folder": str(job.extra or "")})
+            if step == "remembered":
+                # The export used last, and whether one on this machine can be used - only on the
+                # machine itself, as the folders are this machine's (2026-10-17).
+                local = not request.get(REMOTE)
+                return web.json_response({"local": local, "remembered": imports.remembered() if local else None})
+            if step in ("folder", "reuse"):
+                if request.get(REMOTE):
+                    return err(ValueError("an export already on the machine is used from the machine itself; "
+                                          "through remote access, choose the manifest"), status=403)
+                body = await request.json() if step == "folder" else {}
+                job = await asyncio.to_thread(imports.start_from_folder, Path(str(body.get("folder", "")))) \
+                    if step == "folder" else await asyncio.to_thread(imports.start_remembered)
+                return web.json_response({"job": job.id, "created_at": job.manifest["created_at"],
+                                          "files": await asyncio.to_thread(imports.status, job, _import_watch(request)),
+                                          "watching": [str(p) for p in _import_watch(request)],
+                                          "folder": str(job.extra or "")})
             if step == "received":
                 job = imports.get(request.query.get("job", ""))
                 watch = _import_watch(request, request.query.get("folder", ""))

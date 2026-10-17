@@ -10,6 +10,7 @@
 
 import { getJSON, postJSON, sayError } from './api.js';
 import { h, icon } from './dom.js';
+import { arrangeSheet } from './sheet.js';
 
 // A modal dialog with a tree (D114, the user, 2026-10-06). It opened inline under its button and
 // grew and shrank with each folder, moving the page and pushing its own buttons off-screen; and it
@@ -238,6 +239,7 @@ async function openPicker(input, opts) {
     close();
   });
 
+  arrangeSheet(dialog, { layout: false, dirty: () => false });   // its own layout; a click behind cancels
   dialog.showModal();
   tree.replaceChildren(h('p', { class: 'hint' }, 'Loading folders...'));
   // Open where the box already points, so correcting a path does not start from the drive again.
