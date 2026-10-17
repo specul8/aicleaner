@@ -816,10 +816,19 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             elif action == "retitle":
                 answer = await asyncio.to_thread(host.retitle_conversation, name, conv_id)
             else:
-                answer = {"started": await asyncio.to_thread(host.suggest_titles, name, bool(body.get("all")))}
+                answer = {"started": await asyncio.to_thread(host.suggest_titles, name, bool(body.get("all"))),
+                          "progress": host.title_queue().progress()}
         except SessionError as problem:
             return err(problem, status=409)
         return web.json_response(answer)
+
+    async def titles_progress(request: web.Request) -> web.Response:
+        """How the background titles are going, for the page's progress toast (2026-10-17)."""
+        from .session import SessionError
+        try:
+            return web.json_response(session_host().title_queue().progress())
+        except SessionError as problem:
+            return err(problem, status=404)
 
     async def conversation_consolidate(request: web.Request) -> web.Response:
         """Start a consolidation (POST {name, ids}) or ask how it is going (GET ?job=) - item F."""
@@ -3379,6 +3388,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get("/api/session/conversations/{action:deleted}", conversation_bin)
         app.router.add_post("/api/session/conversations/{action:delete|restore|purge}", conversation_bin)
         app.router.add_post("/api/session/conversations/{action:title|retitle|suggest-titles}", conversation_titles)
+        app.router.add_get("/api/session/conversations/titles-progress", titles_progress)
         app.router.add_route("*", "/api/session/consolidate", conversation_consolidate)
         app.router.add_route("*", "/api/claude-import/{step}", claude_import)
         app.router.add_post("/api/session/drop/{step}", session_drop)

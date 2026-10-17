@@ -2087,17 +2087,21 @@ class SessionHost:
         listed = self.past(name, 5000 if every else 25)
         untitled = [row["id"] for group in listed if not group.get("outside") for row in group["sessions"]
                     if row["id"].lower() not in labels]
+        return self.title_queue().add(name, untitled)
 
-        def work() -> None:
-            for conv_id in untitled:
+    def title_queue(self) -> Any:
+        """The background titles, four at a time, with the progress the page's toast shows (2026-10-17)."""
+        if getattr(self, "_title_queue", None) is None:
+            from .titles import TitleQueue
+
+            def one(name: str, conv_id: str) -> None:
                 try:
                     self.retitle_conversation(name, conv_id)
                 except SessionError as exc:
                     log.info("no title for %s: %s", conv_id, exc)
-
-        import threading
-        threading.Thread(target=work, name="aicleaner-titles", daemon=True).start()
-        return len(untitled)
+                    raise
+            self._title_queue = TitleQueue(one)
+        return self._title_queue
 
     # ---- consolidating conversations (2026-10-16, item F) ---------------------------------------------
 

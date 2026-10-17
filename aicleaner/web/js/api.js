@@ -169,7 +169,7 @@ function trim(host) {
   // "Never replace" plus "errors do not expire" can fill the column, so there is a ceiling - and
   // what goes is always the oldest one that would have gone by itself anyway.
   const all = [...host.children];
-  const droppable = all.filter((t) => !LINGERS.has(t.dataset.level));
+  const droppable = all.filter((t) => !LINGERS.has(t.dataset.level) && !t.classList.contains('toast-sticky'));
   let over = all.length - STACK_MAX;
   for (const toast of droppable) {
     if (over <= 0) break;
@@ -270,6 +270,46 @@ export function say(text, level = 'info', extra = {}) {
   host.append(toast);
   trim(host);
   return toast;
+}
+
+// A toast that stays and is rewritten as work goes on (2026-10-17: titles written in the background).
+// update(text) changes it; finish(text, ms) shows the last word and removes it ms later. Closing it
+// with the x hides it for the rest of that run.
+export function stickyToast(id) {
+  let toast = document.getElementById(id);
+  let dismissed = false;
+  const make = () => {
+    toast = document.createElement('div');
+    toast.id = id;
+    toast.className = 'toast toast-sticky';
+    toast.dataset.level = 'info';
+    toast.setAttribute('role', 'status');
+    toast.setAttribute('aria-live', 'polite');
+    const body = document.createElement('span');
+    body.className = 'toast-text';
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.className = 'toast-close';
+    close.setAttribute('aria-label', 'Dismiss');
+    close.textContent = '×';
+    close.addEventListener('click', () => { dismissed = true; toast.remove(); });
+    toast.append(body, close);
+    toastHost().append(toast);
+  };
+  const show = (text) => {
+    if (dismissed) return;
+    if (!toast || !toast.isConnected) make();
+    toast.querySelector('.toast-text').textContent = text;
+  };
+  return {
+    update: show,
+    finish(text, ms) {
+      dismissed = false;
+      show(text);
+      const done = toast;
+      setTimeout(() => done.remove(), ms);
+    },
+  };
 }
 
 // `handlers` maps a server-named action to the call this page can make for it, e.g.

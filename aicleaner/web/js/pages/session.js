@@ -25,6 +25,7 @@ import { openConversationSearch } from '../convsearch.js';
 import { openFeedback } from '../feedback.js';
 import { openClaudeImport } from '../claudeimport.js';
 import { attachFileDrop } from '../filedrop.js';
+import { watchTitles } from '../titleprogress.js';
 import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetTitle, splitPrompt } from '../snippets.js';
 import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
@@ -2891,11 +2892,14 @@ export async function render(main, context = {}) {
       // What Continue lists: the newest 25, or every one with "all" ticked (the user, 2026-10-17).
       const answer = await postJSON('/api/session/conversations/suggest-titles',
         { name: view.name, all: showAll.querySelector('input').checked });
-      say(answer.started ? `Writing titles for ${answer.started} conversations in the background - they show as they are written.`
-        : 'Every conversation listed already has a title.', 'ok');
-      if (answer.started) setTimeout(() => loadPast({ quiet: true }), 20000);
+      // The progress toast (2026-10-17) says what is going on; Continue shows each title as it lands.
+      if (answer.started) watchTitles(() => loadPast({ quiet: true }), true);
+      else if (answer.progress && answer.progress.running) watchTitles(() => loadPast({ quiet: true }));
+      else say('Every conversation listed already has a title.', 'ok');
     } catch (error) { sayError(error); }
   });
+  // A run still going - pressed before a reload, or from another page - shows its toast here too.
+  watchTitles(() => loadPast({ quiet: true }));
   searchButton.addEventListener('click', (event) => { event.preventDefault(); openSearch(); });
   view.openSearch = openSearch;
   if (!view.searchHooked) {

@@ -24,7 +24,8 @@ GROWTH = 4                  # turns a conversation must gain before the model re
 LAST_TURNS = 30
 MAX_WORDS = 6000
 MAX_TITLE = 80
-TIMEOUT_S = 60
+TIMEOUT_S = 120             # 60 timed out on large conversations (the user, 2026-10-17)
+WORKERS = 4                 # titles written four at a time
 _LOCK = threading.Lock()
 
 PROMPT = """Below are the most recent turns of a conversation between a person and an AI coding assistant.
@@ -121,3 +122,67 @@ def retitle(state_dir: Path, path: Path, claude: str, base_url: str, only_if_gro
     if only_if_grown and held and len(turns) - int(held.get("turns") or 0) < GROWTH:
         return held
     return set_title(state_dir, conv_id, model_title(claude, base_url, turns, run), "model", len(turns))
+
+
+class TitleQueue:
+    """Titles written in the background, four at a time (the user, 2026-10-17). Suggest titles adds to
+    it; adding again while it runs puts in what is not already queued and the total grows. Progress
+    (total, done, failed, remaining) is read by the page for its toast; a run that has emptied starts
+    the counts again when more is added."""
+
+    def __init__(self, job: Callable[[str, str], None], workers: int = WORKERS) -> None:
+        self.job = job
+        self.workers = workers
+        self.lock = threading.Lock()
+        self.waiting: list[tuple[str, str]] = []
+        self.queued: set[tuple[str, str]] = set()
+        self.total = self.done = self.failed = self.active = self.running_workers = 0
+        self.finished_at = 0.0
+
+    def add(self, name: str, ids: list[str]) -> int:
+        with self.lock:
+            if not self.waiting and not self.active:
+                self.total = self.done = self.failed = 0
+                self.finished_at = 0.0
+            added = 0
+            for conv_id in ids:
+                key = (name, str(conv_id).lower())
+                if key not in self.queued:
+                    self.queued.add(key)
+                    self.waiting.append((name, str(conv_id)))
+                    added += 1
+            self.total += added
+            start = min(self.workers - self.running_workers, len(self.waiting))
+            self.running_workers += max(0, start)
+        for _ in range(max(0, start)):
+            threading.Thread(target=self._work, name="aicleaner-titles", daemon=True).start()
+        return added
+
+    def _work(self) -> None:
+        while True:
+            with self.lock:
+                if not self.waiting:
+                    self.running_workers -= 1
+                    if not self.active and not self.running_workers:
+                        self.finished_at = time.time()
+                    return
+                name, conv_id = self.waiting.pop(0)
+                self.active += 1
+            ok = True
+            try:
+                self.job(name, conv_id)
+            except Exception:  # noqa: BLE001 - one conversation's failure never stops the rest
+                ok = False
+            with self.lock:
+                self.active -= 1
+                self.queued.discard((name, conv_id.lower()))
+                if ok:
+                    self.done += 1
+                else:
+                    self.failed += 1
+
+    def progress(self) -> dict[str, Any]:
+        with self.lock:
+            remaining = self.total - self.done - self.failed
+            return {"total": self.total, "done": self.done, "failed": self.failed, "remaining": remaining,
+                    "running": remaining > 0, "finished_at": self.finished_at}
