@@ -66,7 +66,11 @@ const NARROW = window.matchMedia ? window.matchMedia('(max-width: 40rem)') : nul
 
 function applyLayout(layout) {
   const narrow = Boolean(NARROW && NARROW.matches);
-  document.documentElement.dataset.layout = narrow || layout === 'top' ? 'top' : 'side';
+  const top = narrow || layout === 'top';
+  document.documentElement.dataset.layout = top ? 'top' : 'side';
+  // The collapsed rail is the side menu's (the user, 2026-10-16): full across the top, and the saved
+  // choice back again when the menu returns to the side.
+  document.documentElement.dataset.nav = !top && readPref('aicleaner.nav', 'full') === 'rail' ? 'rail' : 'full';
 }
 
 // The addresses the page is served on locally. Anything else means it came through the tunnel.
@@ -495,11 +499,19 @@ function setupClientsToggle() {
       askForNewClient();
       return;
     }
-    if (document.documentElement.dataset.layout === 'top') {
-      list.hidden = true;
-      toggle.setAttribute('aria-expanded', 'false');
-    }
+    // Across the top the list is a hover flyout (2026-10-16): letting go of focus closes it.
+    if (document.documentElement.dataset.layout === 'top' && document.activeElement) document.activeElement.blur();
   });
+  // Across the top the flyout is shown and hidden by CSS on hover, focus and tap, as Running
+  // sessions is; `hidden` (display: none !important) would beat that, so it is lifted there and the
+  // side menu's folded state put back when the menu returns to the side (the user, 2026-10-16).
+  const follow = () => {
+    if (document.documentElement.dataset.layout === 'top') list.hidden = false;
+    else list.hidden = toggle.getAttribute('aria-expanded') !== 'true';
+    name();
+  };
+  follow();
+  new MutationObserver(follow).observe(document.documentElement, { attributes: true, attributeFilter: ['data-layout'] });
 }
 
 // ---- status polling -------------------------------------------------------------------------

@@ -163,6 +163,12 @@ class BrokerChild:
                 self.stdout.feed_eof()
                 self.stderr.feed_eof()
                 self._exited.set()
+                # The process is gone and nothing more will be read or sent: let go of the link to its
+                # broker. Only detach() closed it, so every session that ended left an unclosed client
+                # session behind for the garbage collector to complain about (2026-10-17).
+                http, self._http = self._http, None
+                if http is not None:
+                    await http.close()
 
     def _take(self, raw: bytes) -> bool:
         """One record from the broker; True when it says Claude Code has exited."""
@@ -1643,6 +1649,7 @@ class SessionHost:
         self.approve_timeout_s = approve_timeout_s
         self.approve_url = approve_url
         self.max_running = max(0, int(max_running or 0))     # 0 = no cap: the machine is the limit
+        self.auto_titles = True       # session.auto_titles (item E): set by the proxy from the config
         self.profiles: list[Profile] = list(profiles or [])
         self.sessions: dict[str, Session] = {}
         # What the tree needs from outside the host, set by whoever owns it: the allowed folder
@@ -1949,7 +1956,12 @@ class SessionHost:
         return []
 
     async def stop(self, name: str = "") -> None:
-        await self._session(name).stop()
+        session = self._session(name)
+        conv_id = session.session_id
+        await session.stop()
+        # The conversation that just ended gets a title when it grew (item E, session.auto_titles).
+        if session.profile is not None:
+            self.title_after_stop(session.profile.name, conv_id)
 
     async def interrupt(self, name: str = "", cancel_queued: bool = True) -> str:
         return await self._session(name).interrupt(cancel_queued=cancel_queued)
@@ -2000,8 +2012,9 @@ class SessionHost:
         # They were split into the profile's folders and "not in this profile yet" (feature 50),
         # with an offer to add the folder: a session runs in its home now and every folder is
         # passed to Claude Code, so any of these conversations can be continued as it is.
+        from .titles import load as load_titles
         return conversations(self.conversation_folders(profile), limit=limit,
-                             include_robots=include_robots, ours=ours)
+                             include_robots=include_robots, ours=ours, labels=load_titles(self.state_dir()))
 
     def search_conversations(self, name: str, query: str, everywhere: bool = False) -> dict[str, Any]:
         """Conversations of this profile (or of every profile) ranked for a topic (2026-10-16).
@@ -2021,10 +2034,152 @@ class SessionHost:
         items = transcripts(folders, transcript_root(), our_conversations(self.sessions_dir))
         cache = Cache(self.sessions_dir.parent / "search" if self.sessions_dir else None)
         results = search(items, cache, query)
+        from .titles import load as load_titles
+        labels = load_titles(self.state_dir())
+        for row in results:                                  # titles (item E) on the cards too
+            row["label"] = str((labels.get(row["id"].lower()) or {}).get("title") or "")
         if everywhere:
             cache.prune(item.path for item in items)
         return {"results": results, "searched": len(items), "read": cache.read,
                 "ms": round((time.perf_counter() - clock) * 1000)}
+
+    def state_dir(self) -> Path | None:
+        return self.sessions_dir.parent if self.sessions_dir else None
+
+    def bin_root(self) -> Path:
+        return (self.sessions_dir.parent if self.sessions_dir else Path.home() / ".aicleaner") / "conversation-bin"
+
+    # ---- conversation titles (2026-10-16, item E) ---------------------------------------------------
+
+    def _transcript_of(self, name: str, conv_id: str) -> Path:
+        from .convbin import _find
+        from .history import UUID, transcript_root
+        if not UUID.match(conv_id or ""):
+            raise SessionError("not a conversation id")
+        path = _find(self.conversation_folders(self.profile(name)), conv_id, transcript_root())
+        if path is None:
+            raise SessionError("no such conversation in this profile's folders")
+        return path
+
+    def rename_conversation(self, name: str, conv_id: str, title: str) -> dict[str, Any]:
+        """The person's title, which always wins; empty puts the model's (or the first prompt) back."""
+        from .titles import set_title
+        self._transcript_of(name, conv_id)
+        if self.state_dir() is None:
+            raise SessionError("titles need a state folder")
+        return {"label": set_title(self.state_dir(), conv_id, title, "person")}
+
+    def retitle_conversation(self, name: str, conv_id: str, only_if_grown: bool = False) -> dict[str, Any]:
+        from .titles import retitle
+        if self.state_dir() is None:
+            raise SessionError("titles need a state folder")
+        try:
+            return {"label": retitle(self.state_dir(), self._transcript_of(name, conv_id), self.claude, self.base_url,
+                                     only_if_grown=only_if_grown)}
+        except RuntimeError as exc:
+            raise SessionError(str(exc)) from exc
+
+    def suggest_titles(self, name: str) -> int:
+        """Titles for this profile's untitled conversations (newest 25), in a background thread."""
+        from .titles import load
+        labels = load(self.state_dir())
+        untitled = [row["id"] for group in self.past(name) for row in group["sessions"]
+                    if row["id"].lower() not in labels][:25]
+
+        def work() -> None:
+            for conv_id in untitled:
+                try:
+                    self.retitle_conversation(name, conv_id)
+                except SessionError as exc:
+                    log.info("no title for %s: %s", conv_id, exc)
+
+        import threading
+        threading.Thread(target=work, name="aicleaner-titles", daemon=True).start()
+        return len(untitled)
+
+    # ---- consolidating conversations (2026-10-16, item F) ---------------------------------------------
+
+    def consolidate(self, name: str, ids: list[str]) -> str:
+        from .consolidate import MAX_IDS, MIN_IDS, Jobs
+        from .history import _head
+        ids = list(dict.fromkeys(str(i) for i in ids))
+        if not MIN_IDS <= len(ids) <= MAX_IDS:
+            raise SessionError(f"choose {MIN_IDS} to {MAX_IDS} conversations")
+        from .titles import load as load_titles
+        labels = load_titles(self.state_dir())
+        items = []
+        for conv_id in ids:
+            path = self._transcript_of(name, conv_id)
+            label = (labels.get(conv_id.lower()) or {}).get("title")
+            items.append((path, label or _head(path, (path.stat().st_size, path.stat().st_mtime))[0] or conv_id))
+        if not hasattr(self, "_consolidations"):
+            self._consolidations = Jobs()
+        return self._consolidations.start(items, self.claude, self.base_url)
+
+    def consolidation(self, job: str) -> dict[str, Any]:
+        found = getattr(self, "_consolidations", None)
+        state = found.get(job) if found else None
+        if state is None:
+            raise SessionError("no such consolidation")
+        return dict(state)
+
+    def title_after_stop(self, name: str, conv_id: str) -> None:
+        """session.auto_titles: the conversation that just ended, if it grew, retitled in the background."""
+        if not self.auto_titles or not conv_id:
+            return
+        import threading
+
+        def work() -> None:
+            try:
+                self.retitle_conversation(name, conv_id, only_if_grown=True)
+            except SessionError as exc:
+                log.info("no title after stop for %s: %s", conv_id, exc)
+
+        threading.Thread(target=work, name="aicleaner-title-on-stop", daemon=True).start()
+
+    def delete_conversation(self, name: str, conv_id: str) -> dict[str, Any]:
+        """Move a conversation to Recently deleted (2026-10-16, item D); refused while it runs."""
+        from . import convbin
+        from .convsearch import Cache
+        from .history import _head, transcript_root
+
+        profile = self.profile(name)
+        running = [s.session_id for s in self.sessions.values() if s.running and s.session_id]
+        root = transcript_root()
+        path = convbin._find(self.conversation_folders(profile), conv_id, root)
+        title = _head(path, (path.stat().st_size, path.stat().st_mtime))[0] if path else ""
+        meta = convbin.delete(self.conversation_folders(profile), conv_id, root, self.bin_root(), profile.name,
+                              title, running)
+        if path is not None and self.sessions_dir:
+            cached = Cache(self.sessions_dir.parent / "search")._file(path)   # its search cache goes too
+            if cached is not None:
+                cached.unlink(missing_ok=True)
+        convbin.clean(self.bin_root())
+        return meta
+
+    def deleted_conversations(self, name: str) -> list[dict[str, Any]]:
+        from . import convbin
+        profile = self.profile(name)
+        convbin.clean(self.bin_root())
+        return convbin.deleted(self.bin_root(), profile.name)
+
+    def restore_conversation(self, name: str, conv_id: str) -> dict[str, Any]:
+        from . import convbin
+        return convbin.restore(self.bin_root(), self.profile(name).name, conv_id)
+
+    def purge_conversation(self, name: str, conv_id: str) -> dict[str, Any]:
+        from . import convbin
+        return convbin.purge(self.bin_root(), self.profile(name).name, conv_id)
+
+    def agent_report(self, name: str, tool_id: str) -> dict[str, Any]:
+        """A sub-agent's report, found by the Agent call's id in this profile's folders (2026-10-16)."""
+        from .agentreport import report
+        from .history import transcript_root
+
+        profile = self.profile(name)
+        session = self.sessions.get(profile.name)
+        prefer = (session.session_id if session is not None else "") or ""
+        return report(self.conversation_folders(profile), tool_id, transcript_root(), prefer)
 
     def rank_conversations(self, query: str, results: list[dict[str, Any]]) -> list[dict[str, str]]:
         """The model's order and reasons for results the page already holds."""
@@ -2075,6 +2230,16 @@ class SessionHost:
 
     def locate_file(self, name: str, root: str, path: str) -> Path:
         return self._browser(name).locate_file(root, path)
+
+    def drop_folder(self, name: str, root: str, path: str) -> Path:
+        """The folder a drop copies into (item H2): through the tree's own allow-list, a folder, and
+        reached through no link or junction (D171) - resolved, it is still inside its root."""
+        _roots, chosen, target = self._browser(name)._locate(root, path)
+        if not target.is_dir():
+            raise SessionError(f"{target} is not a folder")
+        if not _inside(target, chosen):
+            raise SessionError(f"{path} leads through a link or junction; nothing is copied through one")
+        return target
 
     def locate_items(self, name: str, items: list[dict[str, str]]) -> list[tuple[Path, Path]]:
         """(root, target) for each of many files or folders (feature 97's zip), every one through

@@ -24,6 +24,9 @@
      and a jump, and a swipe slid the rows about. The choice is kept, and applies on a wider
      screen. Same query as NARROW in app.js. */
   var narrow = window.matchMedia && window.matchMedia('(max-width: 40rem)').matches;
-  root.setAttribute('data-layout', narrow || layout === 'top' ? 'top' : 'side');
-  root.setAttribute('data-nav', nav === 'rail' ? 'rail' : 'full');
+  var top = narrow || layout === 'top';
+  root.setAttribute('data-layout', top ? 'top' : 'side');
+  /* The rail is the side menu's (the user, 2026-10-16): across the top the menu is always full, and
+     the saved choice applies again when the menu goes back to the side. */
+  root.setAttribute('data-nav', !top && nav === 'rail' ? 'rail' : 'full');
 })();

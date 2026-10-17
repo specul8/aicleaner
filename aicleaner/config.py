@@ -174,6 +174,7 @@ class Config:
     # session.projects list still reads as a single profile, so nobody has to migrate to upgrade.
     session_profiles: list[dict] = field(default_factory=list)
     session_max_running: int = 4
+    session_auto_titles: bool = True     # a title for a conversation when its session stops (item E)
     session_thinking_display: str = "summarized"   # "" leaves thinking to the CLI (empty blocks)
     # Restored names shown in green (see transform.strip_marks). Always on the session page, which
     # draws them; for Claude Code in a terminal or VS Code, only once someone has seen it render.
@@ -254,6 +255,7 @@ class Config:
         "session.projects": ("session_projects", list),
         "session.permission_mode": ("session_permission_mode", str),
         "session.max_running": ("session_max_running", int),
+        "session.auto_titles": ("session_auto_titles", bool),
         "detect.placeholder_kinds": ("placeholder_kinds", list),
         "attachments.allow_images": ("allow_images", bool),
         "attachments.ocr": ("ocr", bool),
@@ -458,6 +460,7 @@ class Config:
         except (TypeError, ValueError):
             cfg.session_max_running = 4
         cfg.session_thinking_display = str(ses.get("thinking_display", "summarized") or "")
+        cfg.session_auto_titles = _flag(ses, "auto_titles", True, "session.auto_titles")
         cfg.session_profiles = session_profiles(ses, cfg.session_projects)
         hl = data.get("highlight") or {}
         cfg.highlight_session = _flag(hl, "session", True, "highlight.session")

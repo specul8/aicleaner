@@ -69,6 +69,14 @@ ollback\, so a code drop that will not start can be undone
     and anything unsigned, signed by another key, or altered is refused without this (H16). A
     working copy (-FromWorkingCopy) is local code and is not checked.
 
+.PARAMETER NoSelfUpdate
+    Skip the first step: checking the release for a newer copy of this script, and running that
+    instead (2026-10-16, item G). For testing, or to run a deliberately older script.
+
+.PARAMETER SelfUpdated
+    Set by this script when it starts its own newer copy, so the copy does not check again. Not
+    for use by hand.
+
 .PARAMETER FromWorkingCopy
     Deploy this working copy instead of a release from the repository: the tracked files as they are
     on disk, copied to the install folder. For a development machine, so what runs is still a
@@ -193,7 +201,9 @@ param(
     [ValidateSet('', 'On', 'Off')][string]$CodeTab = '',
     [switch]$AssumeDefaults,
     [string]$StateRoot = (Join-Path $env:USERPROFILE '.aicleaner'),
-    [AllowEmptyString()][string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) 'Deploy-AiCleaner.log')
+    [AllowEmptyString()][string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) 'Deploy-AiCleaner.log'),
+    [switch]$NoSelfUpdate,
+    [switch]$SelfUpdated
 )
 
 Set-StrictMode -Version Latest
@@ -947,11 +957,12 @@ function Assert-ReleaseSigned {
         naming a different key is refused - a new key means someone has the repository but not the
         old key. Unsigned releases (a branch, an older tag) need -AllowUnsigned, said loudly.
         Returns the key ("ssh-ed25519 AAAA...") to store as the deployment's signing_key.
+        -Subset checks only the files given, for a partial fetch (the self-update, item G).
         A refusal throws: installing code nobody vouched for is not a condition to recover from here.
     #>
     [OutputType([string])]
     param([Parameter(Mandatory)][string]$Folder, [Parameter(Mandatory)][string[]]$Files,
-          [string]$Pinned = '', [switch]$AllowUnsigned)
+          [string]$Pinned = '', [switch]$AllowUnsigned, [switch]$Subset)
     # The signer identity and the namespace, both: tools/sign_release.py signs with the same.
     $identity = 'aicleaner-release'
     # In release\ since feature 102; a release tagged before the move keeps them at its root.
@@ -1029,7 +1040,9 @@ function Assert-ReleaseSigned {
         $actual = Get-NormalisedHash -Path (Join-Path $Folder $relative.Replace('/', '\'))
         if ($actual -ne $listed[$relative]) { throw "$relative does not match its signed manifest: refusing the release." }
     }
-    if ($listed.Count -ne $shipped.Count) { throw 'The signed manifest lists files the release does not have: refusing it.' }
+    # -Subset: only some of the release was fetched (the self-update takes the script alone), so
+    # files missing from the folder are expected; each one present is still checked above.
+    if (-not $Subset -and $listed.Count -ne $shipped.Count) { throw 'The signed manifest lists files the release does not have: refusing it.' }
     if (-not $Pinned) { Write-Status "Trusting the release signing key it names (pinned from now on): $($key.Substring(0, [Math]::Min(40, $key.Length)))..." -Level Detail }
     return $key
 }
@@ -3255,8 +3268,152 @@ function Invoke-Uninstall {
 }
 
 # ---------------------------------------------------------------------------
+# Self-update (2026-10-16, item G): the first step of every action
+# ---------------------------------------------------------------------------
+
+function Get-SelfUpdateSource {
+    <#
+    .SYNOPSIS
+        The repository, ref and trusted key this run will use, for the self-check; $null when
+        nothing names a repository (it never asks - asking is the action's job).
+    .DESCRIPTION
+        -RepoUrl, else the newest deployment that follows a repository, else the contact file. The
+        ref follows Update's rule: -Ref, else the branch a deployment follows, else the newest tag.
+    #>
+    [CmdletBinding()]
+    param([string]$RepoUrl = '', [string]$Ref = '')
+    $followed = @(Get-DeploymentRecords | Where-Object {
+        $_.PSObject.Properties['repo_url'] -and [string]$_.repo_url -and [string]$_.ref -ne 'working-copy' })
+    $last = if ($followed.Count) { $followed[$followed.Count - 1] } else { $null }
+    $url = $RepoUrl
+    if (-not $url -and $last) { $url = [string]$last.repo_url }
+    if (-not $url) {
+        $contact = Get-ContactInfo
+        if ($contact -and $contact.PSObject.Properties['repo_url']) { $url = [string]$contact.repo_url }
+    }
+    if (-not $url) { return $null }
+    $isLocal = $url -match '^file://' -or (Test-Path -LiteralPath $url -PathType Container)
+    if ($url -notmatch '^https://[^\s/]+/\S+$' -and -not $isLocal) { return $null }
+    $wanted = $Ref
+    if (-not $wanted -and $last -and [string]$last.ref -notmatch '^v\d+\.\d+\.\d+$') { $wanted = [string]$last.ref }
+    $pinned = if ($last -and $last.PSObject.Properties['signing_key']) { [string]$last.signing_key } else { '' }
+    return [pscustomobject]@{ Url = $url; Wanted = $wanted; Pinned = $pinned }
+}
+
+function Get-ScriptParameterName {
+    <# The parameters a script file declares, so a copy is only handed the ones it knows. #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([Parameter(Mandatory)][string]$Path)
+    $tokens = $null
+    $problems = $null
+    $tree = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$problems)
+    if (-not $tree.ParamBlock) { return @() }
+    return @($tree.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+}
+
+function Invoke-SelfUpdate {
+    <#
+    .SYNOPSIS
+        Replaces this script with the release's copy when that differs. Returns the parameters to
+        start the copy with, or $null to carry on with this script.
+    .DESCRIPTION
+        Only the script and the signed manifest are fetched (a blob-less, depth-1, sparse clone),
+        with this machine's own git credentials and prompts off. The copy is trusted only when the
+        signed manifest lists it; an unsigned ref asks, default No. Anything that fails - no git, no
+        network, a refused credential - is a warning: the self-check never stops a deployment.
+
+        The caller runs the copy in this process with the parameters splatted, not as a command
+        line: Windows PowerShell 5.1 drops empty -File arguments (-LogPath ''). It is not run from
+        here because a function's caller captures its output, and a proxy started under a captured
+        console holds the pipe open (see Update-Deployment). The copy gets -SelfUpdated, which skips
+        this step, so it cannot loop. Parameters it does not declare (an older ref) are left out.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([hashtable])]
+    param([Parameter(Mandatory)][string]$ScriptPath, [Parameter(Mandatory)][System.Collections.IDictionary]$Bound,
+          [string]$RepoUrl = '', [string]$Ref = '', [string]$TokenPath = '')
+    # A git working copy is kept current by git, and a development edit must not be overwritten.
+    $here = Split-Path -Parent $ScriptPath
+    foreach ($folder in @($here, (Split-Path -Parent $here))) {
+        if ($folder -and (Test-Path -LiteralPath (Join-Path $folder '.git'))) {
+            Write-Status 'Self-check skipped: this script is in a git working copy, which git keeps current' -Level Detail
+            return $null
+        }
+    }
+    $source = Get-SelfUpdateSource -RepoUrl $RepoUrl -Ref $Ref
+    if (-not $source) { Write-Status 'Self-check skipped: no repository is named yet' -Level Detail; return $null }
+    $saved = @{ GIT_TERMINAL_PROMPT = $env:GIT_TERMINAL_PROMPT; GCM_INTERACTIVE = $env:GCM_INTERACTIVE }
+    $env:GIT_TERMINAL_PROMPT = '0'
+    $env:GCM_INTERACTIVE = 'Never'
+    $stage = Join-Path ([IO.Path]::GetTempPath()) ('aicleaner-selfupdate-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    try {
+        Write-Status 'Checking the release for a newer Deploy-AiCleaner.ps1 - Please wait...'
+        if (-not (Get-Command git -ErrorAction SilentlyContinue)) { throw 'git is not installed yet' }
+        if ($TokenPath) {
+            $stored = Read-GitToken -Path $TokenPath
+            if ($stored) { Use-GitToken -Token $stored -Url $source.Url }
+        }
+        $release = Resolve-Release -Url $source.Url -Wanted $source.Wanted
+        Invoke-Git -Arguments @('-c', 'advice.detachedHead=false', 'clone', '--quiet', '--depth', '1', '--filter=blob:none',
+            '--sparse', '--branch', $release.Ref, $source.Url, $stage) | Out-Null
+        Invoke-Git -Arguments @('-C', $stage, 'sparse-checkout', 'set', 'installer', 'release') | Out-Null
+        $offered = Join-Path $stage 'installer\Deploy-AiCleaner.ps1'
+        if (-not (Test-Path -LiteralPath $offered)) {
+            Write-Status "Self-check: $($release.Ref) has no installer\Deploy-AiCleaner.ps1; carrying on with this one" -Level Detail
+            return $null
+        }
+        if ((Get-NormalisedHash -Path $offered) -eq (Get-NormalisedHash -Path $ScriptPath)) {
+            Write-Status "Deploy-AiCleaner.ps1 is the one in $($release.Ref)" -Level Detail
+            return $null
+        }
+        $manifest = Join-Path $stage 'release\RELEASE-MANIFEST'
+        if (-not (Test-Path -LiteralPath $manifest)) {
+            Write-Status "$($release.Ref) has a different Deploy-AiCleaner.ps1, but the ref is not signed" -Level Warn
+            if (-not (Confirm-Action -Message 'Use that unsigned script instead of this one?' -Default 'No')) {
+                Write-Status 'Carrying on with this script' -Level Detail
+                return $null
+            }
+        } else {
+            [void](Assert-ReleaseSigned -Folder $stage -Files @('installer/Deploy-AiCleaner.ps1') -Pinned $source.Pinned -Subset)
+        }
+        if (-not $PSCmdlet.ShouldProcess($ScriptPath, "Replace with the copy in $($release.Ref)")) { return $null }
+        Write-Status "A newer Deploy-AiCleaner.ps1 is in $($release.Ref); updating myself and starting again" -Level Step
+        Copy-Item -LiteralPath $ScriptPath -Destination "$ScriptPath.previous" -Force
+        Copy-Item -LiteralPath $offered -Destination $ScriptPath -Force
+    } catch {
+        Write-Status "Self-check failed, carrying on with this script: $($_.Exception.Message)" -Level Warn
+        return $null
+    } finally {
+        foreach ($name in $saved.Keys) { Set-Item -Path "env:$name" -Value $saved[$name] }
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $known = @(Get-ScriptParameterName -Path $ScriptPath)
+    $forward = @{}
+    foreach ($name in $Bound.Keys) {
+        # Common parameters (-Verbose, -WhatIf) belong to every advanced script.
+        if ($known -contains $name -or [System.Management.Automation.Cmdlet]::CommonParameters -contains $name -or
+            [System.Management.Automation.Cmdlet]::OptionalCommonParameters -contains $name) { $forward[$name] = $Bound[$name] }
+    }
+    if ($known -contains 'SelfUpdated') { $forward['SelfUpdated'] = [switch]$true }
+    return $forward
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+# First, before anything is said or logged (item G): a newer copy of this script in the release
+# replaces this one and runs instead, with the same parameters. Its exit code is this run's.
+if (-not $NoSelfUpdate -and -not $SelfUpdated -and $PSCommandPath) {
+    $relaunch = Invoke-SelfUpdate -ScriptPath $PSCommandPath -Bound $PSBoundParameters -RepoUrl $RepoUrl -Ref $Ref `
+        -TokenPath (Join-Path $StateRoot 'secrets\github-token.dpapi')
+    if ($relaunch) {
+        $global:LASTEXITCODE = 0
+        & $PSCommandPath @relaunch
+        exit $LASTEXITCODE
+    }
+}
 
 Write-ContactAttribution
 
@@ -3292,3 +3449,6 @@ finally {
     Remove-Stage
     if ($transcriptStarted) { Stop-Transcript | Out-Null }
 }
+# Explicit, so a run started by an older copy of this script (the self-update) hands back 0, not
+# the exit code of whatever native command ran last.
+exit 0

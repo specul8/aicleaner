@@ -68,6 +68,8 @@ is replaced, so the UI can never leave a client file in a state the proxy would 
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import gzip
 import json
@@ -122,7 +124,7 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # this lets through what tokenising has already been applied to, one refusal at a
                    # time, each one logged with its context and the person who turned it on.
                    "canary.fail_open",
-                   "highlight.terminal", "session.enabled", "session.max_running", "update.auto",
+                   "highlight.terminal", "session.enabled", "session.max_running", "session.auto_titles", "update.auto",
                    "detect.auto_map_client_resources",
                    "detect.near_miss", "detect.placeholder_kinds",
                    # Accepted from Review's offer, which is where triage happens - on the phone as
@@ -314,6 +316,12 @@ def _share_hint(entry: dict, shares: dict | None, folders: list, home: str) -> d
             "share_is_home": repeated and bool(home) and workspace._same(share, home)}
 
 
+def _setup_findings(entry: dict, shares: dict | None, folders: list, home: str, workspaces: list) -> list:
+    from .setupcheck import findings
+    share = str(_share_hint(entry, shares, folders, home).get("share") or "")
+    return findings(home, [str(f) for f in folders], share, list(workspaces or []))
+
+
 def _workspace_view(entries: list, mf: MappingStore | None = None, shares: dict | None = None) -> dict:
     """Per profile (D99): its home folder and how it was worked out, the workspace files in use
     (its own, or for an older profile the one found inside a folder), what a workspace file lists
@@ -349,6 +357,8 @@ def _workspace_view(entries: list, mf: MappingStore | None = None, shares: dict 
                 "missing": workspace.missing_from_workspaces(workspaces, folders), "workspace": first, "cwd": cwd, "create": create,
                 # The client's share, and whether a hand-added folder repeats it (DECISIONS 64).
                 **_share_hint(entry, shares, folders, home.get("folder", "")),
+                # Git and CLAUDE.md (2026-10-16, item B): what is missing, with the fixes offered.
+                "setup": _setup_findings(entry, shares, folders, home.get("folder", ""), workspaces),
                 # The old names, kept for the page while it moves over.
                 "folder": home.get("folder", ""), "how": home.get("how", ""),
             }
@@ -759,6 +769,234 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return web.json_response(answer)
         except SessionError as problem:
             return err(problem, status=404)
+
+    async def conversation_bin(request: web.Request) -> web.Response:
+        """Delete (to Recently deleted), list, put back, delete for good (2026-10-16, item D)."""
+        from .convbin import BinError
+        from .session import SessionError
+
+        action = request.match_info["action"]
+        host = session_host()
+        try:
+            if action == "deleted":
+                rows = await asyncio.to_thread(host.deleted_conversations, request.query.get("name", ""))
+                return web.json_response({"deleted": rows})
+            body = await request.json()
+            name, conv_id = str(body.get("name", "")), str(body.get("id", ""))
+            work = {"delete": host.delete_conversation, "restore": host.restore_conversation,
+                    "purge": host.purge_conversation}[action]
+            return web.json_response(await asyncio.to_thread(work, name, conv_id))
+        except BinError as problem:
+            return err(problem, status=409)
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def conversation_titles(request: web.Request) -> web.Response:
+        """Rename, retitle by the model, or suggest titles for the untitled (2026-10-16, item E)."""
+        from .session import SessionError
+
+        action = request.match_info["action"]
+        body = await request.json()
+        name, conv_id = str(body.get("name", "")), str(body.get("id", ""))
+        host = session_host()
+        try:
+            if action == "title":
+                answer = await asyncio.to_thread(host.rename_conversation, name, conv_id, str(body.get("title", ""))[:200])
+            elif action == "retitle":
+                answer = await asyncio.to_thread(host.retitle_conversation, name, conv_id)
+            else:
+                answer = {"started": await asyncio.to_thread(host.suggest_titles, name)}
+        except SessionError as problem:
+            return err(problem, status=409)
+        return web.json_response(answer)
+
+    async def conversation_consolidate(request: web.Request) -> web.Response:
+        """Start a consolidation (POST {name, ids}) or ask how it is going (GET ?job=) - item F."""
+        from .session import SessionError
+
+        host = session_host()
+        try:
+            if request.method == "GET":
+                return web.json_response(await asyncio.to_thread(host.consolidation, request.query.get("job", "")))
+            body = await request.json()
+            ids = [str(i) for i in (body.get("ids") or [])][:50]
+            job = await asyncio.to_thread(host.consolidate, str(body.get("name", "")), ids)
+        except SessionError as problem:
+            return err(problem, status=409)
+        return web.json_response({"job": job})
+
+    # ---- importing a project from claude.ai (2026-10-16, item H) --------------------------------
+
+    def claude_imports():
+        from .claudeimport import Imports
+
+        host = session_host()
+        if getattr(host, "_claude_imports", None) is None:
+            state = host.state_dir() or Path.home() / ".aicleaner"
+            host._claude_imports = Imports(state)
+        return host, host._claude_imports
+
+    def _import_watch(request: web.Request, extra: str = "") -> list[Path]:
+        """The folders a download is looked for in: Downloads, and one the person names. Only on
+        the machine itself - through remote access the files land on the other device."""
+        from .claudeimport import downloads_folder
+
+        if request.get(REMOTE):
+            return []
+        folders = [downloads_folder()]
+        if extra.strip():
+            folders.append(Path(extra.strip()))
+        return folders
+
+    def _import_home(host: Any, name: str) -> Path:
+        from .session import SessionError
+
+        try:
+            profile = host.profile(name)
+        except SessionError as problem:
+            raise ValueError(str(problem)) from problem
+        home = host.home_of(profile).get("folder") or ""
+        if not home or not Path(home).is_dir():
+            raise ValueError(f"{name} has no home folder on this machine to import into")
+        return Path(home)
+
+    def _import_new_target(new: dict[str, Any]) -> str:
+        """A new client and its project profile, as the import's target: the client named exactly as
+        typed, a project folder holding a local-only _<name>-tooling repository as the home, and a
+        OneDrive share unless none is wanted. Returns the profile's name."""
+        from .folders import check_usable
+        from .setupcheck import git_init
+
+        name = str(new.get("client") or "").strip()
+        if not name:
+            raise ValueError("name the new client")
+        cid = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:64]
+        if not cid:
+            raise ValueError(f"{name!r} has no letters or digits to make a client id from")
+        if any(str(e.get("name", "")).lower() == name.lower() for e in proxy.read_profiles()):
+            raise ValueError(f"there is already a profile called {name}: import into it instead")
+        folder = Path(str(new.get("folder") or "").strip() or str(Path("C:/Repos") / name))
+        check_usable(str(folder), folder_roots(), "project folder", must_exist=False)
+        home = folder / f"_{cid.lower()}-tooling"
+        mf.add_client(cid, None, True, name)
+        home.mkdir(parents=True, exist_ok=True)
+        git_init(home)
+        share = str(new.get("share", "create"))
+        if share == "create":
+            proxy.share_store.create(cid, share_label(cid))
+        elif share.strip():
+            check_usable(share, folder_roots(), "share folder", must_exist=False)
+            proxy.share_store.set(cid, share)
+        entries = proxy.read_profiles() + [{"name": name, "client": cid, "projects": [str(home)]}]
+        proxy.profile_store.save(entries, set(proxy.client_labels()))
+        proxy.reload_profiles()
+        return name
+
+    async def claude_import(request: web.Request) -> web.Response:
+        """The import wizard's steps: manifest, received, upload, projects, chats, pick, run, cancel."""
+        from .claudeimport import ClaudeImportError, imported_ids
+        from .folders import FolderError
+        from .history import transcript_root
+        from .session import SessionError
+        from .shares import ShareError
+
+        step = request.match_info["step"]
+        try:
+            host, imports = claude_imports()
+            if step == "manifest":
+                job = imports.start((await request.json()).get("manifest"))
+                return web.json_response({"job": job.id, "created_at": job.manifest["created_at"],
+                                          "files": imports.status(job), "watching": [str(p) for p in _import_watch(request)]})
+            if step == "received":
+                job = imports.get(request.query.get("job", ""))
+                watch = _import_watch(request, request.query.get("folder", ""))
+                return web.json_response({"files": await asyncio.to_thread(imports.status, job, watch)})
+            if step == "upload":
+                body = await request.json()
+                job = imports.get(str(body.get("job", "")))
+                data = base64.b64decode(str(body.get("data", "")), validate=True)
+                return web.json_response(await asyncio.to_thread(
+                    imports.upload_chunk, job, str(body.get("file", "")), int(body.get("offset") or 0), data, bool(body.get("last"))))
+            if step == "projects":
+                job = imports.get(request.query.get("job", ""))
+                return web.json_response({"projects": await asyncio.to_thread(imports.projects, job)})
+            if step == "chats":
+                job = imports.get(request.query.get("job", ""))
+                name = request.query.get("name", "")
+                done = imported_ids(_import_home(host, name), transcript_root()) if name else set()
+                chats = await asyncio.to_thread(imports.chats, job, request.query.get("project", ""), done,
+                                                request.query.get("q", ""))
+                return web.json_response({"chats": chats})
+            body = await request.json()
+            job = imports.get(str(body.get("job", "")))
+            if step == "pick":
+                try:
+                    ids = await asyncio.to_thread(imports.pick, job, str(body.get("project", "")), host.claude, host.base_url)
+                except RuntimeError as problem:
+                    return err(ValueError(f"Claude could not choose: {problem}"), status=502)
+                return web.json_response({"chats": ids})
+            if step == "cancel":
+                await asyncio.to_thread(imports.finish, job)
+                return web.json_response({"ok": True})
+            if step == "run":
+                if isinstance(body.get("new"), dict):
+                    name = await asyncio.to_thread(_import_new_target, body["new"])
+                else:
+                    name = str(body.get("name", ""))
+                home = _import_home(host, name)
+                pairs = [(str(p[0]), str(p[1])) for p in body.get("path_pairs") or []
+                         if isinstance(p, (list, tuple)) and len(p) == 2 and str(p[0]).strip()]
+                report = await asyncio.to_thread(
+                    imports.run, job, str(body.get("project", "")), [str(i) for i in body.get("chats") or []],
+                    home, transcript_root(), pairs, bool(body.get("memories", True)), bool(body.get("keep_zips")))
+                return web.json_response({**report, "name": name, "home": str(home)})
+            return err(ValueError(f"no import step called {step}"), status=404)
+        except (ClaudeImportError, ValueError, binascii.Error) as problem:
+            return err(problem)
+        except (MappingError, FolderError, ShareError, OSError) as problem:
+            return err(problem)
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def session_drop(request: web.Request) -> web.Response:
+        """Files and folders dropped on the tree (item H2): check, then each file in pieces (base64
+        in JSON, so it goes through the encrypted tunnel like any call), and empty folders."""
+        from . import filedrop
+        from .session import SessionError
+
+        step = request.match_info["step"]
+        body = await request.json()
+        try:
+            folder = await asyncio.to_thread(session_host().drop_folder, str(body.get("name", "")),
+                                             str(body.get("root", "")), str(body.get("path", "")))
+            if step == "check":
+                items = [i for i in body.get("items") or [] if isinstance(i, dict)]
+                return web.json_response(await asyncio.to_thread(filedrop.check, folder, items))
+            if step == "file":
+                data = base64.b64decode(str(body.get("data", "")), validate=True)
+                return web.json_response(await asyncio.to_thread(
+                    filedrop.write_piece, folder, str(body.get("relative", "")), str(body.get("mode", "replace")),
+                    int(body.get("offset") or 0), data, bool(body.get("last"))))
+            if step == "folder":
+                return web.json_response(await asyncio.to_thread(filedrop.make_folder, folder, str(body.get("relative", ""))))
+            return err(ValueError(f"no drop step called {step}"), status=404)
+        except (filedrop.DropError, binascii.Error) as problem:
+            return err(problem)
+        except (SessionError, OSError) as problem:
+            return err(problem, status=403)
+
+    async def agent_report(request: web.Request) -> web.Response:
+        """A sub-agent's report under its Agent call, fetched when the line is opened (2026-10-16)."""
+        from .session import SessionError
+
+        try:
+            answer = await asyncio.to_thread(session_host().agent_report, request.query.get("name", ""),
+                                             request.query.get("tool", ""))
+        except ValueError as problem:
+            return err(problem)
+        except SessionError as problem:
+            return err(problem, status=404)
+        return web.json_response(answer)
 
     async def conversation_rank(request: web.Request) -> web.Response:
         """The model's order and a reason for each, over results the page sent back."""
@@ -1263,13 +1501,20 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         (the user, 2026-10-04): removing a folder has to take its workspace file's offer with it,
         and the page cannot read the disk to know. Every place is held to folders.roots first, as
         saving holds it; one outside them is left out of the answer rather than read."""
-        from .fileio import network_path
-        from .folders import FolderError, check_usable
-
         body = await request.json()
         entry = body.get("profile") if isinstance(body, dict) else None
         if not isinstance(entry, dict):
             return err(ValueError("send {profile: {...}}"))
+        clean = clean_profile(entry)
+        view = await asyncio.to_thread(_workspace_view, [clean], None, proxy.share_store.load())
+        return web.json_response({"workspace": view.get(clean["name"])})
+
+    def clean_profile(entry: dict) -> dict:
+        """What the editor holds, saved or not, with every place held to folders.roots first, as
+        saving holds it; one outside them is left out rather than read (workspace-view, trust)."""
+        from .fileio import network_path
+        from .folders import FolderError, check_usable
+
         roots = folder_roots()
 
         def allowed(path: str, what: str) -> bool:
@@ -1281,7 +1526,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                 return False
             return True
 
-        clean = {
+        return {
             "name": str(entry.get("name", "")),
             "client": str(entry.get("client", "")),
             "projects": [p for p in entry.get("projects") or [] if allowed(p, "project folder")],
@@ -1291,8 +1536,48 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             if allowed(entry.get("home_override") or "", "home folder") else "",
             "home_derived_was": str(entry.get("home_derived_was") or ""),
         }
-        view = await asyncio.to_thread(_workspace_view, [clean], None, proxy.share_store.load())
-        return web.json_response({"workspace": view.get(clean["name"])})
+
+    async def trust_inputs(request: web.Request) -> tuple[dict, list[str], str, list[str]]:
+        """The folders a profile needs trusted (2026-10-16, item C): hand-added folders and the share
+        with their children, the home folder, the workspace files' folders."""
+        body = await request.json()
+        entry = body.get("profile") if isinstance(body, dict) else None
+        if not isinstance(entry, dict):
+            raise ValueError("send {profile: {...}}")
+        clean = clean_profile(entry)
+        view = (await asyncio.to_thread(_workspace_view, [clean], None, proxy.share_store.load())).get(clean["name"]) or {}
+        folders = list(clean["projects"]) + ([str(view["share"])] if view.get("share") else [])
+        home = str((view.get("home") or {}).get("folder") or "")
+        workspace_dirs = [str(Path(w).parent) for w in (view.get("workspaces") or [])]
+        return clean, folders, home, workspace_dirs
+
+    async def session_trust_check(request: web.Request) -> web.Response:
+        from . import claudetrust
+        # AICLEANER_SKIP_TRUST_CHECK: test servers, whose temp folders nothing trusts (see conftest).
+        if os.environ.get("AICLEANER_SKIP_TRUST_CHECK") == "1":
+            return web.json_response({"missing": [], "can_add": False, "names": claudetrust.LIST_NAMES})
+        try:
+            _clean, folders, home, workspace_dirs = await trust_inputs(request)
+            missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
+        except (ValueError, claudetrust.TrustError) as exc:
+            return err(exc)
+        return web.json_response({"missing": missing, "can_add": not request.get(REMOTE),
+                                  "names": claudetrust.LIST_NAMES})
+
+    async def session_trust_add(request: web.Request) -> web.Response:
+        """Add what is missing to Claude Code's files. On the machine only: they are the person's own
+        Claude Code settings, not aicleaner's."""
+        from . import claudetrust
+        if request.get(REMOTE):
+            return err(ValueError("adding to Claude Code's trusted folders is done on the machine aicleaner "
+                                  "runs on"), status=403)
+        try:
+            clean, folders, home, workspace_dirs = await trust_inputs(request)
+            missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
+            done = await asyncio.to_thread(claudetrust.add, missing, clean["name"] or "a project profile")
+        except (ValueError, OSError, claudetrust.TrustError) as exc:
+            return err(exc)
+        return web.json_response(done)
 
     async def session_workspace_create(request: web.Request) -> web.Response:
         """Write the new workspace file the page offered (D99) and make it the profile's first.
@@ -1322,6 +1607,38 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except (OSError, ValueError) as exc:
             return err(exc)
         return web.json_response({"ok": True, "workspace": str(path)})
+
+    async def session_setup_fix(request: web.Request) -> web.Response:
+        """Initialise git in the home folder, or write a starter CLAUDE.md there (2026-10-16, item B).
+
+        As workspace-create: the finding is recomputed here, never taken from the page; only a fix
+        the server itself offers for that folder is done, and only inside the reachable folders."""
+        from . import setupcheck
+        from .folders import is_usable
+
+        body = await request.json()
+        name, folder, fix = str(body.get("name", "")).strip(), str(body.get("folder", "")), str(body.get("fix", ""))
+        entries = proxy.read_profiles() if proxy else []
+        entry = next((e for e in entries if e.get("name") == name), None)
+        if entry is None:
+            return err(ValueError(f"no profile named {name!r} - save it first"))
+        view = (await asyncio.to_thread(_workspace_view, [entry], mf, proxy.share_store.load())).get(name) or {}
+        offered = [f for f in view.get("setup") or [] if f.get("fix") == fix and setupcheck._same(f["folder"], folder)]
+        if not offered:
+            return err(ValueError("that fix is not offered for that folder"))
+        target = Path(offered[0]["folder"])
+        if not is_usable(target, proxy._allowed_roots()):
+            return err(ValueError(f"{target} is outside the folders the pages may reach"), status=403)
+        try:
+            if fix == "git_init":
+                said = await asyncio.to_thread(setupcheck.git_init, target)
+            else:
+                text = setupcheck.claude_md_text(name, str(target), [str(f) for f in entry.get("projects") or []],
+                                                 str(view.get("share") or ""))
+                said = await asyncio.to_thread(setupcheck.write_claude_md, target, text)
+        except (OSError, RuntimeError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "said": said})
 
     async def session_start(request: web.Request) -> web.Response:
         from .session import SessionError
@@ -2261,6 +2578,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # The running host takes a new limit at once (2026-10-16); lowering it stops nothing.
             if proxy.session is not None:
                 proxy.session.max_running = proxy.cfg.session_max_running
+                proxy.session.auto_titles = proxy.cfg.session_auto_titles
             # One control (feature 36). The setting governs the pipe and the CLAUDE.md rule
             # governs the agent, and only the rule is in front of the model - so leaving them to
             # disagree meant the setting appeared to do nothing. Flipping it rewrites the block.
@@ -3017,12 +3335,22 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/session/workspace-create", session_workspace_create)
         app.router.add_get("/api/session/workspace-files", session_workspace_files)
         app.router.add_post("/api/session/workspace-view", session_workspace_view)
+        app.router.add_post("/api/session/setup-fix", session_setup_fix)
+        app.router.add_post("/api/session/trust-check", session_trust_check)
+        app.router.add_post("/api/session/trust-add", session_trust_add)
         app.router.add_post("/api/session/tree-state", session_tree_state_save)
         app.router.add_get("/api/session/tabs-state", session_tabs_state)
         app.router.add_post("/api/session/tabs-state", session_tabs_state_save)
         app.router.add_get("/api/session/past", session_past)
         app.router.add_get("/api/session/conversations/search", conversation_search)
         app.router.add_post("/api/session/conversations/rank", conversation_rank)
+        app.router.add_get("/api/session/agent-report", agent_report)
+        app.router.add_get("/api/session/conversations/{action:deleted}", conversation_bin)
+        app.router.add_post("/api/session/conversations/{action:delete|restore|purge}", conversation_bin)
+        app.router.add_post("/api/session/conversations/{action:title|retitle|suggest-titles}", conversation_titles)
+        app.router.add_route("*", "/api/session/consolidate", conversation_consolidate)
+        app.router.add_route("*", "/api/claude-import/{step}", claude_import)
+        app.router.add_post("/api/session/drop/{step}", session_drop)
         app.router.add_get("/api/session/earlier", session_earlier)
         app.router.add_get("/api/tunnel/params", tunnel_params)
         app.router.add_post("/api/tunnel/hello", tunnel_hello)

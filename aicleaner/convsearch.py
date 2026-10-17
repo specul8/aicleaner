@@ -13,7 +13,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 import re
 import subprocess
 import time
@@ -243,7 +242,8 @@ def passage(turn: Turn, terms: list[str]) -> dict[str, Any] | None:
     return {"role": turn.role, "at": turn.at, "text": lead + text + tail, "marks": marks}
 
 
-def search(items: list[Transcript], cache: Cache, query: str, now: float | None = None) -> list[dict[str, Any]]:
+def search(items: list[Transcript], cache: Cache, query: str, now: float | None = None,
+           limit: int = MAX_RESULTS) -> list[dict[str, Any]]:
     """BM25 over the conversations, a phrase bonus, a little recency; best first."""
     terms = list(dict.fromkeys(stem(w) for w in words(query)))
     if not terms:
@@ -302,7 +302,7 @@ def search(items: list[Transcript], cache: Cache, query: str, now: float | None 
                         "matches": sum(counts.values()), "turns_matched": len(scored_turns),
                         "passages": passages})
     results.sort(key=lambda r: r["score"], reverse=True)
-    return results[:MAX_RESULTS]
+    return results[:limit]
 
 
 # ---- ranked by the model ------------------------------------------------------------------------
@@ -341,27 +341,11 @@ def parse_ranking(text: str, known: set[str]) -> list[dict[str, str]]:
 
 def rank_with_model(claude: str, base_url: str, question: str, results: list[dict[str, Any]],
                     run: Callable[..., Any] = subprocess.run) -> list[dict[str, str]]:
-    """One `claude --print` turn with no tools, through this proxy. Raises RuntimeError on failure."""
-    env = dict(os.environ)
-    if base_url:
-        env["ANTHROPIC_BASE_URL"] = base_url
-    command = [claude, "--print", "--output-format", "json", "--max-turns", "1",
-               "--permission-prompts", "none", "--disallowedTools", "Bash,Edit,Write,Read,Glob,Grep,WebFetch,WebSearch,Task,Agent"]
-    try:
-        done = run(command, input=rank_prompt(question, results), capture_output=True, text=True,
-                   encoding="utf-8", errors="replace", timeout=RANK_TIMEOUT_S, env=env)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"the AI ranking took longer than {RANK_TIMEOUT_S} seconds") from exc
-    except OSError as exc:
-        raise RuntimeError(f"could not start {claude}: {exc}") from exc
-    if done.returncode != 0:
-        raise RuntimeError((done.stderr or done.stdout or "the AI ranking failed").strip()[-300:])
-    try:
-        answer = json.loads(done.stdout)
-        text = answer.get("result", "") if isinstance(answer, dict) else str(answer)
-    except ValueError:
-        text = done.stdout
+    """One isolated model request (oneshot.ask), through this proxy. Raises RuntimeError on failure."""
+    from .oneshot import ask
+    text = ask(claude, base_url, rank_prompt(question, results), RANK_TIMEOUT_S, run=run)
     try:
         return parse_ranking(text, {r["id"] for r in results})
     except (ValueError, TypeError) as exc:
         raise RuntimeError(f"the AI ranking did not answer as asked: {exc}") from exc
+

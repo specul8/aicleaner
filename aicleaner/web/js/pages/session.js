@@ -23,6 +23,8 @@ import { attachImageReading, imageButton, isReadable, readInto } from '../imaget
 import { codeEditor } from '../codeeditor.js';
 import { openConversationSearch } from '../convsearch.js';
 import { openFeedback } from '../feedback.js';
+import { openClaudeImport } from '../claudeimport.js';
+import { attachFileDrop } from '../filedrop.js';
 import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetTitle, splitPrompt } from '../snippets.js';
 import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
@@ -351,6 +353,35 @@ function fillOnOpen(details, body, text) {
   });
 }
 
+// A sub-agent's report under the Agent call that started it (2026-10-16, item A): fetched when the
+// line is opened - most never are - from the agent's own transcript, and shown as Claude's replies
+// are. Until the agent has finished, opening it says so and asks again next time.
+const AGENT_TOOLS = new Set(['Agent', 'Task']);
+
+function agentReportLine(tool) {
+  const body = h('div', { class: 'agent-report-body' });
+  const label = h('span', {}, 'report');
+  const box = h('details', { class: 'agent-report', dataset: { tool: tool.id } }, h('summary', {}, label), body);
+  box.querySelector('summary').addEventListener('click', async () => {
+    if (box.dataset.filled) return;
+    body.replaceChildren(h('p', { class: 'muted' }, 'Fetching the report...'));
+    try {
+      const answer = await getJSON(`/api/session/agent-report?name=${encodeURIComponent(view.name || '')}&tool=${encodeURIComponent(tool.id)}`);
+      if (!answer.found) {
+        body.replaceChildren(h('p', { class: 'muted' }, answer.status === 'running'
+          ? 'Not finished yet - open this again when it has.' : (answer.reason || 'No report found.')));
+        return;
+      }
+      box.dataset.filled = '1';
+      label.textContent = `report - ${answer.words} words`;
+      body.replaceChildren(replyMarkdown(prettyJsonIn(answer.report)));
+    } catch (error) {
+      body.replaceChildren(h('p', { class: 'muted' }, `Could not fetch it: ${error.message || error}`));
+    }
+  });
+  return h('div', { class: 'turn tool agent-report-turn' }, h('span', { class: 'who' }, 'agent'), box);
+}
+
 function toolDetail(tool) {
   const name = tool.name || 'tool';
   const input = tool.input || {};
@@ -427,6 +458,7 @@ function transcript(events, { after = null, placeholder = true } = {}) {
         // paint, because a result arrives after the line was drawn.
         const dot = h('span', { class: 'tool-dot', 'data-tool-id': tool.id || '', 'aria-hidden': 'true' });
         lines.push(h('div', { class: 'turn tool' }, h('span', { class: 'who' }, dot, 'tool'), toolDetail(tool)));
+        if (AGENT_TOOLS.has(tool.name) && tool.id) lines.push(agentReportLine(tool));
       }
     } else if (event.type === 'brief') {
       lines.push(h('div', { class: 'turn tool' }, h('span', { class: 'who' }, 'brief'), h('div', {}, event.text)));
@@ -1217,6 +1249,9 @@ function sessionList(state) {
     profiles.length ? null : h('p', { class: 'muted' }, 'No project profiles yet. Add one with Edit project profiles.'),
     h('button', { type: 'button', id: 'session-edit-profiles', class: 'link' },
       view.editing ? 'Close project profiles' : 'Edit project profiles'),
+    // Importing a project from claude.ai (2026-10-16, item H): into the profile shown, or as a new client.
+    h('button', { type: 'button', id: 'session-claude-import', class: 'link' },
+      view.name ? 'Import from claude.ai into this session...' : 'Import from claude.ai...'),
   ];
 }
 
@@ -1259,12 +1294,15 @@ const cut = (text) => (text.length > TITLE_CHARS ? `${text.slice(0, TITLE_CHARS)
 // label shows that instead, and the tooltip always carries both.
 function conversationLabel(row, shared) {
   const branch = row.branch ? ` [${row.branch}]` : '';
-  const said = shared && row.last && row.last !== row.title ? `latest: ${cut(row.last)}` : cut(row.title);
+  // Its title first when it has one (item E, 2026-10-16): what it most recently worked on.
+  const said = row.label ? cut(row.label)
+    : shared && row.last && row.last !== row.title ? `latest: ${cut(row.last)}` : cut(row.title);
   return `${when(row.updated)}${row.busy ? ' (in use)' : ''}${branch} - ${said}`;
 }
 
 function conversationTip(row) {
-  return row.last && row.last !== row.title ? `${row.title}\n\nLatest: ${row.last}` : row.title;
+  const opening = row.last && row.last !== row.title ? `${row.title}\n\nLatest: ${row.last}` : row.title;
+  return row.label ? `${row.label}${row.label_source === 'person' ? ' (your title)' : ''}\n\nFirst: ${opening}` : opening;
 }
 
 // Openings that more than one conversation in the list starts with.
@@ -1608,6 +1646,165 @@ function createOffer(name, workspace, row) {
 // written only on a click, and the server recomputes what to write rather than trusting the page.
 // With none, the folder is chosen from those the file lists - never a multi-repo parent (D131) - and
 // written into the file whether or not the profile has been saved; the home follows it.
+// A one-line question: resolves the text, or null when cancelled.
+function askText(question, value = '') {
+  return new Promise((resolve) => {
+    const input = h('input', { type: 'text', class: 'ask-text', maxlength: '80', value, 'aria-label': question });
+    const ok = h('button', { type: 'button', class: 'primary ask-ok' }, 'Save');
+    const no = h('button', { type: 'button', class: 'ask-cancel' }, 'Cancel');
+    const dialog = h('dialog', { class: 'sheet confirm-dialog ask-dialog' }, h('label', { class: 'field' }, question, input),
+      h('div', { class: 'fb-footer' }, no, ok));
+    const finish = (answer) => { dialog.close(); dialog.remove(); resolve(answer); };
+    ok.addEventListener('click', () => finish(input.value));
+    no.addEventListener('click', () => finish(null));
+    input.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); finish(input.value); } });
+    dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(null); });
+    document.body.append(dialog);
+    dialog.showModal();
+    input.focus();
+    input.select();
+  });
+}
+
+// A yes/no sheet: resolves true when the person confirms.
+function confirmDialog(text, okText) {
+  return new Promise((resolve) => {
+    const ok = h('button', { type: 'button', class: 'primary confirm-ok' }, okText);
+    const no = h('button', { type: 'button', class: 'confirm-cancel' }, 'Cancel');
+    const dialog = h('dialog', { class: 'sheet confirm-dialog' }, h('p', {}, text), h('div', { class: 'fb-footer' }, no, ok));
+    const finish = (answer) => { dialog.close(); dialog.remove(); resolve(answer); };
+    ok.addEventListener('click', () => finish(true));
+    no.addEventListener('click', () => finish(false));
+    dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(false); });
+    document.body.append(dialog);
+    dialog.showModal();
+    no.focus();
+  });
+}
+
+// Recently deleted (2026-10-16, item D): this profile's deleted conversations, newest first, each with
+// Put back and Delete now (two clicks).
+async function openRecentlyDeleted(name, changed) {
+  const list = h('ul', { class: 'bin-list' });
+  const status = h('p', { class: 'hint' }, 'Loading...');
+  const close = h('button', { type: 'button', class: 'bin-close' }, 'Close');
+  const dialog = h('dialog', { id: 'recently-deleted', class: 'sheet bin-dialog', 'aria-label': 'Recently deleted' },
+    h('h2', {}, 'Recently deleted'), h('p', { class: 'hint' }, 'Kept for 30 days, then removed for good.'),
+    status, list, h('div', { class: 'form-row' }, close));
+  const finish = () => { dialog.close(); dialog.remove(); };
+  close.addEventListener('click', finish);
+  dialog.addEventListener('close', () => { if (dialog.isConnected) dialog.remove(); });
+  const load = async () => {
+    try {
+      const rows = (await getJSON(`/api/session/conversations/deleted?name=${encodeURIComponent(name)}`)).deleted || [];
+      status.textContent = rows.length ? '' : 'Nothing here.';
+      list.replaceChildren(...rows.map((row) => {
+        const back = h('button', { type: 'button', class: 'bin-restore' }, 'Put back');
+        const purge = h('button', { type: 'button', class: 'bin-purge' }, 'Delete now');
+        back.addEventListener('click', async () => {
+          try { await postJSON('/api/session/conversations/restore', { name, id: row.id }); say('Put back.', 'ok'); changed(); load(); }
+          catch (error) { sayError(error); }
+        });
+        purge.addEventListener('click', async () => {
+          if (!purge.classList.contains('armed')) { purge.classList.add('armed'); purge.textContent = 'Click again to delete for good'; return; }
+          try { await postJSON('/api/session/conversations/purge', { name, id: row.id }); say('Deleted for good.', 'ok'); load(); }
+          catch (error) { sayError(error); }
+        });
+        return h('li', { class: 'bin-row' }, h('strong', {}, row.title || row.id),
+          h('span', { class: 'hint' }, ` deleted ${when(row.deleted_at)}`), ' ', back, ' ', purge);
+      }));
+    } catch (error) { status.textContent = `Could not load it: ${error.message || error}`; }
+  };
+  document.body.append(dialog);
+  dialog.showModal();
+  load();
+}
+
+// Are this profile's folders trusted by Claude Code? (2026-10-16, item C.) The three lists - auto-mode
+// trusted repos, additional directories, workspace trust - checked on Save; when something is missing
+// a grid says what, and Save waits for: add them and save, save without adding, or cancel.
+// Resolves 'save' or 'cancel'.
+async function trustGate(profile) {
+  const answer = await postJSON('/api/session/trust-check', { profile });
+  const missing = answer.missing || [];
+  if (!missing.length) return 'save';
+  const names = answer.names || {};
+  const lists = Object.keys(names);
+  return new Promise((resolve) => {
+    const grid = h('table', { class: 'trust-grid' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Folder'), ...lists.map((key) => h('th', {}, names[key])))),
+      h('tbody', {}, ...missing.map((row) => h('tr', {}, h('td', { class: 'mono' }, row.folder),
+        ...lists.map((key) => h('td', { class: row.lists.includes(key) ? 'trust-missing' : 'trust-ok' },
+          row.lists.includes(key) ? 'missing' : '-'))))));
+    const add = h('button', { type: 'button', class: 'primary trust-add' }, 'Add them and save');
+    const skip = h('button', { type: 'button', class: 'trust-skip' }, 'Save without adding');
+    const cancel = h('button', { type: 'button', class: 'trust-cancel' }, 'Cancel');
+    if (!answer.can_add) {
+      add.disabled = true;
+      add.title = 'Claude Code\'s files are changed on the machine aicleaner runs on';
+    }
+    const dialog = h('dialog', { id: 'trust-dialog', class: 'sheet trust-dialog', 'aria-label': 'Trusted folders' },
+      h('h2', {}, 'Claude Code does not trust all of these folders yet'),
+      h('p', {}, 'Sessions of this profile work in these folders. Where a list does not cover one, Claude Code asks '
+        + 'about it again, or auto mode treats work there as unfamiliar. Adding writes your Claude Code settings '
+        + '(settings.json and .claude.json), each backed up first.'),
+      grid,
+      answer.can_add ? null : h('p', { class: 'hint' }, 'Through remote access these can only be added on the machine itself.'),
+      h('div', { class: 'fb-footer' }, cancel, h('span', {}, skip, ' ', add)));
+    const finish = (result) => { dialog.close(); dialog.remove(); resolve(result); };
+    cancel.addEventListener('click', () => finish('cancel'));
+    skip.addEventListener('click', () => finish('save'));
+    add.addEventListener('click', async () => {
+      add.disabled = true;
+      try {
+        const done = await postJSON('/api/session/trust-add', { profile });
+        say(`Added to Claude Code: ${(done.wrote || []).length} entries${(done.backups || []).length ? ' (backups kept beside the files)' : ''}.`, 'ok');
+        finish('save');
+      } catch (error) { sayError(error); add.disabled = false; }
+    });
+    dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish('cancel'); });
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+}
+
+// Is the project set up? (2026-10-16, item B): git in the home folder, a CLAUDE.md there, hand-added
+// folders inside repositories. Each finding with its fix; none of them blocks Save.
+function setupPanel(name, workspace, row) {
+  const found = (workspace && workspace.setup) || [];
+  if (!found.length) return null;
+  const fixButton = (finding, fix, text) => {
+    const button = h('button', { type: 'button', class: `setup-fix setup-${fix}` }, text);
+    busyButton(button, async () => {
+      try {
+        const answer = await postJSON('/api/session/setup-fix', { name, folder: finding.folder, fix });
+        say(answer.said, 'ok');
+        if (row) row.dispatchEvent(new Event('hints-stale'));
+      } catch (error) { sayError(error); }
+    });
+    return button;
+  };
+  const rows = found.map((finding) => {
+    const fixes = [];
+    if (name && finding.fix === 'git_init') fixes.push(fixButton(finding, 'git_init', 'Initialise git here'));
+    if (name && finding.fix === 'claude_md') {
+      fixes.push(fixButton(finding, 'claude_md', 'Create CLAUDE.md'));
+      const ask = h('button', { type: 'button', class: 'setup-ask-claude' }, 'Ask Claude to write it');
+      ask.addEventListener('click', () => {
+        if (view.setDraftFor) view.setDraftFor(name, '/init');
+        say(`/init is in ${name}'s prompt box: start the session and send it, and Claude writes CLAUDE.md.`, 'ok');
+      });
+      fixes.push(ask);
+    }
+    return h('li', { class: `setup-finding setup-${finding.kind}` }, finding.text, fixes.length ? ' ' : '', ...fixes);
+  });
+  return h('div', { class: 'callout warn setup-panel' },
+    h('strong', {}, 'Project setup'),
+    h('ul', {}, ...rows),
+    name ? null : h('p', { class: 'hint' }, 'Save the profile first to use the fixes.'),
+    h('p', { class: 'hint' }, 'These never stop you saving.'));
+}
+
 function cwdOffer(name, workspace, row) {
   const cwd = (workspace && workspace.cwd) || {};
   const file = workspace && workspace.workspace ? lastSegment(workspace.workspace) : '';
@@ -1710,7 +1907,7 @@ function hintsFor(row, workspace, values) {
   const offer = createOffer(name, workspace, row);
   slot('create-ask').replaceChildren(...(offer ? [offer.ask] : []));
   slot('create-yes').replaceChildren(...(offer ? [offer.yes] : []));
-  const notices = [cwdOffer(name, workspace, row), home.drift].filter(Boolean);
+  const notices = [cwdOffer(name, workspace, row), home.drift, setupPanel(name, workspace, row)].filter(Boolean);
   slot('notices').replaceChildren(...notices);
   slot('notices').hidden = !notices.length;
 }
@@ -2126,6 +2323,11 @@ export async function render(main, context = {}) {
       else sessionStorage.removeItem(draftKey(name));
     } catch (error) { /* storage refused: the draft lives until the page is left */ }
   };
+  // Another part of the page putting text in a session's prompt (item B's "Ask Claude to write it").
+  view.setDraftFor = (name, text) => {
+    try { sessionStorage.setItem(draftKey(name), text); } catch (error) { /* shown below if current */ }
+    if (name === view.name) setPrompt(text);
+  };
   const loadDraft = () => {
     try { setPrompt(sessionStorage.getItem(draftKey(view.name)) || ''); } catch (error) { setPrompt(''); }
     view.historyAt = null;
@@ -2187,10 +2389,22 @@ export async function render(main, context = {}) {
   });
   const list = h('aside', { id: 'session-list', class: 'card tree' });
   const panel = h('aside', { id: 'session-files', class: 'card tree' }, h('p', { class: 'muted' }, 'Loading files...'));
+  // Files and folders dropped on a folder are copied into it (2026-10-16, item H2); afterwards that
+  // folder, and the ones above it, are open and the tree is read again.
+  attachFileDrop(panel, { name: () => view.name, dropped: (target) => {
+    const parts = target.path ? target.path.split('/') : [];
+    for (let i = 0; i <= parts.length; i += 1) tree.open.set(`${target.root}|${parts.slice(0, i).join('/')}`, true);
+    saveTreeState();
+    forgetListings();
+    showTree();
+  } });
   const cards = h('div', { id: 'session-permissions' });
   const heading = h('h2', { id: 'session-heading' }, view.name || 'No session');
   const clientChip = h('span', { id: 'session-client', class: 'chip' }, '');
   const runningLine = h('div', { class: 'hint', id: 'session-running' }, '');
+  // The conversation's title beside the profile's name (item E, the user 2026-10-17): the one running,
+  // else the one chosen in Continue; its title when it has one, else what it opened with.
+  const conversationTitle = h('span', { id: 'session-conversation-title', class: 'session-conversation-title', hidden: true });
   // How this session asks before it acts. It was settable only by hand-editing
   // aicleaner-config.json, shown nowhere, and read at proxy construction - so the safest mode was
   // also the only reachable one, and a day was spent approving every action. Changing it here
@@ -2257,6 +2471,15 @@ export async function render(main, context = {}) {
       row.setAttribute('aria-pressed', on ? 'true' : 'false');
     }
     heading.textContent = view.name || 'No session';
+    {
+      const running = Boolean(view.name && current().running);
+      const wanted = String((running ? current().session_id : resume.value) || '').toLowerCase();
+      const row = wanted ? (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id.toLowerCase() === wanted) : null;
+      const text = row ? (row.label || row.title || '') : '';
+      conversationTitle.textContent = text ? `- ${text}` : '';
+      conversationTitle.title = row ? conversationTip(row) : '';
+      conversationTitle.hidden = !text;
+    }
     const chosenProject = Boolean(view.name);
     nonePicked.hidden = chosenProject;
     for (const part of sessionCard.querySelectorAll(':scope > .session-head, :scope > .session-controls')) {
@@ -2466,12 +2689,146 @@ export async function render(main, context = {}) {
       ? 'Chosen in Continue. Stop this session to pick that conversation up.'
       : 'Chosen in Continue: press Start to pick it up.', 'ok');
   };
-  const openSearch = () => {
-    if (!view.name || document.getElementById('conv-search')) return;
-    openConversationSearch({ name: () => view.name, choose: chooseConversation });
+  // Consolidating (2026-10-16, item F): the chosen conversations are summarised in the background, and
+  // the brief goes into the prompt box of a new conversation - nothing is sent until Start and Send.
+  // The originals are untouched; deleting them is offered once the new conversation runs.
+  const consolidateConversations = async (chosen) => {
+    if (current().running) { say('Stop this session first: the brief starts a new conversation.', 'warn'); return; }
+    let job;
+    try {
+      job = (await postJSON('/api/session/consolidate', { name: view.name, ids: chosen.map((r) => r.id) })).job;
+    } catch (error) { sayError(error); return; }
+    const titles = chosen.map((r) => r.label || r.title);
+    consolidateNote.hidden = false;
+    consolidateNote.replaceChildren(h('span', {}, `Summarising ${chosen.length} conversations...`));
+    const poll = async () => {
+      let state;
+      try { state = await getJSON(`/api/session/consolidate?job=${encodeURIComponent(job)}`); }
+      catch (error) { consolidateNote.replaceChildren(h('span', {}, `The consolidation stopped: ${error.message || error}`)); return; }
+      if (state.status !== 'done') {
+        consolidateNote.replaceChildren(h('span', {}, `Summarising ${Math.min(state.done + 1, state.total)} of ${state.total}...`));
+        setTimeout(poll, 2000);
+        return;
+      }
+      resume.value = '';
+      paint();
+      if (view.setDraftFor) view.setDraftFor(view.name, state.brief);
+      const remove = h('button', { type: 'button', class: 'consolidate-delete' }, `Delete the ${chosen.length} originals`);
+      const keep = h('button', { type: 'button', class: 'consolidate-keep' }, 'Keep them');
+      remove.addEventListener('click', async () => {
+        if (!current().running) { say('Start the new conversation first; then the originals can go.', 'warn'); return; }
+        for (const row of chosen) {
+          try { await postJSON('/api/session/conversations/delete', { name: view.name, id: row.id }); }
+          catch (error) { sayError(error); }
+        }
+        say('The originals are in Recently deleted.', 'ok');
+        consolidateNote.hidden = true;
+        loadPast({ quiet: true });
+      });
+      keep.addEventListener('click', () => { consolidateNote.hidden = true; });
+      consolidateNote.replaceChildren(
+        h('p', {}, h('strong', {}, 'The brief is in the prompt box. '), 'Read or edit it, then press Start and Send. Made from: ',
+          titles.join('; '), '.'),
+        ...(state.failed || []).map((f) => h('p', { class: 'hint' }, `No summary for ${f} - its opening and last turns are used instead.`)),
+        h('div', { class: 'form-row' }, remove, keep));
+    };
+    poll();
   };
+  const consolidateNote = h('div', { id: 'session-consolidate-note', class: 'callout consolidate-note', hidden: true });
+  const recentRows = (limit = 25) => (view.past || []).flatMap((entry) => (entry.sessions || []).map((row) => ({ ...row, project: entry.project })))
+    .sort((a, b) => b.updated - a.updated).slice(0, limit);
+  const consolidateAction = { verb: 'Consolidate', min: 2, run: consolidateConversations };
+  // The search dialog with ticks: consolidate (item F) by default, or delete several (2026-10-17).
+  const openSearch = (withRecent = false, action = consolidateAction, limit = 25) => {
+    if (!view.name || document.getElementById('conv-search')) return;
+    openConversationSearch({ name: () => view.name, choose: chooseConversation, action,
+      initial: withRecent ? recentRows(limit) : null });
+  };
+  const consolidateButton = h('button', { type: 'button', id: 'session-consolidate', class: 'link',
+    title: 'Start a new conversation from summaries of several earlier ones' }, 'Consolidate...');
+  consolidateButton.addEventListener('click', (event) => { event.preventDefault(); openSearch(true); });
   const searchButton = h('button', { type: 'button', id: 'session-search-conversations', class: 'link',
     title: 'Find a conversation by what it was about (Ctrl+K)' }, 'Search conversations');
+  // Deleting a conversation (2026-10-16, item D): to Recently deleted for 30 days, put back from there.
+  const deleteButton = h('button', { type: 'button', id: 'session-delete-conversation', class: 'link',
+    title: 'Choose conversations to move to Recently deleted (kept 30 days)' }, 'Delete...');
+  const binButton = h('button', { type: 'button', id: 'session-recently-deleted', class: 'link' }, 'Recently deleted');
+  // Delete opens the conversations with ticks and an All tick (the user, 2026-10-17), the one chosen
+  // in Continue ticked already; then one question, and each goes to Recently deleted.
+  const deleteConversations = async (chosen) => {
+    const ok = await confirmDialog(chosen.length === 1
+      ? `Delete "${chosen[0].label || chosen[0].title || chosen[0].id}"? It goes to Recently deleted for 30 days and can be put back from there.`
+      : `Delete these ${chosen.length} conversations? They go to Recently deleted for 30 days and can be put back from there.`, 'Delete');
+    if (!ok) return;
+    const failed = [];
+    for (const row of chosen) {
+      try { await postJSON('/api/session/conversations/delete', { name: view.name, id: row.id }); }
+      catch (error) { failed.push(`${row.label || row.title || row.id}: ${error.message || error}`); }
+    }
+    const moved = chosen.length - failed.length;
+    if (moved) say(`${moved} moved to Recently deleted.`, 'ok');
+    for (const problem of failed) say(`Not deleted - ${problem}`, 'warn');
+    if (chosen.some((row) => row.id === resume.value)) resume.value = '';
+    await loadPast({ quiet: true });
+  };
+  deleteButton.addEventListener('click', (event) => {
+    event.preventDefault();
+    if (!view.name) return;
+    openSearch(true, { verb: 'Delete', min: 1, run: deleteConversations }, Infinity);
+    const chosen = resume.value && document.querySelector(`#conv-search .conv-pick[data-id='${resume.value}']`);
+    if (chosen && !chosen.disabled) chosen.click();
+  });
+  binButton.addEventListener('click', (event) => { event.preventDefault(); openRecentlyDeleted(view.name, () => loadPast({ quiet: true })); });
+  // Titles (2026-10-16, item E): rename the chosen one (yours always wins), ask the model for it, or
+  // for every untitled one.
+  const renameButton = h('button', { type: 'button', id: 'session-rename-conversation', class: 'link',
+    title: 'Give the chosen conversation your own title (empty puts the automatic one back)' }, 'Rename');
+  const retitleButton = h('button', { type: 'button', id: 'session-retitle-conversation', class: 'link',
+    title: 'Ask the model for a title saying what the chosen conversation most recently worked on' }, 'Retitle');
+  const suggestButton = h('button', { type: 'button', id: 'session-suggest-titles', class: 'link',
+    title: 'Ask the model for titles for this profile\'s conversations that have none (newest 25)' }, 'Suggest titles');
+  const chosenRow = () => (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id === resume.value);
+  renameButton.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const row = chosenRow();
+    if (!row) { say('Choose a conversation in Continue first.', 'warn'); return; }
+    const title = await askText('Title for this conversation (empty puts the automatic one back)',
+      row.label_source === 'person' ? row.label : (row.label || ''));
+    if (title === null) return;
+    try {
+      await postJSON('/api/session/conversations/title', { name: view.name, id: row.id, title });
+      say(title.trim() ? 'Renamed.' : 'Your title is gone; the automatic one shows again.', 'ok');
+      const keep = row.id;
+      await loadPast({ quiet: true });
+      resume.value = keep;
+      paint();
+    } catch (error) { sayError(error); }
+  });
+  retitleButton.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const row = chosenRow();
+    if (!row) { say('Choose a conversation in Continue first.', 'warn'); return; }
+    retitleButton.disabled = true;
+    say('Asking the model for a title...', 'ok');
+    try {
+      const answer = await postJSON('/api/session/conversations/retitle', { name: view.name, id: row.id });
+      say(answer.label ? `Titled: ${answer.label.title}` : 'No title written.', 'ok');
+      const keep = row.id;
+      await loadPast({ quiet: true });
+      resume.value = keep;
+      paint();
+    } catch (error) { sayError(error); }
+    retitleButton.disabled = false;
+  });
+  suggestButton.addEventListener('click', async (event) => {
+    event.preventDefault();
+    try {
+      const answer = await postJSON('/api/session/conversations/suggest-titles', { name: view.name });
+      say(answer.started ? `Writing titles for ${answer.started} conversations in the background - they show as they are written.`
+        : 'Every conversation listed already has a title.', 'ok');
+      if (answer.started) setTimeout(() => loadPast({ quiet: true }), 20000);
+    } catch (error) { sayError(error); }
+  });
   searchButton.addEventListener('click', (event) => { event.preventDefault(); openSearch(); });
   view.openSearch = openSearch;
   if (!view.searchHooked) {
@@ -2667,10 +3024,11 @@ export async function render(main, context = {}) {
     nonePicked,
     // Two rows where there were five (D62): who and whether it is running, with Start; then
     // Continue | Folder | Asks in thirds.
-    h('div', { class: 'form-row session-head' }, heading, clientChip, runningLine,
+    h('div', { class: 'form-row session-head' }, heading, conversationTitle, clientChip, runningLine,
       h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start'), chat),
     h('div', { class: 'session-controls' },
-      h('label', { class: 'field' }, 'Continue', resume, showAll, searchButton),
+      h('label', { class: 'field' }, 'Continue', resume, showAll, searchButton, renameButton, retitleButton,
+        suggestButton, consolidateButton, deleteButton, binButton),
       h('div', { class: 'field' }, h('span', {}, 'Starts in (home folder)'), homeShown),
       modeField),
     resumeLine,
@@ -2715,8 +3073,9 @@ export async function render(main, context = {}) {
   const readButton = imageButton((files) => { for (const file of files) readInto(box, { file }, view.name, say, imageSnippet); });
   // Feedback beside the prompt's own buttons (the user, 2026-10-16): where something goes wrong is
   // usually where the person is typing.
+  // The megaphone alone (the user, 2026-10-16); its name and tooltip say what it is.
   const feedbackButton = h('button', { type: 'button', id: 'session-feedback', class: 'btn feedback-open',
-    title: 'Report a bug or suggest an idea' }, '\u{1F4E3} Feedback');
+    title: 'Feedback - report a bug or suggest an idea', 'aria-label': 'Feedback' }, '\u{1F4E3}');
   feedbackButton.addEventListener('click', () => openFeedback());
   const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
   const insertCodeButton = h('button', { type: 'button', id: 'session-insert-code', class: 'btn',
@@ -2726,6 +3085,7 @@ export async function render(main, context = {}) {
     prompt.element,
     slash,
     readChip,
+    consolidateNote,
     h('div', { class: 'form-row' },
       h('button', { type: 'button', id: 'session-send', class: 'primary' }, 'Send'),
       insertCodeButton,
@@ -3135,6 +3495,17 @@ export async function render(main, context = {}) {
   });
 
   list.addEventListener('click', async (event) => {
+    if (event.target.closest('#session-claude-import')) {
+      openClaudeImport({ name: view.name, opened: async (name) => {
+        // The closed dialog hands focus back to the Import link, inside this list - and repaint()
+        // leaves a list holding focus alone, so the new profile never reached the picker.
+        if (list.contains(document.activeElement)) document.activeElement.blur();
+        await refresh().catch(() => {});
+        await selectSession(name).catch(sayError);
+        loadPast({ quiet: true }).catch(() => {});
+      } });
+      return;
+    }
     const edit = event.target.closest('#session-edit-profiles');
     if (edit) {
       // Closing the editor drops what was not saved: ask first (D98).
@@ -3219,6 +3590,10 @@ export async function render(main, context = {}) {
     };
     if (event.target.closest('#profile-save')) {
       const mine = readProfile(active);
+      // Claude Code's trusted folders first (2026-10-16, item C): Save waits for the answer.
+      try {
+        if ((await trustGate(mine)) === 'cancel') return;
+      } catch (error) { sayError(error); return; }
       try {
         await commit(was ? saved.map((p) => (p.name === was ? mine : p)) : [...saved, mine],
           `Project profile ${mine.name} saved.`);

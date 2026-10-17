@@ -1027,6 +1027,7 @@ class Proxy:
                                    thinking_display=cfg.session_thinking_display)
         # The tree draws from the profile's workspace files (D99), within the allowed folder locations.
         self.session.allowed_roots = self._allowed_roots
+        self.session.auto_titles = cfg.session_auto_titles     # item E
 
     async def apply_session_enabled(self) -> None:
         """Follow session.enabled without a restart: on builds the host, off stops every running

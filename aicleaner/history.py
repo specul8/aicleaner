@@ -55,6 +55,8 @@ class Past:
     size: int
     busy: bool
     last: str = ""      # the latest thing the person typed: tells apart conversations that open alike
+    label: str = ""     # its title (item E, 2026-10-16): the model's, or one the person typed
+    label_source: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -206,7 +208,7 @@ def _latest(path: Path, stamp: tuple[int, float]) -> str:
 
 def sessions_for(project: str | Path, root: Path | None = None, limit: int = 25,
                  now: float = 0.0, include_robots: bool = False,
-                 ours: set[str] | frozenset[str] = frozenset()) -> list[Past]:
+                 ours: set[str] | frozenset[str] = frozenset(), labels: dict | None = None) -> list[Past]:
     """The most recent conversations held in that folder, newest first.
 
     Anything a program started is left out. A repository that gets its pull requests reviewed
@@ -242,18 +244,21 @@ def sessions_for(project: str | Path, root: Path | None = None, limit: int = 25,
         past.append(Past(id=path.stem, title=title or "(no opening message)",
                          project=str(project), branch=branch, started_by=entry,
                          updated=updated, size=size, busy=(now - updated) < BUSY_WINDOW_S,
-                         last=_latest(path, stamp)))
+                         last=_latest(path, stamp),
+                         label=str(((labels or {}).get(path.stem.lower()) or {}).get("title") or ""),
+                         label_source=str(((labels or {}).get(path.stem.lower()) or {}).get("source") or "")))
     return past
 
 
 def conversations(projects: Iterable[str | Path], root: Path | None = None,
                   limit: int = 25, include_robots: bool = False,
-                  ours: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+                  ours: set[str] | frozenset[str] = frozenset(), labels: dict | None = None) -> list[dict[str, Any]]:
     """One entry per project folder, so the picker can group what it shows."""
     root = root if root is not None else transcript_root()
     return [{"project": str(project),
              "sessions": [item.as_dict() for item in sessions_for(project, root=root, limit=limit,
-                                                                   include_robots=include_robots, ours=ours)]}
+                                                                   include_robots=include_robots, ours=ours,
+                                                                   labels=labels)]}
             for project in projects]
 
 

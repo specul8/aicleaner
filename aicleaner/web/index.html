@@ -41,12 +41,14 @@
     <div id="nav-sessions"></div>
     <a data-route="log" href="#/log"><span class="nav-mark" aria-hidden="true">&#x1F4DC;</span><span class="nav-text">Log</span></a>
     <a data-route="secrets" href="#/secrets"><span class="nav-mark" aria-hidden="true">&#x1F511;</span><span class="nav-text">Secrets</span></a>
-    <a data-route="wiki" href="#/wiki" title="Wiki"><span class="nav-mark" aria-hidden="true">&#x1F4D6;</span><span class="nav-wiki-q" aria-hidden="true">?</span><span class="nav-text">Wiki</span></a>
+    <!-- Settings, Wiki, Feedback, in that order (the user, 2026-10-16); icons only in the top menu. -->
+    <a data-route="settings" href="#/settings" title="Settings"><span class="nav-mark" aria-hidden="true">&#x2699;&#xFE0F;</span><span class="nav-text">Settings</span></a>
+    <!-- The wiki is a question-mark emoji in every layout (the user, 2026-10-17; a circled "?" before): help and about. -->
+    <a data-route="wiki" href="#/wiki" title="Wiki"><span class="nav-mark nav-wiki-q" aria-hidden="true">&#x2754;</span><span class="nav-text">Wiki</span></a>
     <!-- The wiki's pages, flying out from "?" in the top menu (the user, 2026-10-15); filled by app.js. -->
     <div id="nav-wiki" class="nav-flyout"></div>
     <!-- Feedback (2026-10-16): a menu item of its own in every layout; it opens a dialog, not a page. -->
     <a href="#" id="nav-feedback" title="Send feedback"><span class="nav-mark" aria-hidden="true">&#x1F4E3;</span><span class="nav-text">Feedback</span></a>
-    <a data-route="settings" href="#/settings"><span class="nav-mark" aria-hidden="true">&#x2699;&#xFE0F;</span><span class="nav-text">Settings</span></a>
   </nav>
   <div class="address" id="address"></div>
 </aside>

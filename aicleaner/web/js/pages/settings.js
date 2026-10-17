@@ -427,12 +427,17 @@ function sessionCard(s) {
   // How many may run at once (the user, 2026-10-16): 4 by default, 0 for no cap.
   const most = h('input', { type: 'number', name: 'max_running', min: '0', max: '64', step: '1',
     value: String(s['session.max_running'] ?? 4) });
+  // Titles when a session stops (item E, 2026-10-16): on by default; one short request to a small model.
+  const titles = checkbox('auto-titles', 'Write a title for a conversation when its session stops (a short request to a small model, filtered as usual)',
+    s['session.auto_titles'] !== false);
   return card('session', 'Session page',
     'On: the Session page can start Claude Code on this machine in your profiles\' folders, with every request filtered and every action waiting for your approval. Through the tunnel it works from your phone. Off: the page and its API refuse, and switching it off stops any session that is running. Takes effect straight away.',
     [h('div', { class: 'form-row' }, on),
       h('div', { class: 'form-row' }, h('label', { class: 'field' },
-        'Sessions running at once (0 = no cap; the machine is the limit). Lowering it stops nothing - it only refuses new starts until enough have stopped.', most))],
+        'Sessions running at once (0 = no cap; the machine is the limit). Lowering it stops nothing - it only refuses new starts until enough have stopped.', most)),
+      h('div', { class: 'form-row' }, titles)],
     () => ({ 'session.enabled': on.querySelector('input').checked,
+      'session.auto_titles': titles.querySelector('input').checked,
       // A cleared box is the default, never "no cap" by accident.
       'session.max_running': most.value.trim() === '' ? 4 : Math.max(0, Math.floor(Number(most.value) || 0)) }));
 }

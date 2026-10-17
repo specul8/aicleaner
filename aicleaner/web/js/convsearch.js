@@ -41,19 +41,30 @@ function marked(passage) {
   return h('p', { class: 'conv-passage' }, h('span', { class: 'conv-who' }, `${passage.role} ${when(passage.at)}`), ' ', ...parts);
 }
 
-function card(result, index, several) {
+function card(result, index, several, picked, verb) {
   const folder = several ? result.project.split(/[\\/]/).filter(Boolean).pop() : '';
   const head = [when(result.updated), result.branch ? `[${result.branch}]` : '', folder].filter(Boolean).join('  ');
+  // A tick to act on it with others (consolidate, item F; delete); a click on it never opens the card.
+  // One that is running or busy cannot be deleted, so it cannot be ticked for that.
+  const locked = verb === 'Delete' && result.busy;
+  const pick = verb ? h('input', { type: 'checkbox', class: 'conv-pick', 'aria-label': `Choose to ${verb.toLowerCase()}`,
+    checked: picked && !locked ? true : null, disabled: locked ? true : null, title: locked ? 'Running or busy: it cannot be deleted now' : null,
+    dataset: { id: result.id } }) : null;
+  const count = typeof result.matches === 'number'
+    ? `${result.matches} ${result.matches === 1 ? 'match' : 'matches'} in ${result.turns_matched} ${result.turns_matched === 1 ? 'turn' : 'turns'}`
+    : '';
   return h('li', { class: 'conv-card', role: 'option', tabindex: '-1', dataset: { index: String(index) } },
-    h('div', { class: 'conv-head muted' }, head,
-      h('span', { class: 'conv-count' }, `${result.matches} ${result.matches === 1 ? 'match' : 'matches'} in ${result.turns_matched} ${result.turns_matched === 1 ? 'turn' : 'turns'}`)),
-    h('div', { class: 'conv-title' }, result.title),
+    h('div', { class: 'conv-head muted' }, h('span', {}, pick, ' ', head), h('span', { class: 'conv-count' }, count)),
+    result.label ? h('div', { class: 'conv-label' }, result.label) : null,
+    h('div', { class: result.label ? 'conv-title muted' : 'conv-title' }, result.label ? `first: ${result.title}` : result.title),
     result.last && result.last !== result.title ? h('div', { class: 'conv-last muted' }, `latest: ${result.last}`) : null,
     result.why ? h('div', { class: 'conv-why' }, result.why) : null,
     ...(result.passages || []).map(marked));
 }
 
-// opts: { name: () => profile shown, choose(result) }
+// opts: { name: () => profile shown, choose(result), initial: rows shown while nothing is typed (optional),
+//         action: { verb, min, run(results) } (optional) - ticks on the cards, an All tick, and a button
+//         that acts on the ticked ones: Consolidate (item F, 2 or more) or Delete (1 or more) }
 export function openConversationSearch(opts) {
   const input = h('input', { type: 'search', class: 'conv-query', placeholder: 'What was it about? e.g. code signing certificates',
     'aria-label': 'Search conversations', autocomplete: 'off' });
@@ -64,17 +75,43 @@ export function openConversationSearch(opts) {
   const status = h('p', { class: 'hint conv-status' }, 'Type what the conversation was about.');
   const list = h('ul', { class: 'conv-results', role: 'listbox', 'aria-label': 'Matching conversations' });
   const close = h('button', { type: 'button', class: 'conv-close' }, 'Close');
+  const action = opts.action || null;
+  const verb = action ? action.verb : '';
+  const actButton = h('button', { type: 'button', class: `primary conv-act conv-${verb.toLowerCase() || 'none'}`, hidden: true }, verb);
+  // Every card shown ticked, or none (the user, 2026-10-17).
+  const all = action ? h('label', { class: 'check conv-all' }, h('input', { type: 'checkbox', class: 'conv-all-tick' }), ' All') : null;
   const dialog = h('dialog', { id: 'conv-search', class: 'sheet conv-search', 'aria-label': 'Search conversations' },
-    h('h2', {}, 'Search conversations'),
+    h('h2', {}, verb ? `${verb} conversations` : 'Search conversations'),
     h('div', { class: 'form-row conv-bar' }, input, scope, ai),
-    status, list, h('div', { class: 'form-row' }, close));
+    status, all, list, h('div', { class: 'fb-footer' }, close, actButton));
   document.body.append(dialog);
 
-  const state = { results: [], active: 0, timer: null, asked: 0 };
+  const state = { results: [], active: 0, timer: null, asked: 0, picked: new Map() };
+  const tickable = () => state.results.filter((r) => !(verb === 'Delete' && r.busy));
+  const showPicked = () => {
+    actButton.hidden = !action || state.picked.size < action.min;
+    actButton.textContent = `${verb} (${state.picked.size})`;
+    if (all) {
+      const box = all.querySelector('input');
+      const shown = tickable();
+      const ticked = shown.filter((r) => state.picked.has(r.id)).length;
+      box.checked = shown.length > 0 && ticked === shown.length;
+      box.indeterminate = ticked > 0 && ticked < shown.length;
+      all.hidden = !shown.length;
+    }
+  };
   const draw = () => {
     const several = new Set(state.results.map((r) => r.project)).size > 1;
-    list.replaceChildren(...state.results.map((result, i) => card(result, i, several)));
+    list.replaceChildren(...state.results.map((result, i) => card(result, i, several, state.picked.has(result.id), verb)));
     highlight();
+    showPicked();
+  };
+  // With nothing typed: the conversations the page was given (Consolidate... from Continue).
+  const showInitial = () => {
+    state.results = opts.initial || [];
+    draw();
+    const how = action ? `Tick ${action.min > 1 ? `${action.min} or more` : 'the ones'} to ${verb.toLowerCase()}, or type to search.` : '';
+    status.textContent = state.results.length && how ? how : 'Type what the conversation was about.';
   };
   const highlight = () => {
     list.querySelectorAll('.conv-card').forEach((li, i) => {
@@ -117,7 +154,7 @@ export function openConversationSearch(opts) {
     const query = input.value.trim();
     const asked = state.asked + 1;
     state.asked = asked;
-    if (!query) { state.results = []; draw(); status.textContent = 'Type what the conversation was about.'; return; }
+    if (!query) { showInitial(); return; }
     status.textContent = 'Searching...';
     try {
       const answer = await getJSON(`/api/session/conversations/search?name=${encodeURIComponent(opts.name())}&q=${encodeURIComponent(query)}&scope=${scope.value}`);
@@ -153,12 +190,34 @@ export function openConversationSearch(opts) {
     }
   });
   list.addEventListener('click', (event) => {
+    const tick = event.target.closest('.conv-pick');
+    if (tick) {
+      const result = state.results.find((r) => r.id === tick.dataset.id);
+      if (tick.checked && result) state.picked.set(result.id, result);
+      else state.picked.delete(tick.dataset.id);
+      showPicked();
+      return;
+    }
     const li = event.target.closest('.conv-card');
     if (li) choose(Number(li.dataset.index));
+  });
+  if (all) {
+    all.querySelector('input').addEventListener('change', (event) => {
+      for (const result of tickable()) {
+        if (event.target.checked) state.picked.set(result.id, result); else state.picked.delete(result.id);
+      }
+      draw();
+    });
+  }
+  actButton.addEventListener('click', () => {
+    const chosen = [...state.picked.values()];
+    finish();
+    action.run(chosen);
   });
   close.addEventListener('click', finish);
   dialog.addEventListener('close', () => { if (dialog.isConnected) dialog.remove(); });
   dialog.showModal();
   input.focus();
+  if (opts.initial) showInitial();
   return dialog;
 }

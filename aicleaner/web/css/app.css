@@ -394,13 +394,20 @@ main#page:focus { outline: none; }
 }
 :root[data-layout="top"] .toolbar #message { display: none; }
 .nav-flyout { display: none; }
-.nav-wiki-q { display: none; }
-:root[data-layout="top"] #nav a[data-route=wiki] .nav-mark,
-:root[data-layout="top"] #nav a[data-route=wiki] .nav-text { display: none; }
-:root[data-layout="top"] #nav a[data-route=wiki] .nav-wiki-q {
-  display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; font-weight: 700;
-  border: 1px solid var(--side-border); border-radius: 50%;
-}
+/* The wiki's mark is a question-mark emoji in every layout (the user, 2026-10-17), styled as the
+   other items' marks (.nav-mark). */
+/* Top menu: Settings, Wiki and Feedback as icons only (the user, 2026-10-16); their titles say what. */
+:root[data-layout="top"] #nav a[data-route=settings] .nav-text,
+:root[data-layout="top"] #nav a[data-route=wiki] .nav-text,
+:root[data-layout="top"] #nav #nav-feedback .nav-text { display: none; }
+/* Client Filters flies out on hover, focus or a tap in the top menu, as Running sessions does; the
+   chevron is the side menu's (the user, 2026-10-16). */
+:root[data-layout="top"] #clients-toggle { display: none; }
+:root[data-layout="top"] #nav-clients { display: none; }
+:root[data-layout="top"] #group-clients:hover + #nav-clients,
+:root[data-layout="top"] #group-clients:focus-within + #nav-clients,
+:root[data-layout="top"] #nav-clients:hover,
+:root[data-layout="top"] #nav-clients:focus-within { display: flex; }
 :root[data-layout="top"] #nav-clients,
 :root[data-layout="top"] #nav-sessions,
 :root[data-layout="top"] #nav-wiki {
@@ -1436,3 +1443,67 @@ dialog.feedback-dialog { width: min(48rem, 94vw); max-height: 90vh; overflow-y: 
 .fb-from-team { border-left-color: var(--accent); }
 .fb-footer { display: flex; justify-content: space-between; align-items: center; gap: .5rem; margin-top: .8rem; }
 .fb-footer[hidden] { display: none; }
+/* A sub-agent's report under its Agent call (2026-10-16). */
+.agent-report summary { cursor: pointer; }
+.agent-report-body { margin-top: .3rem; padding-left: .5rem; border-left: 3px solid var(--border); overflow-wrap: anywhere; }
+/* Claude Code's trusted folders on profile Save (2026-10-16, item C). */
+dialog.trust-dialog { width: min(52rem, 94vw); }
+.trust-grid { border-collapse: collapse; width: 100%; margin: .5rem 0; font-size: .85rem; }
+.trust-grid th, .trust-grid td { border: 1px solid var(--border); padding: .25rem .4rem; text-align: left; }
+.trust-grid td.mono { overflow-wrap: anywhere; }
+.trust-missing { color: var(--bad, #c0392b); font-weight: 600; }
+/* Recently deleted conversations (2026-10-16, item D). */
+#session-delete-conversation, #session-recently-deleted, #session-rename-conversation,
+#session-retitle-conversation, #session-suggest-titles { margin-left: .5rem; }
+dialog.bin-dialog { width: min(44rem, 94vw); }
+.bin-list { list-style: none; margin: 0; padding: 0; }
+.bin-row { padding: .35rem 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+dialog.confirm-dialog { width: min(32rem, 92vw); }
+.conv-label { font-weight: 700; margin: .15rem 0; overflow-wrap: anywhere; }
+/* The conversation title beside the profile name (item E, 2026-10-17). */
+.session-conversation-title { font-weight: 600; color: var(--muted); max-width: 40ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Consolidating conversations (2026-10-16, item F). */
+#session-consolidate { margin-left: .5rem; }
+.consolidate-note { margin: .4rem 0; }
+.conv-pick { margin-right: .3rem; }
+/* All: every card shown ticked, or none (2026-10-17). */
+.conv-all { display: block; margin: .2rem 0 .4rem; font-weight: 600; }
+.conv-all[hidden] { display: none; }
+/* Importing a project from claude.ai (2026-10-16, item H). */
+#session-claude-import { display: block; margin-top: .3rem; }
+dialog.ci-dialog { width: min(60rem, 96vw); max-height: 92vh; display: flex; flex-direction: column; }
+dialog.ci-dialog:not([open]) { display: none; }
+.ci-steps { display: flex; flex-wrap: wrap; gap: .3rem; list-style: none; margin: 0 0 .6rem; padding: 0; counter-reset: ci; }
+.ci-steps li { counter-increment: ci; padding: .2rem .55rem; border: 1px solid var(--border); border-radius: var(--radius);
+  font-size: .8rem; color: var(--muted); }
+.ci-steps li::before { content: counter(ci) ". "; }
+.ci-steps li.current { color: var(--text); border-color: var(--accent); font-weight: 600; }
+.ci-steps li.done { color: var(--ok-text); border-color: var(--ok-border); }
+.ci-body { overflow: auto; flex: 1 1 auto; min-height: 12rem; }
+.ci-drop { border: 2px dashed var(--border); border-radius: var(--radius); padding: 1rem; margin: .5rem 0; }
+.ci-drop.over { border-color: var(--accent); }
+.ci-files, .ci-projects { list-style: none; margin: .4rem 0; padding: 0; }
+.ci-file, .ci-project { padding: .35rem 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+.ci-next-file { background: var(--surface); }
+.ci-state { font-size: .85rem; color: var(--muted); }
+.ci-state.ci-received { color: var(--ok-text); }
+.ci-state.ci-bad { color: var(--bad-text); }
+.ci-choose input[type=file] { display: none; }
+.ci-choose { cursor: pointer; }
+.ci-instructions { white-space: pre-wrap; font-size: .8rem; margin: .2rem 0 0; color: var(--muted); max-height: 6em; overflow: hidden; }
+.ci-chat-tools { align-items: center; gap: .5rem; flex-wrap: wrap; }
+.ci-count { color: var(--muted); font-size: .85rem; margin-left: auto; }
+.ci-chat-scroll { max-height: 52vh; overflow: auto; margin-top: .4rem; }
+.ci-chats { border-collapse: collapse; width: 100%; font-size: .85rem; }
+.ci-chats th, .ci-chats td { border-bottom: 1px solid var(--border); padding: .25rem .4rem; text-align: left; vertical-align: top; }
+.ci-chats tr.ci-imported td { color: var(--muted); }
+.ci-passage { max-height: 3.2em; overflow: hidden; }
+.ci-when, .ci-n { white-space: nowrap; }
+.ci-pair input { flex: 1 1 14rem; }
+.ci-report ul, .ci-review { margin: .4rem 0 .8rem; }
+/* Dropping files on the file tree (2026-10-16, item H2). */
+.tree-row.drop-over, .tree-root.drop-over { outline: 2px dashed var(--accent); outline-offset: -2px; background: var(--surface); }
+.drop-hint { position: sticky; bottom: 0; margin-top: .4rem; padding: .3rem .5rem; border: 1px solid var(--accent);
+  border-radius: var(--radius); background: var(--surface); font-size: .85rem; }
+.drop-clashes { max-height: 12rem; overflow: auto; margin: .3rem 0 .6rem; overflow-wrap: anywhere; }
+#drop-progress progress { width: 100%; }
