@@ -132,14 +132,26 @@ export function attachImageReading(box, { sessionName, roots, say, chip, format 
   });
 }
 
-// "Read an image or PDF": the browser's own chooser, so it works through the tunnel and the server
+// Upload's two marks: Brad's chosen icons (2026-10-19), shipped with the page - stored at 48px (scaled
+// with high-quality resampling) and shown at 16px on their longest side, sharp on 1x, 2x and 3x screens.
+function mark(name) {
+  return h('img', { class: `icon-${name}`, src: `/web/img/${name}.png`, alt: '', 'aria-hidden': 'true', draggable: 'false' });
+}
+
+// Upload (an image or PDF): the browser's own chooser, so it works through the tunnel and the server
 // is never asked to open a path somebody typed.
 export function imageButton(onFiles) {
   const input = h('input', { type: 'file', multiple: true, hidden: true,
     accept: 'image/*,.tif,.tiff,.pdf,application/pdf' });
   input.addEventListener('change', () => { onFiles([...input.files]); input.value = ''; });
-  const button = h('button', { type: 'button', id: 'session-read-image', class: 'btn',
-    title: 'Read the text in an image or PDF on this machine and put it in the prompt to check' }, 'Read an image or PDF');
+  // "Upload", a picture and a page (the user, 2026-10-18: the row needed the room); the name and
+  // the tooltip still say what it does. In colour (the user, 2026-10-19): his picture and PDF icons.
+  const picture = mark('image');
+  const page = mark('pdf');
+  const button = h('button', { type: 'button', id: 'session-read-image', class: 'btn upload-button',
+    'aria-label': 'Upload an image or PDF: its text is read on this machine and put in the prompt to check',
+    title: 'Read the text in an image or PDF on this machine and put it in the prompt to check' },
+  'Upload ', picture, ' / ', page);
   button.addEventListener('click', () => input.click());
   return h('span', { class: 'read-image' }, button, input);
 }

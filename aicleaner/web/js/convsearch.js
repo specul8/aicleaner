@@ -7,7 +7,7 @@
 // text, never as HTML.
 
 import { getJSON, postJSON } from './api.js';
-import { h } from './dom.js';
+import { h, tickRows } from './dom.js';
 import { arrangeSheet } from './sheet.js';
 
 const AI_KEY = 'aicleaner-conversation-search-ai';
@@ -48,7 +48,7 @@ function card(result, index, several, picked, verb) {
   // A tick to act on it with others (consolidate, item F; delete); a click on it never opens the card.
   // One that is running or busy cannot be deleted, so it cannot be ticked for that.
   const locked = verb === 'Delete' && result.busy;
-  const pick = verb ? h('input', { type: 'checkbox', class: 'conv-pick', 'aria-label': `Choose to ${verb.toLowerCase()}`,
+  const pick = verb ? h('input', { type: 'checkbox', class: 'conv-pick row-tick', 'aria-label': `Choose to ${verb.toLowerCase()}`,
     checked: picked && !locked ? true : null, disabled: locked ? true : null, title: locked ? 'Running or busy: it cannot be deleted now' : null,
     dataset: { id: result.id } }) : null;
   const count = typeof result.matches === 'number'
@@ -75,6 +75,9 @@ export function openConversationSearch(opts) {
     h('input', { type: 'checkbox', checked: remembered() ? true : null }), ' Let AI rank these');
   const status = h('p', { class: 'hint conv-status' }, 'Type what the conversation was about.');
   const list = h('ul', { class: 'conv-results', role: 'listbox', 'aria-label': 'Matching conversations' });
+  // Ticking many (Delete, Consolidate, Start from these): the card toggles its tick, as on Review (E3);
+  // with nothing to tick, a click on a card still opens it.
+  if (opts.action) tickRows(list, '.conv-card', '.conv-pick');
   const close = h('button', { type: 'button', class: 'conv-close' }, 'Close');
   const action = opts.action || null;
   const verb = action ? action.verb : '';

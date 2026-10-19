@@ -279,7 +279,7 @@ function others(wiz, { changed, go, paint }) {
   const target = (s) => (s.kind === 'domain' ? d.domains : s.kind === 'name' ? d.names : d.urls);
   const boxes = [];
   const rows = suggestions.map((s) => {
-    const box = h('input', { type: 'checkbox', checked: target(s).includes(s.value) });
+    const box = h('input', { type: 'checkbox', class: 'row-tick', checked: target(s).includes(s.value) });
     box.addEventListener('change', () => {
       const list = target(s);
       if (box.checked && !list.includes(s.value)) list.push(s.value);
@@ -313,7 +313,7 @@ function scan(wiz, { changed, go, paint }) {
     setChildren(results, ...kinds.map((kind) => {
       const boxes = [];
       const rows = wiz.finds.filter((f) => f.kind === kind).map((f) => {
-        const box = h('input', { type: 'checkbox', checked: d.found.includes(f.value) });
+        const box = h('input', { type: 'checkbox', class: 'row-tick', checked: d.found.includes(f.value) });
         box.addEventListener('change', () => {
           if (box.checked && !d.found.includes(f.value)) d.found.push(f.value);
           if (!box.checked) d.found = d.found.filter((v) => v !== f.value);

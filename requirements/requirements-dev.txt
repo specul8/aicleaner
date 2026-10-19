@@ -1,3 +1,4 @@
 -r requirements.txt
 pytest>=8
 playwright>=1.47
+pytest-xdist>=3.6          # the suites in parallel (item C2, 2026-10-18): -n auto / -n 6

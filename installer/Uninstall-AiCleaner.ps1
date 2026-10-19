@@ -862,6 +862,25 @@ try {
         }
     }
 
+    # --- 1a-iv. GitHub Copilot in VS Code (Copilot release 6) ------------------------
+    # VS Code's proxy setting put back from the proxy's own record, the Copilot certificate taken out of
+    # the Windows certificates (Windows asks to confirm), and its files removed: `aicleaner copilot-off
+    # --remove-cert`. Left behind, VS Code would send everything to a proxy that is gone.
+    if ((Test-Path -LiteralPath $venvPython) -and (Test-Path -LiteralPath $configFile) -and
+        $PSCmdlet.ShouldProcess('VS Code settings and the Copilot certificate', 'Remove what the Copilot switch added')) {
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        Push-Location -LiteralPath $root
+        try {
+            Write-Status 'If Windows asks whether to delete the "aicleaner Copilot" certificate, choose Yes.' -Level Detail
+            & $venvPython -m aicleaner copilot-off --remove-cert --config $configFile 2>&1 | ForEach-Object { Write-Status "Copilot: $_" -Level Detail }
+            if ($LASTEXITCODE -ne 0) { Write-Status 'Copilot''s settings could not all be put back; see the lines above' -Level Warn }
+        } finally {
+            Pop-Location
+            $ErrorActionPreference = $savedEap
+        }
+    }
+
     # --- 1b. VS Code environmentVariables ---------------------------------------------
     # Every settings file the installer can write: the locally installed VS Code, and the servers a
     # Remote-SSH session runs from. Missing the server ones left Claude Code pointed at a proxy that

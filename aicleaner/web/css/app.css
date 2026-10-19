@@ -664,6 +664,8 @@ tr.entry.hidden-by-filter, #inbox tr.hidden-by-filter, .ignores > .chip.hidden-b
 #review-filter { flex: 1 1 14rem; min-width: 0; max-width: 100%; }
 .callout { border: 1px solid var(--warn-border); background: var(--warn-bg); border-radius: 8px; padding: 8px 12px; }
 .callout.bad { border-color: var(--bad-border); background: var(--bad-bg); }
+.callout.ok { border-color: var(--ok-border); background: var(--ok-bg); }
+.callout.ok b { color: var(--ok-text); }
 .callout b { color: var(--warn-text); }
 /* Settings, "What your AI clients are pointed at": paths and URLs wrap anywhere rather than widen
    the page on a phone. */
@@ -1527,3 +1529,36 @@ dialog.ci-dialog:not([open]) { display: none; }
   border-radius: var(--radius); background: var(--surface); font-size: .85rem; }
 .drop-clashes { max-height: 12rem; overflow: auto; margin: .3rem 0 .6rem; overflow-wrap: anywhere; }
 #drop-progress progress { width: 100%; }
+
+/* A tick in a dialog's list is Review's tick (E3, Brad 2026-10-19): the same size, and its row toggles
+   it (dom.js tickRows) - the box is not a 13px target to aim at. */
+input[type="checkbox"].row-tick { width: 26px; height: 26px; margin: 0 .35rem 0 0; vertical-align: middle; cursor: pointer; }
+.conv-results .conv-card:has(.row-tick), tr:has(> td > .row-tick) { cursor: pointer; }
+
+/* Suggest titles (E3 part 1): every conversation, a tick left of each title. */
+.titles-dialog { width: min(720px, 94vw); }
+.titles-ticks { gap: 1.2rem; }
+.titles-list { list-style: none; margin: .4rem 0 0; padding: 0; }
+.titles-row { display: flex; align-items: center; gap: .2rem; padding: .3rem .4rem; border-radius: 6px; cursor: pointer; }
+.titles-row:hover { background: var(--surface-2); }
+.titles-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.titles-name { font-weight: 600; }
+
+/* The claude.ai import's list (E3 part 8, feedback #4): a header's label sorts, its right edge resizes. */
+.ci-chats th.ci-sortable { position: relative; white-space: nowrap; padding-right: .8rem; }
+.ci-chats .ci-sort { font-weight: 600; }
+.ci-chats .ci-resize { position: absolute; top: 0; right: 0; width: 7px; height: 100%; cursor: col-resize; }
+.ci-chats .ci-resize:hover { background: var(--accent); opacity: .5; }
+.ci-chats td { overflow: hidden; text-overflow: ellipsis; }
+
+/* A new conversation's name, under the Continue list (E3 part 10). */
+.session-new-name { width: 100%; margin: .3rem 0 .1rem; }
+
+/* The AI tools list (item H): Settings card and the wizard's "Your AI tools" step. Settings packs its
+   cards into narrow columns, so each tool is one stacked block - name, filtering, sign-in. */
+.aitools-row { border-top: 1px solid var(--border); padding: 8px 0; overflow-wrap: anywhere; min-width: 0; }
+.aitools-name { font-weight: 600; margin-bottom: 4px; }
+.aitools-label { font-size: 0.85em; color: var(--muted); margin-top: 4px; }
+.aitools-row .chip { margin: 0 4px 4px 0; }
+.aitools-row .hint { margin: 2px 0; }
+.aitools-login input[name="login-code"] { min-width: 0; flex: 1 1 10em; }

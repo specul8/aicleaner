@@ -27,6 +27,7 @@ import re
 import time
 import uuid
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any
 
 import aiohttp
@@ -94,6 +95,14 @@ _REPLY_EVENTS = frozenset({"content_block_start", "content_block_delta", "conten
                            "message_delta", "message_stop", "error"})
 # What the substitution log needs about one request: id, who, project, held and unprotected pairs.
 _REQ = web.RequestKey("aicleaner_request", dict)
+# Set by copilot_handle: the https://host a Copilot request goes on to, and the dialect it is read as
+# (2026-10-18): openai for chat, openai_responses for the Responses API.
+COPILOT = web.RequestKey("aicleaner_copilot", str)
+COPILOT_AS = web.RequestKey("aicleaner_copilot_dialect", str)
+# The Copilot paths filtered so far, and how (spec "Order of work"); the rest still go on untouched.
+COPILOT_READ = {"/chat/completions": "openai", "/responses": "openai_responses",
+                # Release 5: public code matching - `source` is the person's code going to GitHub.
+                "/twirp/github.snippy.v1.SnippyAPI/Match": "copilot_match"}
 # UI calls that record view state, not a decision: logging them would bury the decisions.
 _NOT_UI_ACTIONS = ("/api/tokenise", "/api/rehydrate", "/api/session/tree-state",
                    "/api/session/permission/request",
@@ -203,6 +212,29 @@ def _without_our_marks(body: bytes, content_type: str, dialect: str) -> bytes:
     return body if cleaned == obj else dumps(cleaned)
 
 
+@dataclass
+class _Filtering:
+    """What Proxy._filter_body reads and writes back for one request (or one WebSocket frame)."""
+    request: Any
+    dialect: str
+    tail: str
+    started: float
+    session_name: str
+    session_client: str
+    content_type: str
+    mapper: Any
+    reply_mapper: Any
+    body: bytes
+    outbound: Any
+    inbound: Any
+    secrets: Any
+    auto_added: list
+    pre_held: Any
+    held_back: dict
+    attach: dict
+    near_miss: int
+
+
 class Proxy:
     def __init__(self, cfg: Config, mapper: Mapper | MapperHandle, evidence: EvidenceLog):
         self.cfg = cfg
@@ -227,6 +259,12 @@ class Proxy:
         self.updates = updates.UpdateState()
         self._auto_update: asyncio.Task | None = None
         self.codetab_error = ""
+        # Copilot in VS Code (release 6): what keeps VS Code from being pointed here, the last failure, when
+        # Copilot traffic last arrived and since when it has been expected (the Overview's warning).
+        self.copilot_waiting = ""
+        self.copilot_error = ""
+        self.copilot_last_at = 0.0
+        self.copilot_since = 0.0
         # Candidates are per host: the folder may be OneDrive-synced between machines.
         self.store = (CandidateStore(Path(cfg.mapping).parent / f"candidates-{evidence.host}.jsonl")
                       if cfg.detect_enabled else None)
@@ -593,8 +631,10 @@ class Proxy:
         return {k: "auto" if k in quiet else "review" if k in review else "ignore" for k in SELECTABLE_KINDS}
 
     def owner_add_kinds(self, modes: dict[str, str]) -> set[str]:
-        """The Auto-add ticks that apply: only with Tokenise & Review."""
-        return {k for k in self.cfg.owner_add_kinds if modes.get(k) == "review"}
+        """The Auto-add ticks that apply: owner_add_kinds with Tokenise & Review, and ignore_add_kinds
+        with Ignore (E3, Brad 2026-10-19 - a proven owner's value added, anything else ignored)."""
+        return ({k for k in self.cfg.owner_add_kinds if modes.get(k) == "review"}
+                | {k for k in self.cfg.ignore_add_kinds if modes.get(k) == "ignore"})
 
     def _owned_email_forms(self, text: str, mapper: Mapper, mode: str, source: str,
                            context: SeenContext) -> list[Form]:
@@ -767,34 +807,202 @@ class Proxy:
     def codetab_authority(self) -> Authority:
         return Authority(self._state_path())
 
-    async def apply_codetab(self) -> str:
-        """Listeners and Claude Code's settings made to match the switch (feature 117). Returns what
-        was done for the page; a failure is kept in codetab_error and raised for the page to show."""
+    def copilot_forwarder(self) -> Any:
+        """GitHub Copilot's requests, from the forward proxy's Copilot reader (copilot.py, 2026-10-18)."""
+        if getattr(self, "_copilot_forwarder", None) is None:
+            from .copilot import Forwarder
+            self._copilot_forwarder = Forwarder()
+        return self._copilot_forwarder
+
+    async def copilot_handle(self, request: web.Request) -> web.StreamResponse:
+        """What the Copilot reader serves. Chat (POST /chat/completions, release 2, next edit
+        suggestions' `prediction` included), the Responses API over HTTP (POST /responses, release 3)
+        and over its WebSocket (GET /responses, release 4), inline completions, public code matching
+        and telemetry (release 5) are filtered; every other path is forwarded untouched."""
+        from .copilot import COMPLETIONS, is_telemetry
+
+        self.copilot_last_at = time.time()
+        forwarder = self.copilot_forwarder()
+        if (request.method == "GET" and request.path == "/responses"
+                and request.headers.get("Upgrade", "").lower() == "websocket"):
+            return await self.copilot_socket(request)
+        if request.method == "POST" and is_telemetry(request.host):
+            return await self.copilot_telemetry(request)
+        dialect = None
+        if request.method == "POST":
+            dialect = COPILOT_READ.get(request.path) or (
+                "openai_completions" if COMPLETIONS.match(request.path) else None)
+        if dialect:
+            host = request.host.split(":")[0].lower()
+            request[COPILOT] = forwarder.upstream or f"https://{host}"
+            request[COPILOT_AS] = dialect
+            return await self.handle(request)
+        return await forwarder.handle(request)
+
+    async def copilot_telemetry(self, request: web.Request) -> web.StreamResponse:
+        """Copilot's telemetry (release 5): it carries code - the next edit suggestion's prediction is
+        copied into it - so every string in every event is tokenised before it goes on. Nothing comes
+        back to restore. Not run through the review queue: telemetry repeats what the requests already
+        carried, and would only flood it. Under proxy.bypass it goes as it came."""
+        from .copilot import tokenise_events
+
+        started = time.monotonic()
+        forwarder = self.copilot_forwarder()
+        body = await request.read()
+        if self.cfg.proxy_bypass or not body:
+            return await forwarder.handle(request, body)
+        mapper = self.mapper
+        outbound: Counter[str] = SubCounter()
+        body, events, not_json = await asyncio.to_thread(
+            tokenise_events, body, lambda event: tokenise_json(mapper, event, outbound))
+        forwarder.telemetry.update({"posts": 1, "events": events, "not_json": not_json})
+        if not_json:
+            log.warning("Copilot telemetry: %d line(s) were not JSON and went as they were", not_json)
+        session_name, session_client = self._session_of(request)
+        request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": {**(await self._driver(session_name)),
+                                                             "app": "GitHub Copilot"},
+                         "project": "", "held": None, "unprotected": [], "declined": [], "canary": []}
+        response = await forwarder.handle(request, body)
+        self._record(request, dialect="copilot_telemetry", method=request.method, path=request.path,
+                     status=response.status, outbound=outbound, inbound=Counter(), canary=[], streamed=False,
+                     started=started, note=f"Copilot telemetry: {events} events read, {not_json} not JSON",
+                     session=session_name, session_client=session_client)
+        return response
+
+    async def copilot_socket(self, request: web.Request) -> web.StreamResponse:
+        """Copilot's Responses conversation over a WebSocket (release 4, 2026-10-19). Each frame Copilot
+        sends is filtered by _filter_body, exactly as an HTTP request is, and sent only if it passes; a
+        refusal goes back to Copilot as an error frame. Each frame back is one Responses event, restored
+        by the Responses rewriter (a name split across frames included). Binary frames cannot be
+        inspected, so they are refused rather than passed on."""
+        from .copilot import WS_SKIP
+        from .sse import make_event
+
+        started = time.monotonic()
+        forwarder = self.copilot_forwarder()
+        host = request.host.split(":")[0].lower()
+        tail = request.path.lstrip("/")
+        request[COPILOT] = forwarder.upstream or f"https://{host}"
+        request[COPILOT_AS] = "openai_responses"
+        session_name, session_client = self._session_of(request)
+        driver = {**(await self._driver(session_name)), "app": "GitHub Copilot"}
+        found = self.mapper.find_real(_outside_body(request, tail))
+        if found:
+            log.warning("canary: a client name in the URL or headers of the Copilot socket (clients: %s)",
+                        ", ".join(found))
+            request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver, "project": "", "held": None,
+                             "unprotected": [], "declined": [], "canary": []}
+            return self._refuse("openai_responses", request, started, SubCounter(),
+                                f"a client name is in the URL or a header (clients: {', '.join(found)})")
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in WS_SKIP}
+        protocols = [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",") if p.strip()]
+        headers.pop("Sec-WebSocket-Protocol", None)
+        base = forwarder.upstream.replace("http://", "ws://", 1) if forwarder.upstream else f"wss://{host}"
+        try:
+            upstream = await (await forwarder.client()).ws_connect(f"{base}{request.path_qs}", headers=headers,
+                                                                   protocols=protocols, max_msg_size=0)
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            forwarder.last_error = f"{host} (socket): {exc or type(exc).__name__}"
+            return web.json_response({"error": f"aicleaner could not reach {host}"}, status=502)
+        here = web.WebSocketResponse(protocols=[upstream.protocol] if upstream.protocol else (), max_msg_size=0)
+        await here.prepare(request)
+        inbound: Counter[str] = SubCounter()
+        rewriter = get_stream_rewriter("openai_responses", self.mapper, inbound, self.keep_tools())
+
+        async def refuse(text: str) -> None:
+            await here.send_str(text)
+
+        async def outward() -> None:
+            async for message in here:
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver, "project": "", "held": None,
+                                     "unprotected": [], "declined": [], "canary": []}
+                    frame = _Filtering(request, "openai_responses", tail, time.monotonic(), session_name,
+                                       session_client, "application/json", self.mapper, self.mapper,
+                                       message.data.encode("utf-8"), SubCounter(), inbound, Counter(), [],
+                                       SubCounter(), {}, {}, 0)
+                    refused = await self._filter_body(frame)
+                    if refused is not None:
+                        await refuse(refused.text)
+                        continue
+                    rewriter.mapper = frame.reply_mapper          # what this frame's reply is restored with
+                    await upstream.send_str(frame.body.decode("utf-8"))
+                    self._record(request, dialect="openai_responses", method="WS", path=request.path, status=101,
+                                 outbound=frame.outbound, inbound=Counter(), canary=_fail_open_of(request)[0],
+                                 streamed=True, started=frame.started, note="Copilot WebSocket frame",
+                                 secrets=frame.secrets, auto_added=frame.auto_added, held_back=frame.held_back,
+                                 attachments=frame.attach, near_miss=frame.near_miss,
+                                 session=session_name, session_client=session_client)
+                elif message.type == aiohttp.WSMsgType.BINARY:
+                    await refuse(json.dumps({"type": "error", "error": {
+                        "type": "aicleaner_refused",
+                        "message": "aicleaner: a binary frame cannot be inspected, so it was not sent"}}))
+                elif message.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                    break
+            await upstream.close()
+
+        async def homeward() -> None:
+            async for message in upstream:
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    for event in rewriter.on_event(make_event(None, message.data)):
+                        await here.send_str(event.data or "")
+                elif message.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.ERROR):
+                    break
+            for event in rewriter.finish():
+                await here.send_str(event.data or "")
+            await here.close()
+
+        try:
+            await asyncio.gather(outward(), homeward(), return_exceptions=True)
+        finally:
+            await upstream.close()
+            await here.close()
+        return here
+
+    async def apply_codetab(self, trust: bool = False) -> str:
+        """Listeners, Claude Code's settings and VS Code's made to match the Code tab and Copilot
+        switches (feature 117; Copilot release 6). `trust`: someone at this machine asked, so the Copilot
+        certificate may be added to their Windows store (Windows asks them to confirm) - never at a
+        start or through remote access. Returns what was done for the page; a failure is kept in
+        codetab_error (or copilot_error) and raised for the page to show."""
         if not codetab_settings.applies():
             return ""
         state = self._state_path()
         url = f"http://127.0.0.1:{self.cfg.codetab_port}"
         try:
-            if self.cfg.codetab_enabled:
-                authority = self.codetab_authority()
+            # The forward proxy runs while either reader is wanted: the Code tab's (api.anthropic.com)
+            # or Copilot's (2026-10-18). A change of which one rebuilds it; the port is shared.
+            wanted = self.cfg.codetab_enabled or self.cfg.copilot_enabled
+            authority = self.codetab_authority() if self.cfg.codetab_enabled else None
+            if authority is not None:
                 await asyncio.to_thread(authority.ensure)
-                if self.codetab is not None and self.codetab.port != self.cfg.codetab_port:
-                    await self.codetab.stop()
-                    self.codetab = None
-                if self.codetab is None:
-                    tab = CodeTab(self.handle, authority, self.cfg.codetab_port, self.cfg.client_max_mb)
-                    try:
-                        await tab.start()
-                    except OSError as exc:
-                        raise codetab_settings.SettingsError(
-                            f"port {self.cfg.codetab_port} is in use ({exc}); choose another in Settings") from exc
-                    self.codetab = tab
-                said = await asyncio.to_thread(codetab_settings.apply, True, state, url, str(authority.ca_path),
-                                               self.cfg.listen)
+            if self.codetab is not None and (not wanted or self.codetab.port != self.cfg.codetab_port
+                                             or (self.codetab.authority is None) != (authority is None)):
+                await self.codetab.stop()
+                self.codetab = None
+            if wanted and self.codetab is None:
+                tab = CodeTab(self.handle, authority, self.cfg.codetab_port, self.cfg.client_max_mb)
+                try:
+                    await tab.start()
+                except OSError as exc:
+                    raise codetab_settings.SettingsError(
+                        f"port {self.cfg.codetab_port} is in use ({exc}); choose another in Settings") from exc
+                self.codetab = tab
+            copilot_said = ""
+            if self.codetab is not None:
+                if self.cfg.copilot_enabled:
+                    copilot_authority = Authority(self._state_path(), kind="copilot")
+                    await asyncio.to_thread(copilot_authority.ensure)
+                    await self.codetab.set_copilot(copilot_authority, self.copilot_handle)
+                    copilot_said = await self._apply_copilot_vscode(copilot_authority, url, trust)
+                else:
+                    await self.codetab.set_copilot(None)
+            if not self.cfg.copilot_enabled:
+                copilot_said = await self._apply_copilot_vscode(None, url, False)
+            if self.cfg.codetab_enabled:
+                said = await asyncio.to_thread(codetab_settings.apply, True, state, url,
+                                               str(authority.ca_path) if authority else "", self.cfg.listen)
             else:
-                if self.codetab is not None:
-                    await self.codetab.stop()
-                    self.codetab = None
                 said = await asyncio.to_thread(codetab_settings.apply, False, state, url, "", self.cfg.listen)
                 if said:
                     await asyncio.to_thread(self.codetab_authority().remove)
@@ -802,9 +1010,73 @@ class Proxy:
             self.codetab_error = str(exc)
             raise
         self.codetab_error = ""
+        said = "; ".join(s for s in (said, copilot_said) if s)
         if said:
             log.info(said)
         return said
+
+    async def _apply_copilot_vscode(self, authority: Any, url: str, trust: bool) -> str:
+        """VS Code pointed at the forward proxy while Copilot's switch is on and its certificate is
+        trusted; put back otherwise (spec 2026-10-19-copilot-6-wiring.md). Pointed at us untrusted, VS
+        Code would refuse Copilot's hosts, so it waits: remotely and at a start, with what is waiting
+        said; here, with `trust`, Windows asks the person to add it."""
+        from . import copilot_settings
+
+        state = self._state_path()
+        self.copilot_waiting = ""
+        self.copilot_since = (self.copilot_since or time.time()) if authority is not None else 0.0
+        try:
+            if authority is None:
+                said = await asyncio.to_thread(copilot_settings.apply, False, state, url)
+                self.copilot_error = ""
+                return said
+            store = self.copilot_store()
+            thumb = await asyncio.to_thread(copilot_settings.thumbprint, authority.ca_path)
+            if not await asyncio.to_thread(store.has, thumb):
+                if not trust:
+                    await asyncio.to_thread(copilot_settings.apply, False, state, url)
+                    self.copilot_waiting = ("the Copilot certificate is not trusted yet - turn Copilot on in Settings "
+                                            "at this machine, where Windows asks you to confirm it")
+                    self.copilot_error = ""
+                    return f"Copilot: {self.copilot_waiting}"
+                await asyncio.to_thread(store.add, authority.ca_path)
+            said = await asyncio.to_thread(copilot_settings.apply, True, state, url)
+        except copilot_settings.SettingsError as exc:
+            self.copilot_error = str(exc)
+            raise
+        self.copilot_error = ""
+        return said
+
+    def copilot_store(self) -> Any:
+        """Where the Copilot certificate is trusted: the person's Windows store (a file in tests)."""
+        if getattr(self, "_copilot_store", None) is None:
+            from .copilot_settings import cert_store
+            self._copilot_store = cert_store()
+        return self._copilot_store
+
+    def copilot_summary(self) -> dict[str, Any]:
+        """The Copilot switch and what is in place, for the Settings card and the Overview."""
+        from . import copilot_settings
+
+        url = f"http://127.0.0.1:{self.cfg.codetab_port}"
+        out: dict[str, Any] = {"enabled": self.cfg.copilot_enabled, "waiting": getattr(self, "copilot_waiting", ""),
+                               "error": getattr(self, "copilot_error", ""),
+                               "listening": bool(self.codetab is not None and self.codetab.copilot_port),
+                               "last_at": getattr(self, "copilot_last_at", 0.0),
+                               "since": getattr(self, "copilot_since", 0.0)}
+        try:
+            out["vscode"] = copilot_settings.state(self._state_path(), url)
+        except Exception as exc:  # noqa: BLE001 - a summary never fails the page
+            out["vscode"] = {"error": str(exc), "files": [], "vscode_found": False, "pointed": 0}
+        try:
+            ca = Authority(self._state_path(), kind="copilot").ca_path
+            out["trusted"] = ca.exists() and self.copilot_store().has(copilot_settings.thumbprint(ca))
+        except Exception:  # noqa: BLE001 - unknown is shown as not trusted
+            out["trusted"] = False
+        forwarder = getattr(self, "_copilot_forwarder", None)
+        if forwarder is not None:
+            out.update(forwarder.summary())
+        return out
 
     # ---- the rename collapse (2026-10-14) ----------------------------------------------------
 
@@ -1045,6 +1317,8 @@ class Proxy:
         if self.codetab is not None:
             await self.codetab.stop()
             self.codetab = None
+        if getattr(self, "_copilot_forwarder", None) is not None:
+            await self._copilot_forwarder.close()
         if self.session is not None:
             # A session lives in its own broker (DECISIONS 49): this proxy lets go and the next one
             # re-attaches. Its model requests fail while no proxy answers, and Claude Code retries.
@@ -1096,63 +1370,17 @@ class Proxy:
 
     # ---- main path --------------------------------------------------------
 
-    async def handle(self, request: web.Request) -> web.StreamResponse:
-        started = time.monotonic()
-        # Counted before anything can refuse it: the question this answers is "is a client
-        # pointed at us", not "did the request succeed".
-        self.requests_seen += 1
-        self.last_request_at = time.time()
-        # The Code tab's calls arrive at its reader with no dialect in the path (feature 117).
-        dialect = request.match_info.get("dialect") or ("anthropic" if request.get(CODETAB) else "")
-        tail = request.match_info["tail"]
-        upstream = self.cfg.upstreams.get(dialect)
-        if upstream is None:
-            return web.json_response({"error": f"unknown dialect '{dialect}'"}, status=404)
-        url = f"{upstream}/{tail}"
-        if request.query_string:
-            url += "?" + request.query_string
-
-        mapper = self.mapper  # one snapshot per request, so a reload mid-flight is consistent
-        reply_mapper = mapper
-        # Which engagement this belonged to, for the evidence log. It names the request; it never
-        # narrows what is replaced - every client's forms apply in every session.
-        session_name, session_client = self._session_of(request)
-        # What the substitution log needs about this request (DECISIONS 38): an id shared with its
-        # evidence record, and who was driving.
-        driver = await self._driver(session_name)
-        if request.get(CODETAB):
-            driver = {**driver, "app": "Claude Desktop Code tab"}
-        request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver,
-                         "project": "", "held": None, "unprotected": [], "declined": [], "canary": []}
-        self._open[request[_REQ]["id"]] = {"session": session_name, "started": time.time(), "content_at": None}
-        if self._handle is not None and self._handle.broken:
-            return self._refuse(dialect, request, started, SubCounter(), self.stopped_message(self._handle.broken[0]))
-        around = _outside_body(request, tail)
-        found = mapper.find_real(around) if around else []
-        if found and "/" + tail not in self.cfg.allow_non_json_paths:
-            log.warning("canary: a client name in the URL or headers of %s /%s (clients: %s)",
-                        request.method, tail, ", ".join(found))
-            return self._refuse(dialect, request, started, SubCounter(),
-                                f"a client name is in the URL or a header (clients: {', '.join(found)}); "
-                                "those are sent as written, so the request was not sent")
-        outbound: Counter[str] = SubCounter()
-        inbound: Counter[str] = SubCounter()
-        secrets: Counter[str] = Counter()
-        auto_added: list[dict[str, str]] = []
-        pre_held: Counter[str] = SubCounter()   # stood in or held back before the placeholder pass
-        held_back: dict[str, int] = {}
-        attach: dict[str, int] = {}
-        near_miss = 0
-        body = await request.read()
-        content_type = request.headers.get("Content-Type", "")
-        if self.cfg.proxy_bypass:
-            # Nothing below runs: the body is not read for identifiers, replaced, detected, held
-            # back, redacted or checked, and the reply is restored with a mapper holding nothing.
-            request[_BYPASS] = True
-            mapper = reply_mapper = INERT
-            log.warning("proxy.bypass is ON: %s /%s forwarded untouched", dialect, tail)
-            body = _without_our_marks(body, content_type, dialect)
-
+    async def _filter_body(self, f: "_Filtering") -> web.StreamResponse | None:
+        """The request body made safe to send: marks and footers out, attachments read, names
+        tokenised, new identifiers queued or added, near misses repaired, secrets redacted, values
+        held back, the canary run. A refusal is returned for the caller to send; otherwise `f`
+        holds the filtered body and what the reply needs. Moved out of handle as it was (item E,
+        2026-10-19), so a Copilot WebSocket frame goes through exactly what an HTTP request does."""
+        request, dialect, tail, started = f.request, f.dialect, f.tail, f.started
+        session_name, session_client, content_type = f.session_name, f.session_client, f.content_type
+        mapper, reply_mapper, body = f.mapper, f.reply_mapper, f.body
+        outbound, inbound, secrets, auto_added = f.outbound, f.inbound, f.secrets, f.auto_added
+        pre_held, held_back, attach, near_miss = f.pre_held, f.held_back, f.attach, f.near_miss
         if body and not self.cfg.proxy_bypass:
             if _is_json(content_type):
                 try:
@@ -1166,6 +1394,14 @@ class Proxy:
                 # and does, until the output cap (D63).
                 if dialect == "anthropic":
                     obj = strip_footers_from_history(obj)
+                    # Where Claude Code's prompts are typed (the user, 2026-10-18). Not a Session-page
+                    # session (its note is added as the prompt is sent) and not a program (sdk).
+                    agent = request.headers.get("User-Agent", "")
+                    if (self.cfg.origin_note and isinstance(obj, dict) and agent.startswith(CLAUDE_CODE_AGENT)
+                            and "sdk" not in agent and not request.match_info.get("profile")
+                            and "messages" in tail and "count_tokens" not in tail):
+                        from .origin import VSCODE_NOTE, add_to_typed
+                        obj = add_to_typed(obj, VSCODE_NOTE)
                 # Attachments first (review finding 4): text PDFs become text that is filtered below;
                 # images, scanned PDFs and anything uninspectable are replaced by a notice.
                 #
@@ -1208,7 +1444,9 @@ class Proxy:
                     # Added by itself only where the value proves its owner (DECISIONS 38). There
                     # is no "chosen kinds" route: it guessed the owner from the conversation.
                     wanted: list[tuple[str, str, str]] = []
-                    if self.cfg.auto_map_client_resources and modes.get("client-resource") == "review":
+                    resource_mode = modes.get("client-resource")
+                    if ((self.cfg.auto_map_client_resources and resource_mode == "review")
+                            or (resource_mode == "ignore" and "client-resource" in self.cfg.ignore_add_kinds)):
                         # A resource name that carries one of a client's own forms: the owner is certain.
                         wanted += [(client, value, "client-resource") for value, client in
                                    client_resources(text, mapper, sweep)]
@@ -1367,6 +1605,84 @@ class Proxy:
                     started=started, note="UNFILTERED: exempt path, nothing was inspected",
                     session=self._session_of(request)[0], session_client=self._session_of(request)[1],
                 )
+        f.mapper, f.reply_mapper, f.body = mapper, reply_mapper, body
+        f.outbound, f.auto_added, f.pre_held = outbound, auto_added, pre_held
+        f.held_back, f.attach, f.near_miss = held_back, attach, near_miss
+        return None
+
+    async def handle(self, request: web.Request) -> web.StreamResponse:
+        started = time.monotonic()
+        # Counted before anything can refuse it: the question this answers is "is a client
+        # pointed at us", not "did the request succeed".
+        self.requests_seen += 1
+        self.last_request_at = time.time()
+        # The Code tab's calls arrive at its reader with no dialect in the path (feature 117).
+        dialect = request.match_info.get("dialect") or ("anthropic" if request.get(CODETAB) else "")
+        tail = request.match_info["tail"]
+        upstream = self.cfg.upstreams.get(dialect)
+        # Copilot (2026-10-18): to the very host Copilot asked for, never a configured upstream -
+        # aicleaner holds no Copilot credential and Copilot's token goes on as is.
+        copilot_to = request.get(COPILOT)
+        if copilot_to:
+            dialect, upstream = request.get(COPILOT_AS) or "openai", copilot_to
+        if upstream is None:
+            return web.json_response({"error": f"unknown dialect '{dialect}'"}, status=404)
+        url = f"{upstream}/{tail}"
+        if request.query_string:
+            url += "?" + request.query_string
+
+        mapper = self.mapper  # one snapshot per request, so a reload mid-flight is consistent
+        reply_mapper = mapper
+        # Which engagement this belonged to, for the evidence log. It names the request; it never
+        # narrows what is replaced - every client's forms apply in every session.
+        session_name, session_client = self._session_of(request)
+        # What the substitution log needs about this request (DECISIONS 38): an id shared with its
+        # evidence record, and who was driving.
+        driver = await self._driver(session_name)
+        if request.get(CODETAB):
+            driver = {**driver, "app": "Claude Desktop Code tab"}
+        elif copilot_to:
+            driver = {**driver, "app": "GitHub Copilot"}
+        request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver,
+                         "project": "", "held": None, "unprotected": [], "declined": [], "canary": []}
+        self._open[request[_REQ]["id"]] = {"session": session_name, "started": time.time(), "content_at": None}
+        if self._handle is not None and self._handle.broken:
+            return self._refuse(dialect, request, started, SubCounter(), self.stopped_message(self._handle.broken[0]))
+        around = _outside_body(request, tail)
+        found = mapper.find_real(around) if around else []
+        if found and "/" + tail not in self.cfg.allow_non_json_paths:
+            log.warning("canary: a client name in the URL or headers of %s /%s (clients: %s)",
+                        request.method, tail, ", ".join(found))
+            return self._refuse(dialect, request, started, SubCounter(),
+                                f"a client name is in the URL or a header (clients: {', '.join(found)}); "
+                                "those are sent as written, so the request was not sent")
+        outbound: Counter[str] = SubCounter()
+        inbound: Counter[str] = SubCounter()
+        secrets: Counter[str] = Counter()
+        auto_added: list[dict[str, str]] = []
+        pre_held: Counter[str] = SubCounter()   # stood in or held back before the placeholder pass
+        held_back: dict[str, int] = {}
+        attach: dict[str, int] = {}
+        near_miss = 0
+        body = await request.read()
+        content_type = request.headers.get("Content-Type", "")
+        if self.cfg.proxy_bypass:
+            # Nothing below runs: the body is not read for identifiers, replaced, detected, held
+            # back, redacted or checked, and the reply is restored with a mapper holding nothing.
+            request[_BYPASS] = True
+            mapper = reply_mapper = INERT
+            log.warning("proxy.bypass is ON: %s /%s forwarded untouched", dialect, tail)
+            body = _without_our_marks(body, content_type, dialect)
+
+        filtering = _Filtering(request, dialect, tail, started, session_name, session_client, content_type,
+                               mapper, reply_mapper, body, outbound, inbound, secrets, auto_added, pre_held,
+                               held_back, attach, near_miss)
+        refused = await self._filter_body(filtering)
+        if refused is not None:
+            return refused
+        mapper, reply_mapper, body = filtering.mapper, filtering.reply_mapper, filtering.body
+        outbound, auto_added, pre_held = filtering.outbound, filtering.auto_added, filtering.pre_held
+        held_back, attach, near_miss = filtering.held_back, filtering.attach, filtering.near_miss
 
         mapper = reply_mapper if body and _is_json(content_type) else mapper
         headers = {k: v for k, v in request.headers.items() if _forwardable(k)}
@@ -1446,6 +1762,36 @@ class Proxy:
         rewriter.on_collapse = self.note_collapse
         max_index = -1
         footer_done = False
+        # D97: the footer goes INTO the reply's last text block, not a block after it - a ralph loop's
+        # stop hook reads the last text block for its completion promise, and found only the footer.
+        # So each text block's stop is held until it is known whether another block follows (then it
+        # is sent) or the reply ends (then the footer is written into that block first).
+        text_blocks: set[int] = set()
+        held: list[Any] = []                  # a text block's content_block_stop, not yet sent
+
+        def _index_of(out: Any) -> int:
+            try:
+                return int(json.loads(out.data or "{}").get("index", -1))
+            except (ValueError, TypeError, AttributeError):
+                return -1
+
+        async def send(out: Any) -> None:
+            if dialect == "anthropic" and out.event == "content_block_start":
+                try:
+                    if json.loads(out.data or "{}").get("content_block", {}).get("type") == "text":
+                        text_blocks.add(_index_of(out))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            if dialect == "anthropic" and out.event == "content_block_stop" and _index_of(out) in text_blocks:
+                while held:
+                    await response.write(held.pop(0).serialise())
+                held.append(out)
+                return
+            if held and out.event not in ("ping",):
+                while held:
+                    await response.write(held.pop(0).serialise())
+            await response.write(out.serialise())
+
         try:
             opened = self._open.get((request.get(_REQ) or {}).get("id", ""))
             async for chunk in upstream_resp.content.iter_any():
@@ -1460,21 +1806,26 @@ class Proxy:
                             pass
                     if dialect == "anthropic" and ev.event == "message_delta" and not footer_done:
                         footer_done = True
-                        # Flush held text first: it both keeps our block last and finishes
+                        # Flush held text first: it both keeps the footer last and finishes
                         # filling `inbound`, so the restored count below is complete.
                         for out in rewriter.finish():
-                            await response.write(out.serialise())
+                            await send(out)
                         footer = self._footer(request, dialect, tail, len(inbound))
-                        if footer:
+                        if footer and held:
+                            # The reply ended with text: the footer is that block's last words.
+                            await response.write(self.notifier.stream_delta(footer, _index_of(held[0])).serialise())
+                        elif footer:
                             for out in self.notifier.stream_events(footer, max_index + 1):
-                                await response.write(out.serialise())
+                                await send(out)
                     for out in rewriter.on_event(ev):
-                        await response.write(out.serialise())
+                        await send(out)
             for ev in parser.finish():
                 for out in rewriter.on_event(ev):
-                    await response.write(out.serialise())
+                    await send(out)
             for out in rewriter.finish():
-                await response.write(out.serialise())
+                await send(out)
+            while held:
+                await response.write(held.pop(0).serialise())
         finally:
             if rewriter.fragments:
                 # The safety net under D87: a token written in a form swap-back does not know went

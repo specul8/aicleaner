@@ -144,6 +144,10 @@ class Config:
     # (DECISIONS 46). Client resources keep their own switch, auto_map_client_resources.
     owner_add_kinds: list[str] = field(default_factory=lambda: list(DEFAULT_OWNER_ADD_KINDS))
     auto_map_client_resources: bool = True  # a resource name carrying a client's form is mapped to that client
+    # Ignore kinds that are still added to a client when the value proves the owner (E3, Brad
+    # 2026-10-19: "Ignore, but auto-add"). Its own list, empty until chosen, so a kind already on Ignore
+    # never starts auto-adding because owner_add_kinds' defaults happened to name it.
+    ignore_add_kinds: list[str] = field(default_factory=list)
     # A word one letter from a mapped identifier is corrected back to it, in text a converter
     # produced and nowhere else: an engine misreads, a person typing does not, and over a whole
     # request nearly every match would be an ordinary long word replaced by a client's token.
@@ -158,7 +162,7 @@ class Config:
     # Autocorrect in the Session page's prompt (feature 94): off by default; code and paths are
     # always left alone, `prompt_autocorrect_skip` adds "clients", "used", "capitalised"; the user's
     # own words carry their casing (powershell -> PowerShell).
-    prompt_autocorrect: bool = True     # on until a person turns it off (D152)
+    prompt_autocorrect: bool = False    # off until a person turns it on (the user, 2026-10-18; was on - D152)
     prompt_autocorrect_skip: list[str] = field(default_factory=lambda: list(AUTOCORRECT_SKIPS))
     prompt_autocorrect_words: list[str] = field(default_factory=lambda: ["PowerShell", "SharePoint", "aicleaner"])
     # The user's own replacements, "typed = replacement" (keyvault = Key Vault): a habit, not a typo,
@@ -184,6 +188,7 @@ class Config:
     # corrupted the reply - but seeing which names were put back is how you tell the filter worked,
     # and that is worth having on from the first session rather than after somebody finds the switch.
     highlight_terminal: bool = True
+    origin_note: bool = True                # say where each Claude Code prompt was typed (origin.py)
     # Windows: Claude Code's Bash tool halves doubled backslashes, so a hook stops Bash calls that
     # hold them and points to PowerShell or Write/Edit (feature 98, see bashguard.py).
     claude_bash_guard: bool = True
@@ -199,6 +204,8 @@ class Config:
     update_auto: bool = False            # install a newer release on its own (2026-10-16), off by default
     feedback_relay: str = "https://aicleaner-feedback.biosconsulting.com.au"   # where feedback goes (2026-10-16)
     codetab_port: int = 8788
+    # GitHub Copilot in VS Code through the same forward proxy (2026-10-18, copilot.py): off until chosen.
+    copilot_enabled: bool = False
     # EMERGENCY ONLY. When the canary finds a real name after tokenising, send the request anyway
     # (logged, and flagged in the evidence log) instead of refusing it. It exists so a false
     # positive cannot lock you out of the assistant you would use to fix it; off is the only safe
@@ -217,7 +224,8 @@ class Config:
     remote_allowed_emails: list[str] = field(default_factory=list)
     # The encrypted tunnel (feature 21, DECISIONS 57): through the tunnel, every API call sealed with
     # a key Cloudflare never sees. Where a device keeps the key: "tab" (sessionStorage) or "device"
-    # (localStorage). Both set on this machine only (not in REMOTE_SETTINGS).
+    # (localStorage). Both settable remotely (REMOTE_SETTINGS) - turning encryption on needs a code made
+    # on this machine; the key's storage reaches since H2 (Brad, 2026-10-19).
     remote_encrypt: bool = False
     remote_key_storage: str = "tab"
     placeholder_kinds: list[str] = field(default_factory=lambda: list(DEFAULT_PLACEHOLDER_KINDS))
@@ -246,6 +254,7 @@ class Config:
         "detect.enabled": ("detect_enabled", bool),
         "detect.quiet_kinds": ("quiet_kinds", list),
         "detect.owner_add_kinds": ("owner_add_kinds", list),
+        "detect.ignore_add_kinds": ("ignore_add_kinds", list),
         "detect.auto_map_client_resources": ("auto_map_client_resources", bool),
         "detect.near_miss": ("near_miss", bool),
         "session.enabled": ("session_enabled", bool),
@@ -274,6 +283,7 @@ class Config:
         "codetab.enabled": ("codetab_enabled", bool),
         "update.auto": ("update_auto", bool),
         "codetab.port": ("codetab_port", int),
+        "copilot.enabled": ("copilot_enabled", bool),
         "canary.fail_open": ("canary_fail_open", bool),
         "proxy.bypass": ("proxy_bypass", bool),
         "debug.timings": ("debug_timings", bool),
@@ -426,13 +436,14 @@ class Config:
         cfg.owner_add_kinds = [str(k) for k in (det["owner_add_kinds"] or [] if "owner_add_kinds" in det
                                                  else DEFAULT_OWNER_ADD_KINDS)]
         cfg.auto_map_client_resources = _flag(det, "auto_map_client_resources", True, "detect.auto_map_client_resources")
+        cfg.ignore_add_kinds = [str(k) for k in (det.get("ignore_add_kinds") or [])]
         cfg.near_miss = _flag(det, "near_miss", True, "detect.near_miss")
         cfg.editor_compile_powershell = _flag(data.get("editor") or {}, "compile_powershell", True,
                                               "editor.compile_powershell")
         dbl = str((data.get("editor") or {}).get("preview_dblclick", "ask"))
         cfg.editor_preview_dblclick = dbl if dbl in PREVIEW_DBLCLICK else "ask"
         prompt_cfg = data.get("prompt") or {}
-        cfg.prompt_autocorrect = _flag(prompt_cfg, "autocorrect", True, "prompt.autocorrect")
+        cfg.prompt_autocorrect = _flag(prompt_cfg, "autocorrect", False, "prompt.autocorrect")
         # Every skip on until a person changes them (the user, 2026-10-16: out of the box it was too
         # noisy); a saved list - even an empty one - is kept as chosen.
         if "autocorrect_skip" in prompt_cfg:
@@ -466,12 +477,14 @@ class Config:
         cfg.highlight_session = _flag(hl, "session", True, "highlight.session")
         cfg.highlight_terminal = _flag(hl, "terminal", False, "highlight.terminal")
         cfg.claude_bash_guard = _flag(data.get("claude") or {}, "bash_guard", True, "claude.bash_guard")
+        cfg.origin_note = _flag(data.get("claude") or {}, "origin_note", True, "claude.origin_note")
         cfg.claude_deliver_between_tools = _flag(data.get("claude") or {}, "deliver_between_tools", True,
                                                  "claude.deliver_between_tools")
         cfg.claude_collapse_guard = _flag(data.get("claude") or {}, "collapse_guard", True, "claude.collapse_guard")
         codetab = data.get("codetab") or {}
         cfg.codetab_enabled = _flag(codetab, "enabled", False, "codetab.enabled")
         cfg.codetab_port = int(codetab.get("port", 8788))
+        cfg.copilot_enabled = _flag(data.get("copilot") or {}, "enabled", False, "copilot.enabled")
         cfg.update_auto = _flag(data.get("update") or {}, "auto", False, "update.auto")
         cfg.feedback_relay = str((data.get("feedback") or {}).get("relay") or cfg.feedback_relay).rstrip("/")
         cfg.canary_fail_open = _flag(data.get("canary") or {}, "fail_open", False, "canary.fail_open")

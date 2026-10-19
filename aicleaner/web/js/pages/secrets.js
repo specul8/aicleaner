@@ -12,6 +12,17 @@ const MODES = [
 ];
 
 const view = { main: null, ctx: null };
+// Through the tunnel (H2, Brad 2026-10-19): secrets can be added and the list read; redaction can
+// never be switched off from there, so the mode and deleting are shown, disabled, saying why.
+const LOCAL_ONLY = 'Can only be changed where aicleaner is deployed';
+const remote = () => Boolean(view.ctx && view.ctx.status && view.ctx.status.remote);
+
+function lockLocal(control) {
+  if (!remote()) return control;
+  control.disabled = true;
+  control.title = LOCAL_ONLY;
+  return control;
+}
 
 function modeCard(current) {
   const explain = h('p', { class: 'muted', id: 'mode-explain' });
@@ -30,21 +41,24 @@ function modeCard(current) {
     }
   });
   show(current);
-  return h('section', { class: 'card' }, h('h2', {}, 'When a credential is found in a request'),
+  for (const radio of group.querySelectorAll('input')) lockLocal(radio);
+  return h('section', { class: `card${remote() ? ' local-only' : ''}`, dataset: { card: 'secrets-mode' } },
+    h('h2', {}, 'When a credential is found in a request'),
+    remote() ? h('p', { class: 'chip local-only-note' }, LOCAL_ONLY) : null,
     h('p', { class: 'hint' }, 'Credentials with a recognisable shape (Azure keys, SAS tokens, DevOps and GitHub PATs, client secrets, JWTs, connection strings) are found automatically.'),
     h('div', { class: 'form-row' }, group), explain);
 }
 
 function bulkSecrets(table) {
   const count = h('span', { class: 'muted bulk-count' }, '0 selected');
-  const remove = h('button', { type: 'button', class: 'danger bulk-delete' }, 'Delete selected');
+  const remove = lockLocal(h('button', { type: 'button', class: 'danger bulk-delete' }, 'Delete selected'));
   const bar = h('div', { class: 'bulk-entries' }, count, remove);
   const picked = () => [...table.querySelectorAll('tbody tr')]
     .filter((tr) => tr.querySelector('input.pick').checked).map((tr) => tr.dataset.label);
   const recount = () => {
     const n = picked().length;
     count.textContent = `${n} selected`;
-    remove.disabled = !n;
+    remove.disabled = !n || remote();
   };
   table.addEventListener('change', (event) => {
     if (event.target.classList.contains('pick-all')) {
@@ -81,7 +95,7 @@ function savedTable(entries) {
   }
   const body = h('tbody', {}, entries.map((entry) => {
     const actions = h('td', { class: 'actions' });
-    const normal = () => actions.replaceChildren(iconButton('trash', `Delete ${entry.label}`, { class: 'icon danger delete' }));
+    const normal = () => actions.replaceChildren(lockLocal(iconButton('trash', `Delete ${entry.label}`, { class: 'icon danger delete' })));
     normal();
     actions.addEventListener('click', async (event) => {
       const button = event.target.closest('button');

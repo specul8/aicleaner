@@ -211,6 +211,7 @@ def rank_chats(project: dict[str, Any], chats: list[dict[str, Any]], imported: s
                query: str = "") -> list[dict[str, Any]]:
     """Every chat, the ones most about the project first; the clear ones ticked, imported ones not."""
     items, turns = [], {}
+    created = {chat["uuid"]: chat.get("created_at") for chat in chats}
     for chat in chats:
         key = f"chat:{chat['uuid']}"
         turns[key] = chat_turns(chat)
@@ -225,6 +226,8 @@ def rank_chats(project: dict[str, Any], chats: list[dict[str, Any]], imported: s
         score = hit["score"] if hit else 0.0
         done = item.id.lower() in imported
         out.append({"id": item.id, "title": item.title or "(untitled chat)", "updated": item.updated,
+                    # When it began, for sorting the list by it (E3 part 8, feedback #4).
+                    "created": _when(created.get(item.id) or ""),
                     "messages": len(turns[str(item.path)]), "score": score,
                     "passage": (hit["passages"][0] if hit and hit["passages"] else None),
                     "imported": done, "ticked": bool(best and score >= best * TICK_SHARE and not done)})

@@ -110,9 +110,9 @@ new items while you are scrolled up.
 
 ### Autocorrect
 
-The **Autocorrect** button beside the connection indicator (a cross when off, a tick when on) corrects
+Autocorrect, switched on in Settings > [Prompt autocorrect](Settings.md#card-autocorrect), corrects
 spelling in the prompt as you type, from the moment it is switched on - never what is already typed.
-It is on until you switch it off. At the next space or punctuation a misspelt word is replaced by the
+It is off until you switch it on. At the next space or punctuation a misspelt word is replaced by the
 closest match (a word starting with the same letter first, then the commonest) and shown in green;
 click or tap it for a bubble with **Revert**, other suggestions, and **Add to my words** - which keeps
 what you typed and never corrects it again. While it is on, right-click any word to add it; with text

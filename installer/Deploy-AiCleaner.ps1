@@ -132,6 +132,12 @@ ollback\, so a code drop that will not start can be undone
     any action once the proxy runs; the same as the switch in Settings and the "Code tab" answer to
     "How do you use Claude?". Restart the Claude Desktop app afterwards.
 
+.PARAMETER Copilot
+    On or Off: filter GitHub Copilot in VS Code through aicleaner (Copilot release 6), or stop. With any
+    action once the proxy runs; the same as the switch in Settings and the "Claude and GitHub Copilot"
+    answer to the first question. The first time it is turned on, Windows asks you to confirm adding
+    aicleaner's Copilot certificate to your certificates. Reload VS Code afterwards.
+
 .PARAMETER AssumeDefaults
     Take the default answer at every yes/no question (unattended runs). Typed confirmations for
     deleting data are still asked.
@@ -199,6 +205,7 @@ param(
     [switch]$RemoveAppFiles,
     [switch]$RemoveRemote,
     [ValidateSet('', 'On', 'Off')][string]$CodeTab = '',
+    [ValidateSet('', 'On', 'Off')][string]$Copilot = '',
     [switch]$AssumeDefaults,
     [string]$StateRoot = (Join-Path $env:USERPROFILE '.aicleaner'),
     [AllowEmptyString()][string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) 'Deploy-AiCleaner.log'),
@@ -220,6 +227,8 @@ $script:RemoteHostnameGiven = $RemoteHostname
 $script:RepoUrlGiven = $RepoUrl
 # The Code tab switch (feature 117): -CodeTab, or the "Code tab" answer, applied once the proxy runs.
 $script:CodeTabWanted = $CodeTab
+# The Copilot switch (Copilot release 6): -Copilot, or the first question's Copilot answer, likewise.
+$script:CopilotWanted = $Copilot
 # Whether the closing question switched the AI tools over; the setup wizard opens when it did not.
 $script:Activated = $false
 # Where a replaced build is kept (#61). Script scope for the same reason RecordPath is: the
@@ -1695,6 +1704,44 @@ function Set-CodeTab {
     }
 }
 
+function Set-Copilot {
+    <#
+    .SYNOPSIS
+        Filters GitHub Copilot in VS Code through aicleaner, or stops (Copilot release 6).
+    .DESCRIPTION
+        Through the running proxy's settings endpoint - the same switch as in Settings - so VS Code's
+        proxy setting and the certificate are made by the code that keeps them in step at every start.
+        The request comes from this machine, so the proxy may add the certificate: Windows shows its
+        confirmation, and this waits for the answer.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][ValidateSet('On', 'Off')][string]$State)
+    $port = Get-ConfiguredPort -AppRoot $AppRoot
+    $verb = if ($State -eq 'On') { 'Filter GitHub Copilot in VS Code' } else { 'Stop filtering GitHub Copilot' }
+    if (-not $PSCmdlet.ShouldProcess("aicleaner on port $port", $verb)) { return }
+    Write-Status "$verb through aicleaner" -Level Step
+    if (-not (Test-Path -LiteralPath (Join-Path $AppRoot 'aicleaner\__init__.py'))) {
+        Write-Status 'This machine has the client-PC files only, so there is no proxy here for Copilot to go through.' -Level Warn
+        return
+    }
+    if (-not (Wait-ProxyHealth -Port $port -Seconds 30)) {
+        Write-Status "The proxy is not answering on port $port, so Copilot was not changed. Once it runs: Settings > 'GitHub Copilot in VS Code', or this script with -Copilot $State." -Level Warn
+        return
+    }
+    if ($State -eq 'On') { Write-Status 'If Windows asks whether to install a certificate from "aicleaner Copilot", choose Yes.' -Level Detail }
+    $body = @{ settings = @{ 'copilot.enabled' = ($State -eq 'On') } } | ConvertTo-Json -Compress
+    try {
+        # Long enough for the person to answer Windows' confirmation (the proxy waits up to 300 s).
+        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' -Body $body -TimeoutSec 330 -ErrorAction Stop
+        $said = [string]$answer.rules
+        if ($said -like 'the setting was saved, but*' -or $said -like 'Copilot: *') { Write-Status $said -Level Warn }
+        elseif ($said) { Write-Status "$said - reload VS Code" -Level Done }
+        else { Write-Status "Copilot is already $($State.ToLower())" -Level Done }
+    } catch {
+        Write-Status "Copilot could not be changed: $($_.Exception.Message)" -Level Warn
+    }
+}
+
 function Wait-ProxyHealth {
     <# True once http://127.0.0.1:<port>/healthz answers ok, polling once a second up to Seconds. #>
     [CmdletBinding()]
@@ -2158,22 +2205,33 @@ function Get-FeatureRequestUrl {
 function Get-AgentChoice {
     <#
     .SYNOPSIS
-        The first question: which AI agent this is for (feature 109). Returns 'claude', or '' to stop.
+        The first question: which AI agent this is for (feature 109). Returns 'claude', 'copilot'
+        (Claude and GitHub Copilot in VS Code), or '' to stop.
     .DESCRIPTION
-        Only Claude is supported today. ChatGPT and Copilot are listed as coming soon; choosing one
-        says how to ask for it - a feature request in the repository the install came from - and
-        nothing is installed.
+        Claude, and GitHub Copilot in VS Code beside it (Copilot release 6): choosing Copilot asks
+        first - VS Code is pointed at aicleaner and Windows asks to add its Copilot certificate - and
+        switches it on once the proxy runs. ChatGPT is listed as coming soon; choosing it says how to
+        ask for it - a feature request in the repository the install came from - and nothing is installed.
     #>
     [CmdletBinding()]
     [OutputType([string])]
     param([string]$RepoUrl = '')
     $agent = Read-Choice -Message 'Which AI Agent would you like to install the AI Cleaner for?' -Default 'claude' -Options ([ordered]@{
         'claude'  = 'Claude'
+        'copilot' = 'Claude and GitHub Copilot (in VS Code)'
         'chatgpt' = 'ChatGPT (Coming Soon)'
-        'copilot' = 'Copilot (Coming Soon)'
     })
     if ($agent -eq 'claude') { return 'claude' }
-    $name = if ($agent -eq 'chatgpt') { 'ChatGPT' } else { 'Copilot' }
+    if ($agent -eq 'copilot') {
+        Write-Status 'For Copilot, aicleaner points VS Code''s proxy setting at itself and adds its Copilot certificate (it can vouch only for Copilot''s own hosts) to your Windows certificates - Windows asks you to confirm that.' -Level Detail
+        if (Confirm-Action -Message 'Filter GitHub Copilot in VS Code through aicleaner?' -Default 'Yes') {
+            $script:CopilotWanted = 'On'
+        } else {
+            Write-Status 'Copilot left as it is; turn it on later in Settings > GitHub Copilot in VS Code.' -Level Detail
+        }
+        return 'copilot'
+    }
+    $name = 'ChatGPT'
     $url = Get-FeatureRequestUrl -RepoUrl $RepoUrl -Title "Support for $name"
     Write-Host ''
     Write-Status "aicleaner does not support $name yet, so nothing has been installed." -Level Warn
@@ -2765,6 +2823,7 @@ function Invoke-Install {
         Add-Target -Record $existing[0] -Wanted $targets -Role $role -Clients ([string]$folders.Clients)
         if ($script:CodeTabWanted) { Set-CodeTab -AppRoot $folders.App -State $script:CodeTabWanted }
         if ($script:CodeTabWanted -eq 'On') { Install-ClaudeCodeCli }
+        if ($script:CopilotWanted) { Set-Copilot -AppRoot $folders.App -State $script:CopilotWanted }
         return
     }
     # A second deployment elsewhere is fine; wiring the same role twice is not.
@@ -2831,6 +2890,7 @@ function Invoke-Install {
     Invoke-Activation -AppRoot $folders.App -Targets $targets
     if ($script:CodeTabWanted -and -not $workstationOnly) { Set-CodeTab -AppRoot $folders.App -State $script:CodeTabWanted }
     if ($script:CodeTabWanted -eq 'On' -and -not $workstationOnly) { Install-ClaudeCodeCli }
+    if ($script:CopilotWanted -and -not $workstationOnly) { Set-Copilot -AppRoot $folders.App -State $script:CopilotWanted }
     $port = Get-ConfiguredPort -AppRoot $folders.App
     $setupUrl = "http://127.0.0.1:$port/#/setup"
     Write-SummaryBox -Title "aicleaner $($release.Ref) is installed" -Lines @(
@@ -3147,6 +3207,7 @@ function Invoke-Update {
     Update-Deployment -Record $record -StateFolder $script:StateFolder
     if ($script:UpdateOutcome -eq 'declined') { throw 'Stopped at your request' }
     if ($script:CodeTabWanted) { Set-CodeTab -AppRoot ([string]$record.install_path) -State $script:CodeTabWanted }
+    if ($script:CopilotWanted) { Set-Copilot -AppRoot ([string]$record.install_path) -State $script:CopilotWanted }
 }
 
 function Remove-DeploymentData {

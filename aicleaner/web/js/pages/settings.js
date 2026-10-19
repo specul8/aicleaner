@@ -3,12 +3,13 @@
 // Secrets page only.
 
 import { getJSON, postJSON, say, sayError } from '../api.js';
-import { h, icon, kindLabel, savingButton, shortTime } from '../dom.js';
+import { h, icon, kindLabel, savingButton, shortTime, timeAgo } from '../dom.js';
 import { displayName, setMenuLayout } from '../app.js';
 import { rebase, track } from '../unsaved.js';
 import { forgetKey, isSealed } from '../sealed.js';
 import { forgetPreviewChoice } from '../previewjump.js';
 import { openFeedback } from '../feedback.js';
+import { aiToolsTable } from '../aitools.js';
 
 const view = { main: null, ctx: null, config: null, host: null, cards: [], watching: false };
 
@@ -77,12 +78,14 @@ function paintCards() {
   const kinds = view.config.kinds || [];
   // The same page near and far while the filter is being debugged (see ui.REMOTE_SETTINGS).
   const everyday = [
-    view.config.remote ? null : setupCard(),
+    setupCard(),                                   // shown remotely too (E4): the wizard says what is local
     menuLayoutCard(),
+    aiToolsCard(),                                 // item H: sign-in works remotely; routing stays local
     loggingCard(s), notificationsCard(s, Boolean(view.config.remote)), kindsCard(s, kinds),
     nearMissCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
     view.config.windows ? bashGuardCard(s) : null,
-    view.config.windows && !view.config.remote ? codeTabCard(s) : null,
+    view.config.windows ? codeTabCard(s) : null,   // remotely: shown, locked by its keys (E4)
+    view.config.windows ? copilotCard(s) : null,   // remotely too; its certificate waits for the machine
     toolsCard(s), routingCard(), restartCard(), updatesCard(s), feedbackCard(),
     foldersCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
@@ -133,6 +136,16 @@ function menuLayoutCard() {
 }
 
 // The setup wizard (feature 106), opened again from here: on this machine only, as it runs its scripts.
+// Every AI tool aicleaner knows (item H, 2026-10-19): found, filtered, signed in, and sign-in. The table
+// locks what runs on this machine itself, so the card is not locked as a whole.
+function aiToolsCard() {
+  return card('aitools', 'AI tools',
+    'The AI tools aicleaner knows, whether each is on this machine, whether its traffic is filtered, and whether it is signed in. '
+    + 'Claude Code can be signed in to from here - from any device. GitHub Copilot CLI and Codex are shown so you can see them; '
+    + 'filtering them is not built yet. Microsoft 365 Copilot runs in Microsoft\'s cloud and is not covered.',
+    [aiToolsTable()], null);
+}
+
 function setupCard() {
   return card('setup', 'Set up', 'Step by step: route your AI tools through aicleaner, add a client, and set up remote access.',
     [h('div', { class: 'form-row' }, h('a', { class: 'btn primary', href: '#/setup' }, 'Open the setup wizard'))], null);
@@ -146,6 +159,8 @@ function card(key, title, hint, fields, onSave, afterSave = null) {
     const result = await postJSON('/api/config', { settings: onSave() });
     view.config.settings = result.settings;
     if (afterSave) afterSave(before, result.settings);
+    // Anything already on screen that follows a setting (the prompt's autocorrect) hears of it.
+    window.dispatchEvent(new CustomEvent('aicleaner:settings', { detail: result.settings }));
     // The status bar reflects a change at once (D148), not at the next ten-second poll.
     if (view.ctx && view.ctx.refresh) view.ctx.refresh().catch(() => {});
     refreshDangerous();
@@ -213,13 +228,20 @@ function loggingCard(s) {
 }
 
 function notificationsCard(s, remote) {
-  // Learning mode is detection itself, so through the tunnel it is shown but not offered (H3).
-  const learning = remote ? null : checkbox('learning', 'Learning mode (find identifiers the mapping does not know)', s['detect.enabled']);
+  // Learning mode is detection itself, so through the tunnel it is never changed (H3) - shown, disabled
+  // and saying so (E4, Brad 2026-10-19: visible remotely, never hidden), and never sent from there.
+  const learning = checkbox('learning', 'Learning mode (find identifiers the mapping does not know)', s['detect.enabled']);
+  if (remote) {
+    const box = learning.querySelector('input');
+    box.disabled = true;
+    box.title = LOCAL_ONLY;
+    learning.title = LOCAL_ONLY;
+  }
   const footer = checkbox('footer', "Footer on the model's reply", s['detect.footer']);
   const toast = checkbox('toast', 'Windows toast', s['detect.toast']);
   return card('notifications', 'Notifications', 'How you hear about new identifiers to review.',
-    [learning ? h('div', { class: 'form-row' }, learning) : null, h('div', { class: 'form-row' }, footer, toast)],
-    () => ({ ...(learning ? { 'detect.enabled': learning.querySelector('input').checked } : {}),
+    [h('div', { class: 'form-row' }, learning), h('div', { class: 'form-row' }, footer, toast)],
+    () => ({ ...(remote ? {} : { 'detect.enabled': learning.querySelector('input').checked }),
       'detect.footer': footer.querySelector('input').checked, 'detect.toast': toast.querySelector('input').checked }));
 }
 
@@ -325,7 +347,8 @@ function uninspectedCard(paths) {
 // "Hold back as placeholders" and "Kinds automatically tokenised", which interacted in a way the page
 // never showed. Stored in the same settings: quiet_kinds = Auto-tokenise, placeholder_kinds =
 // Tokenise & Review, neither = Ignore; owner_add_kinds (and, for a resource name,
-// auto_map_client_resources) = the Auto-add ticks, which only apply with Tokenise & Review.
+// auto_map_client_resources) = the Auto-add ticks with Tokenise & Review; ignore_add_kinds = the same
+// tick with Ignore (E3, Brad 2026-10-19: ignore, but add what proves its owner). Each mode keeps its own.
 const MODES = [['auto', 'Auto-tokenise'], ['review', 'Tokenise & Review'], ['ignore', 'Ignore']];
 // Kinds whose owner the value itself can prove, so Auto-add means something.
 const OWNED_KINDS = ['email', 'tenant', 'sharepoint', 'domain', 'devops-org', 'devops-project', 'client-resource'];
@@ -344,8 +367,12 @@ function kindEffect(kind, mode, autoAdd) {
       + 'It is never stored and never reaches Review.';
   }
   if (mode === 'ignore') {
-    return `${what} is sent to the AI service as written and is not offered in Review.`
-      + (kind === 'email' ? ` ${EMAIL_IGNORE_WARNING}` : '');
+    const proof = OWNER_EXAMPLES[kind] ? ` - ${OWNER_EXAMPLES[kind]} -` : '';
+    const added = OWNED_KINDS.includes(kind) && autoAdd
+      ? ` But when the value itself proves whose it is${proof} it is added to that client and replaced from then on.`
+      : '';
+    return `${what} is sent to the AI service as written and is not offered in Review.${added}`
+      + (kind === 'email' && !autoAdd ? ` ${EMAIL_IGNORE_WARNING}` : '');
   }
   let said = `${what} is replaced by a placeholder while it waits in Review for you to add it to a client or ignore it.`;
   if (OWNED_KINDS.includes(kind)) {
@@ -362,6 +389,9 @@ function kindsCard(s, kinds) {
   const review = new Set(s['detect.placeholder_kinds'] || []);
   const ownerAdd = new Set(s['detect.owner_add_kinds'] || []);
   if (s['detect.auto_map_client_resources']) ownerAdd.add('client-resource');
+  const ignoreAdd = new Set(s['detect.ignore_add_kinds'] || []);
+  // The tick's state for each mode it appears in, so switching a row never carries one into the other.
+  const chosen = Object.fromEntries(kinds.map((kind) => [kind, { review: ownerAdd.has(kind), ignore: ignoreAdd.has(kind) }]));
   const rows = kinds.filter((kind) => kind !== 'name' && kind !== 'guid');
   const modeOf = (kind) => (quiet.has(kind) ? 'auto' : review.has(kind) ? 'review' : 'ignore');
   const head = h('tr', {}, h('th', {}, 'Type'), MODES.map(([, label]) => h('th', {}, label)), h('th', {}, 'Auto-add to client'));
@@ -373,7 +403,7 @@ function kindsCard(s, kinds) {
     const radios = MODES.map(([value]) => h('input', { type: 'radio', name: `mode-${kind}`, value,
       checked: modeOf(kind) === value, 'aria-label': `${kindLabel(kind)}: ${value}` }));
     const tick = OWNED_KINDS.includes(kind)
-      ? h('input', { type: 'checkbox', name: `owner-${kind}`, checked: ownerAdd.has(kind), 'aria-label': `${kindLabel(kind)}: auto-add to client` })
+      ? h('input', { type: 'checkbox', name: `owner-${kind}`, checked: chosen[kind][modeOf(kind)] || false, 'aria-label': `${kindLabel(kind)}: auto-add to client` })
       : null;
     const warn = kind === 'email' ? h('div', { class: 'hint kind-warning', hidden: true }, EMAIL_IGNORE_WARNING) : null;
     // The help mark (an emoji, written as its escape, so it stands out - the user) shows what the row's choices add up to: on hover (title), and on a click or tap, which
@@ -381,9 +411,15 @@ function kindsCard(s, kinds) {
     const effect = h('div', { class: 'hint kind-effect', hidden: true, id: `kind-effect-${kind}` });
     const help = h('button', { type: 'button', class: 'link kind-help', 'aria-expanded': 'false',
       'aria-controls': effect.id, 'aria-label': `What the choices for ${kindLabel(kind)} will do` }, '\u2753');
+    let shownFor = modeOf(kind);
     const sync = () => {
       const mode = radios.find((r) => r.checked).value;
-      if (tick) tick.hidden = mode !== 'review';
+      if (tick && mode !== shownFor) {
+        if (shownFor !== 'auto') chosen[kind][shownFor] = tick.checked;
+        tick.checked = mode !== 'auto' && Boolean(chosen[kind][mode]);
+        shownFor = mode;
+      }
+      if (tick) tick.hidden = mode === 'auto';
       // The effect already carries the email warning when it is open.
       if (warn) warn.hidden = mode !== 'ignore' || !effect.hidden;
       const said = kindEffect(kind, mode, Boolean(tick && tick.checked));
@@ -396,7 +432,7 @@ function kindsCard(s, kinds) {
       sync();
     });
     for (const r of radios) r.addEventListener('change', sync);
-    if (tick) tick.addEventListener('change', sync);
+    if (tick) tick.addEventListener('change', () => { if (shownFor !== 'auto') chosen[kind][shownFor] = tick.checked; sync(); });
     const row = h('tr', { dataset: { kind } }, h('td', {}, kindLabel(kind), ' ', help, effect, warn),
       radios.map((r) => h('td', {}, r)), h('td', {}, tick || '-'));
     sync();
@@ -405,12 +441,13 @@ function kindsCard(s, kinds) {
   const table = h('table', { class: 'kinds-table' }, h('thead', {}, head), h('tbody', {}, fixed, body));
   const read = () => {
     const picked = Object.fromEntries(rows.map((kind) => [kind, table.querySelector(`input[name="mode-${kind}"]:checked`).value]));
-    const ticked = (kind) => { const t = table.querySelector(`input[name="owner-${kind}"]`); return Boolean(t && t.checked); };
+    const owned = rows.filter((kind) => OWNED_KINDS.includes(kind));
     return {
       'detect.quiet_kinds': rows.filter((kind) => picked[kind] === 'auto'),
       'detect.placeholder_kinds': rows.filter((kind) => picked[kind] === 'review'),
-      'detect.owner_add_kinds': rows.filter((kind) => kind !== 'client-resource' && ticked(kind)),
-      'detect.auto_map_client_resources': ticked('client-resource'),
+      'detect.owner_add_kinds': owned.filter((kind) => kind !== 'client-resource' && chosen[kind].review),
+      'detect.auto_map_client_resources': Boolean(chosen['client-resource'] && chosen['client-resource'].review),
+      'detect.ignore_add_kinds': owned.filter((kind) => chosen[kind].ignore),
     };
   };
   return card('kinds', 'What happens to something new',
@@ -473,11 +510,11 @@ function tunnelCard(s) {
     } catch (error) { sayError(error); }
   });
   look();
+  // Where the key is kept reaches since H2 (Brad, 2026-10-19: "more about the storage than the code
+  // itself, is protected either way"); making a code stays on the machine.
   if (remote) {
-    for (const control of [storage, generate]) {
-      control.disabled = true;
-      control.title = LOCAL_ONLY;
-    }
+    generate.disabled = true;
+    generate.title = LOCAL_ONLY;
   }
   // This device's own copy of the key (the user, 2026-10-07): only while the page talks through the
   // encrypted tunnel, and usable from there - it changes nothing on the aicleaner machine or on any
@@ -501,8 +538,7 @@ function tunnelCard(s) {
       h('div', { class: 'form-row' }, on),
       h('label', { class: 'field' }, 'Where a device keeps the key (never the code)', storage),
       state, h('div', { class: 'form-row' }, generate, forget), shown],
-    () => (remote ? { 'remote.encrypt': on.querySelector('input').checked }
-      : { 'remote.encrypt': on.querySelector('input').checked, 'remote.key_storage': storage.value }),
+    () => ({ 'remote.encrypt': on.querySelector('input').checked, 'remote.key_storage': storage.value }),
     // Through the tunnel, switching encryption changes how this very page talks: start again.
     (before, after) => {
       if (remote && Boolean(before['remote.encrypt']) !== Boolean(after['remote.encrypt'])) {
@@ -561,6 +597,34 @@ function codeTabCard(s) {
     () => ({ 'codetab.enabled': on.querySelector('input').checked, 'codetab.port': Number(port.value) || 8788 }));
 }
 
+// GitHub Copilot in VS Code through aicleaner (Copilot release 6, 2026-10-19). Works remotely too
+// (Brad, 2026-10-19), except adding its certificate: Windows asks for that at the machine.
+function copilotStatus(info) {
+  if (!info.enabled) return 'Off. VS Code connects to Copilot directly, unfiltered.';
+  const lines = [];
+  if (info.error) lines.push(info.error);
+  if (info.waiting) lines.push(`Waiting: ${info.waiting}.`);
+  else lines.push(info.trusted ? 'Certificate trusted.' : 'Certificate not trusted.');
+  const vscode = info.vscode || {};
+  if (!vscode.vscode_found) lines.push('No VS Code found on this machine.');
+  else lines.push(`${vscode.pointed} of ${(vscode.files || []).length} VS Code settings file(s) point here.`);
+  lines.push(info.last_at ? `Copilot traffic last seen ${timeAgo(info.last_at * 1000)}.` : 'No Copilot traffic since aicleaner started.');
+  const telemetry = info.telemetry || {};
+  if (telemetry.not_json) lines.push(`${telemetry.not_json} telemetry line(s) were not JSON and went as they were.`);
+  return lines.join(' ');
+}
+
+function copilotCard(s) {
+  const on = checkbox('copilot', 'Filter GitHub Copilot in VS Code', s['copilot.enabled']);
+  const status = h('div', { class: 'hint copilot-status' }, 'Checking...');
+  getJSON('/api/copilot').then((info) => { status.textContent = copilotStatus(info); })
+    .catch(() => { status.textContent = ''; });
+  return card('copilot', 'GitHub Copilot in VS Code',
+    'With this on, VS Code\'s proxy setting points at aicleaner on this machine: Copilot\'s chat, agent, inline completions, next edit suggestions, public code matching and telemetry are read and filtered; everything else VS Code sends - sign-in, extensions, Settings Sync - passes through untouched. VS Code needs to trust aicleaner\'s Copilot certificate, which can only vouch for Copilot\'s own hosts; it is added to your Windows certificates the first time this is turned on here, and Windows asks you to confirm. The first time it is turned on is done at the machine, where that confirmation is answered; the certificate then stays installed while Copilot is off, so after that it can be turned on or off from anywhere. While aicleaner is stopped VS Code\'s proxy setting is taken out, so VS Code keeps working - unfiltered - until it starts again. Microsoft 365 Copilot (Word, Teams, Outlook) is not covered: it runs in Microsoft\'s cloud. Reload VS Code after changing it.',
+    [h('div', { class: 'form-row' }, on), status],
+    () => ({ 'copilot.enabled': on.querySelector('input').checked }));
+}
+
 // The file tabs on the Session page (feature 92): what a double-click in a Markdown preview does.
 // Saved on the server, so every device follows it (the user, 2026-10-08).
 function editorCard(s) {
@@ -579,8 +643,8 @@ function editorCard(s) {
     () => forgetPreviewChoice());
 }
 
-// Autocorrect in the Session page's prompt (feature 94). The prompt's own button is this same
-// setting. Code and paths are always left alone; the rest is the user's choice.
+// Autocorrect in the Session page's prompt (feature 94). Its only switch since its button left the
+// prompt row (the user, 2026-10-18). Code and paths are always left alone; the rest is the user's choice.
 function autocorrectCard(s) {
   const on = checkbox('autocorrect', 'Correct spelling in the prompt as you type', s['prompt.autocorrect']);
   const skip = new Set(s['prompt.autocorrect_skip'] || []);
@@ -711,7 +775,10 @@ function updatesCard(s) {
   const availableLine = h('p', { class: 'updates-available' }, 'Checking for a newer release...');
   const checkedLine = h('p', { class: 'hint updates-checked' });
   const check = h('button', { type: 'button', class: 'updates-check' }, 'Check now');
-  const apply = h('button', { type: 'button', class: 'primary updates-apply', hidden: true }, 'Update now');
+  const apply = h('button', { type: 'button', class: 'primary updates-apply' }, 'Update now');
+  // Always shown (E3 part 9, feedback #2): it appeared only when a newer release existed, so someone up
+  // to date could not find it. Works through remote access too since H2 (Brad, 2026-10-19): it is
+  // Update automatically on demand - no new risk, and no prompt on the machine.
   const auto = checkbox('update-auto', 'Update automatically (every 6 hours, when no session is mid-turn)', s['update.auto']);
   const show = (info) => {
     const from = info.repo ? ` - from ${info.repo}${info.ref ? ` (${info.ref})` : ''}` : '';
@@ -721,9 +788,8 @@ function updatesCard(s) {
       : info.updating ? 'An update is under way - see logs/update.log.'
         : info.newer ? `${info.latest} is available.` : info.latest ? `Up to date (newest release: ${info.latest}).` : 'No releases found.';
     checkedLine.textContent = info.checked_at ? `Last checked ${shortTime(new Date(info.checked_at * 1000).toISOString())}.` : '';
-    // Not offered through the tunnel: it runs the installer (Update automatically is).
-    apply.hidden = !info.newer || info.updating || Boolean(view.config && view.config.remote);
-    apply.textContent = info.newer ? `Update now to ${info.latest}` : 'Update now';
+    apply.disabled = !info.newer || info.updating;
+    apply.textContent = info.newer ? `Update now to ${info.latest}` : info.latest ? `Up to date (${info.latest})` : 'Update now';
   };
   const load = (force) => getJSON(`/api/updates${force ? '?check=1' : ''}`).then(show)
     .catch((error) => { availableLine.textContent = `Could not check: ${error.message || error}`; });

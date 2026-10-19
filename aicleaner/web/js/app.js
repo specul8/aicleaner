@@ -272,9 +272,11 @@ function renderStatusStack(status) {
     h('a', { class: item.notice ? 'status notice' : 'status', href: item.href, title: item.text, dataset: { level: item.level } }, icon(LEVEL_ICON[item.level]), h('span', { class: 'status-text' }, item.text))));
 }
 
-// Secrets cannot be used at all through the tunnel (every /api/secrets call is local only), so its
-// menu entry stays where it is, greyed and inert, and says why (the user, 2026-10-01).
-const LOCAL_ONLY_ROUTES = { secrets: 'Secrets can only be added on the local machine' };
+// A page that cannot be used at all through the tunnel keeps its menu entry where it is, greyed and
+// inert, saying why (the user, 2026-10-01). Secrets was one until H2 (Brad, 2026-10-19): it opens
+// remotely now - secrets can be added and the list read there; the mode and deleting are shown
+// disabled. None left; the mechanism stays for the next.
+const LOCAL_ONLY_ROUTES = {};
 
 function renderLocalOnly(status) {
   for (const [route, why] of Object.entries(LOCAL_ONLY_ROUTES)) {

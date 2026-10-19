@@ -19,10 +19,10 @@ import { renderMarkdown } from '../markdown.js';
 import { paintWorktree } from '../worktree.js';
 import { begin } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
+import { openSuggestTitles } from '../titlesdialog.js';
 import { attachImageReading, imageButton, isReadable, readInto } from '../imagetext.js';
 import { codeEditor } from '../codeeditor.js';
 import { openConversationSearch } from '../convsearch.js';
-import { openFeedback } from '../feedback.js';
 import { openClaudeImport } from '../claudeimport.js';
 import { attachFileDrop } from '../filedrop.js';
 import { watchTitles } from '../titleprogress.js';
@@ -165,6 +165,23 @@ function repaint(container, nodes) {
 function paintLog(log, events, key) {
   const list = events || [];
   const shown = log.drawnSeqs;
+  // Earlier events than any drawn, with everything drawn still in the list (D196, 2026-10-19): the
+  // stream had drawn a reply before the prompt it answers - the prompt was emitted just before the
+  // stream joined - and the refresh that followed brought both. That list "did not follow on", so the
+  // whole log was redrawn and a selection the reader had made in the reply was lost. The earlier
+  // lines go in above what is drawn instead; what is new after it is appended as usual below.
+  if (shown && shown.key === key && !log.earlierFrom && list.length && list.every((e) => e.seq !== undefined)
+      && list[0].seq < shown.first && list.some((e) => e.seq === shown.first) && list.some((e) => e.seq === shown.last)) {
+    const upTo = list.findIndex((e) => e.seq === shown.first);
+    keepingPlace(log, () => {
+      const lines = transcript(list.slice(0, upTo), { placeholder: false });
+      const firstDrawn = log.querySelector(':scope > [data-seq]');
+      if (firstDrawn) firstDrawn.before(...lines);
+      else log.append(...lines);
+    });
+    log.drawnSeqs = { ...shown, first: list[0].seq };
+    return paintLog(log, list, key);
+  }
   const continues = shown && shown.key === key && list.length && list.every((e) => e.seq !== undefined)
     && list[0].seq >= shown.first && list.some((e) => e.seq === shown.last);
   if (continues) {
@@ -420,6 +437,16 @@ function answeredLine(event) {
 // `after` is the event just before these, when drawing only the new tail of a log (D56): the
 // "resumed here" line depends on whether the previous event was replayed. `placeholder: false`
 // gives an empty list rather than "Nothing yet" for a tail that draws no lines.
+// "Conversation compacted - earlier turns summarised (967k to 22k tokens, 1 min 8 s)" (E5.1).
+function compactedText(meta) {
+  const k = (n) => (typeof n === 'number' ? `${Math.round(n / 1000)}k` : '');
+  const tokens = meta.pre_tokens && meta.post_tokens ? `${k(meta.pre_tokens)} to ${k(meta.post_tokens)} tokens` : '';
+  const seconds = typeof meta.duration_ms === 'number' ? Math.round(meta.duration_ms / 1000) : null;
+  const took = seconds === null ? '' : seconds >= 60 ? `${Math.floor(seconds / 60)} min ${seconds % 60} s` : `${seconds} s`;
+  const details = [tokens, took, meta.trigger === 'manual' ? 'asked for' : ''].filter(Boolean).join(', ');
+  return `Conversation compacted - earlier turns summarised${details ? ` (${details})` : ''}`;
+}
+
 function transcript(events, { after = null, placeholder = true } = {}) {
   const lines = [];
   let wasReplayed = Boolean(after && after.replayed);
@@ -474,6 +501,10 @@ function transcript(events, { after = null, placeholder = true } = {}) {
     } else if (event.type === 'exited' || event.type === 'stopped') {
       lines.push(h('div', { class: 'turn tool' }, h('span', { class: 'who' }, 'session'),
         h('div', {}, event.type === 'stopped' ? 'stopped' : `exited (${event.code})`)));
+    } else if (event.type === 'system' && event.subtype === 'compact_boundary') {
+      // Where the conversation was compacted (E5.1, Brad 2026-10-19) - from the stream and on replay.
+      lines.push(h('div', { class: 'turn tool compacted' }, h('span', { class: 'who' }, 'session'),
+        h('div', {}, compactedText(event.compact_metadata || {}))));
     }
     // Each line says which event drew it, so paintLog can tell what the log already shows.
     if (event.seq !== undefined) for (const line of lines.slice(start)) line.dataset.seq = String(event.seq);
@@ -2296,13 +2327,17 @@ export async function render(main, context = {}) {
   // drop-down, and a conversation resumed from another folder drew a blank page (D113).
   const homeShown = h('div', { id: 'session-home', class: 'mono session-home' });
   const resume = h('select', { id: 'session-resume', 'aria-label': 'Conversation to continue' });
+  // A new conversation's name (E3 part 10, feedback #3; Brad 2026-10-19): shown under the list while
+  // "Start a new conversation" is chosen; blank, the model writes one after the first reply and the fifth.
+  const newName = h('input', { type: 'text', id: 'session-new-name', class: 'session-new-name', maxlength: '200',
+    placeholder: 'Session Name - Leave blank to auto-generate one', 'aria-label': 'Name for the new conversation', hidden: true });
   // Conversations a program started are hidden - except the ones started here, which are listed
   // (2026-09-30). This shows the rest too, including Session-page ones from before that fix.
   // Every conversation you or aicleaner started, not just the newest 25 (the user, 2026-10-17). Ones a
   // program started are never listed.
   const showAll = h('label', { class: 'check hint', id: 'session-show-all',
     title: 'List every conversation in this profile, not just the newest 25 (ones a program started are never listed)' },
-    h('input', { type: 'checkbox' }), ' all - every conversation, not just the newest 25', h('span', { id: 'session-all-note', class: 'muted' }, ''));
+    h('input', { type: 'checkbox' }), ' Show all conversations', h('span', { id: 'session-all-note', class: 'muted' }, ''));
   // What "all" added, so ticking it visibly does something even when it finds nothing (D86).
   const allNote = showAll.querySelector('#session-all-note');
   const resumeLine = h('div', { class: 'hint warn', id: 'session-resume-hint' }, '');
@@ -2565,6 +2600,7 @@ export async function render(main, context = {}) {
       if (newest && Array.from(resume.options).some((option) => option.value === newest.id)) resume.value = newest.id;
     }
     resume.disabled = Boolean(session.running || view.pastLoading);
+    newName.hidden = Boolean(session.running || resume.value);
     // Across every folder, not just the selected one: the chosen conversation may belong to
     // another of this profile's folders now that Continue offers them all.
     const picked = (view.past || [])
@@ -2644,6 +2680,13 @@ export async function render(main, context = {}) {
   const noteActivity = (event) => {
     // The CLI wraps the API's own events in `stream_event` with --include-partial-messages; the
     // test stub emits them bare. Handle both rather than depend on which.
+    // Compacting (E5.1): from its start to its end nothing else arrives, often for a minute or two.
+    if (event.type === 'system' && event.subtype === 'status') {
+      if (event.status === 'compacting') return sayDoing('compacting the conversation... (this can take a minute or two)');
+      if (doing.textContent.startsWith('compacting')) return sayDoing('');
+      return;
+    }
+    if (event.type === 'system' && event.subtype === 'compact_boundary') return sayDoing('');
     const inner = event.event && typeof event.event === 'object' ? event.event : event;
     const kind = inner.type;
     if (kind === 'content_block_start') {
@@ -2675,7 +2718,8 @@ export async function render(main, context = {}) {
     if (event.type === 'interrupted' && event.late) say('The interrupt landed: this turn was stopped.', 'ok');
     if (event.type === 'interrupt_refused') say(`The session refused the interrupt: ${event.error || 'no reason given'}`, 'warn');
     if (RELOADS.has(event.type)) { sayDoing(''); refresh(); return; }
-    if (!DRAWN.has(event.type)) return;    // a streaming fragment: nothing drawn depends on it
+    const compacted = event.type === 'system' && event.subtype === 'compact_boundary';   // drawn too (E5.1)
+    if (!DRAWN.has(event.type) && !compacted) return;    // a streaming fragment: nothing drawn depends on it
     if (!view.name || view.state.selected !== view.name) return;
     const events = view.state.events || [];
     // The stream replays what is buffered when it connects, and refresh() has just fetched the
@@ -2852,7 +2896,7 @@ export async function render(main, context = {}) {
   const retitleButton = h('button', { type: 'button', id: 'session-retitle-conversation', class: 'conv-action',
     title: 'Ask the model for a title saying what the chosen conversation most recently worked on' }, 'Retitle');
   const suggestButton = h('button', { type: 'button', id: 'session-suggest-titles', class: 'conv-action',
-    title: 'Ask the model for titles for the conversations listed in Continue that have none (the newest 25, or every one with "all" ticked)' }, 'Suggest titles');
+    title: 'Choose conversations for the model to title: every conversation listed, the unnamed ones ticked to start with' }, 'Suggest titles');
   const chosenRow = () => (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id === resume.value);
   renameButton.addEventListener('click', async (event) => {
     event.preventDefault();
@@ -2886,17 +2930,10 @@ export async function render(main, context = {}) {
     } catch (error) { sayError(error); }
     retitleButton.disabled = false;
   });
-  suggestButton.addEventListener('click', async (event) => {
+  // Its own dialog (E3 part 1, Brad 2026-10-19): every conversation, All and Unnamed at the top.
+  suggestButton.addEventListener('click', (event) => {
     event.preventDefault();
-    try {
-      // What Continue lists: the newest 25, or every one with "all" ticked (the user, 2026-10-17).
-      const answer = await postJSON('/api/session/conversations/suggest-titles',
-        { name: view.name, all: showAll.querySelector('input').checked });
-      // The progress toast (2026-10-17) says what is going on; Continue shows each title as it lands.
-      if (answer.started) watchTitles(() => loadPast({ quiet: true }), true);
-      else if (answer.progress && answer.progress.running) watchTitles(() => loadPast({ quiet: true }));
-      else say('Every conversation listed already has a title.', 'ok');
-    } catch (error) { sayError(error); }
+    openSuggestTitles(view.name, () => loadPast({ quiet: true }));
   });
   // A run still going - pressed before a reload, or from another page - shows its toast here too.
   watchTitles(() => loadPast({ quiet: true }));
@@ -3099,7 +3136,7 @@ export async function render(main, context = {}) {
     h('div', { class: 'form-row session-head' }, heading, conversationTitle, clientChip, runningLine,
       h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start'), chat),
     h('div', { class: 'session-controls' },
-      h('label', { class: 'field' }, 'Continue', resume, showAll),
+      h('label', { class: 'field' }, 'Continue', resume, newName, showAll),
       h('div', { class: 'field' }, h('span', {}, 'Starts in (home folder)'), homeShown),
       modeField),
     // What can be done with conversations: buttons across the card's width, side by side first and then
@@ -3147,15 +3184,11 @@ export async function render(main, context = {}) {
   const imageSnippet = (text, filename) => makeSnippet({ code: text, lang: 'text', number: snippetNumber(), image: filename });
   attachImageReading(firstBox, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
   const readButton = imageButton((files) => { for (const file of files) readInto(box, { file }, view.name, say, imageSnippet); });
-  // Feedback beside the prompt's own buttons (the user, 2026-10-16): where something goes wrong is
-  // usually where the person is typing.
-  // The megaphone alone (the user, 2026-10-16); its name and tooltip say what it is.
-  const feedbackButton = h('button', { type: 'button', id: 'session-feedback', class: 'btn feedback-open',
-    title: 'Feedback - report a bug or suggest an idea', 'aria-label': 'Feedback' }, '\u{1F4E3}');
-  feedbackButton.addEventListener('click', () => openFeedback());
+  // The row made room for the AI service drop-down (the user, 2026-10-18): Feedback is the menu's
+  // item and autocorrect the Settings card's switch; Insert code snippet is </>.
   const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
-  const insertCodeButton = h('button', { type: 'button', id: 'session-insert-code', class: 'btn',
-    title: 'Paste or type code in an editor with line numbers and no wrapping, then add it to the prompt' }, 'Insert code snippet');
+  const insertCodeButton = h('button', { type: 'button', id: 'session-insert-code', class: 'btn', 'aria-label': 'Insert code snippet',
+    title: 'Insert code snippet: paste or type code in an editor with line numbers and no wrapping, then add it to the prompt' }, '</>');
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
     codeSlot,
     prompt.element,
@@ -3165,8 +3198,6 @@ export async function render(main, context = {}) {
       h('button', { type: 'button', id: 'session-send', class: 'primary' }, 'Send'),
       insertCodeButton,
       readButton,
-      feedbackButton,
-      autocorrect.toggle,
       // Beside Send, because that is where the eye already is when waiting for a reply,
       // and waiting is when "is this thing still connected?" gets asked (feature 65).
       h('span', { id: 'session-link', class: 'link-state', hidden: true })),
@@ -3378,7 +3409,14 @@ export async function render(main, context = {}) {
       // already; Send was the one control that left the cursor on itself, so continuing the
       // conversation meant reaching for the mouse. On the error path too: a failure is more
       // reason to leave the cursor in the text, not less.
-      box.focus();
+      // But only if the reader has not moved on (D196, 2026-10-19): the reply can arrive before this
+      // send's request and refresh are done, and taking focus then wiped a selection made in it.
+      const pane = document.getElementById('prompt-pane');
+      const picked = window.getSelection();
+      const reading = picked && !picked.isCollapsed && !(pane && pane.contains(picked.anchorNode));
+      const at = document.activeElement;
+      const elsewhere = at && at !== document.body && at.id !== 'session-send' && !(pane && pane.contains(at));
+      if (!reading && !elsewhere) box.focus();
     }
   }
 
@@ -3718,7 +3756,8 @@ export async function render(main, context = {}) {
         await refresh();
       } else {
         await postJSON('/api/session/start',
-          { name: view.name, resume: resume.value });
+          { name: view.name, resume: resume.value, title: resume.value ? '' : newName.value.trim() });
+        newName.value = '';
         say(resume.value ? `${view.name} picked up where it left off.` : `${view.name} started.`, 'ok');
         await refresh();
         subscribe(view.name, refresh, applyEvent);

@@ -5,7 +5,7 @@
 // remote access), choose the project and its chats, say where it goes, and import. The server does
 // the reading and writing; nothing from the export leaves this machine.
 import { getJSON, postJSON, say, sayError } from './api.js';
-import { h } from './dom.js';
+import { h, tickRows } from './dom.js';
 import { sendInPieces } from './pieces.js';
 import { arrangeSheet } from './sheet.js';
 
@@ -115,7 +115,7 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
     drop.addEventListener('dragleave', () => drop.classList.remove('over'));
     drop.addEventListener('drop', (event) => { event.preventDefault(); drop.classList.remove('over'); take(event.dataTransfer.files[0]); });
     const rows = state.files.map((file) => {
-      const box = h('input', { type: 'checkbox', checked: file.ticked ? true : null, disabled: file.required ? true : null });
+      const box = h('input', { type: 'checkbox', class: 'row-tick', checked: file.ticked ? true : null, disabled: file.required ? true : null });
       box.addEventListener('change', () => { file.ticked = box.checked; });
       return h('li', { class: 'ci-file' }, h('label', {}, box, ' ', h('span', { class: 'mono' }, file.filename),
         h('span', { class: 'hint' }, file.required ? ' - needed' : (file.category === 'memories' ? ' - claude.ai\'s memory of your projects'
@@ -189,13 +189,19 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
 
   const chatsStep = () => {
     const search = h('input', { type: 'search', class: 'ci-filter', placeholder: 'Narrow the list', value: state.filter });
-    const shown = () => state.chats.filter((chat) => !state.filter
-      || `${chat.title} ${(chat.passage && chat.passage.text) || ''}`.toLowerCase().includes(state.filter.toLowerCase()));
+    // Sorted by a column when one is chosen (E3 part 8, feedback #4); otherwise most-related first.
+    const sort = state.sort || (state.sort = { key: '', dir: -1 });
+    const shown = () => {
+      const list = state.chats.filter((chat) => !state.filter
+        || `${chat.title} ${(chat.passage && chat.passage.text) || ''}`.toLowerCase().includes(state.filter.toLowerCase()));
+      return sort.key ? [...list].sort((a, b) => ((a[sort.key] || 0) - (b[sort.key] || 0)) * sort.dir) : list;
+    };
     const count = h('span', { class: 'ci-count' }, `${state.ticked.size} chosen of ${state.chats.length}`);
     const table = h('tbody', {});
+    tickRows(table, 'tr', '.ci-chat');       // the row toggles its tick, as on Review (E3)
     const fill = () => {
       table.replaceChildren(...shown().map((chat) => {
-        const box = h('input', { type: 'checkbox', class: 'ci-chat', value: chat.id, checked: state.ticked.has(chat.id) ? true : null });
+        const box = h('input', { type: 'checkbox', class: 'ci-chat row-tick', value: chat.id, checked: state.ticked.has(chat.id) ? true : null });
         box.addEventListener('change', () => {
           if (box.checked) state.ticked.add(chat.id); else state.ticked.delete(chat.id);
           count.textContent = `${state.ticked.size} chosen of ${state.chats.length}`;
@@ -204,6 +210,7 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
         return h('tr', { class: chat.imported ? 'ci-imported' : '' }, h('td', {}, box),
           h('td', {}, h('strong', {}, chat.title), chat.imported ? h('span', { class: 'hint' }, ' (already imported)') : null,
             chat.passage ? h('div', { class: 'hint ci-passage' }, chat.passage.text) : null),
+          h('td', { class: 'ci-when ci-created' }, dateOf(chat.created)),
           h('td', { class: 'ci-when' }, dateOf(chat.updated)), h('td', { class: 'ci-n' }, String(chat.messages)));
       }));
     };
@@ -230,9 +237,49 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
       h('p', {}, 'claude.ai does not record which chats were the project\'s. They are listed most-related first, '
         + 'the clear ones ticked; ask Claude to choose for a closer reading.'),
       h('div', { class: 'form-row ci-chat-tools' }, search, all, none, pick, count),
-      h('div', { class: 'ci-chat-scroll' }, h('table', { class: 'ci-chats' },
-        h('thead', {}, h('tr', {}, h('th', {}, ''), h('th', {}, 'Chat'), h('th', {}, 'Updated'), h('th', {}, 'Messages'))), table)));
+      h('div', { class: 'ci-chat-scroll' }, h('table', { class: 'ci-chats', style: state.widths ? 'table-layout: fixed' : null },
+        h('thead', {}, h('tr', {}, h('th', { class: 'ci-tick-col' }, ''), ...['title', 'created', 'updated', 'messages']
+          .map((key) => sortableHead(key))
+          .map((th, i) => { if (state.widths) th.style.width = `${state.widths[i + 1]}px`; return th; }))), table)));
   };
+
+  // A column header: its label sorts by it (a second click reverses), its right edge drags to resize
+  // (E3 part 8, feedback #4). Widths and order are kept in `state`, so they survive a redraw.
+  const HEADS = { title: 'Chat', created: 'Created', updated: 'Updated', messages: 'Messages' };
+  function sortableHead(key) {
+    const sort = state.sort || (state.sort = { key: '', dir: -1 });
+    const active = sort.key === key;
+    const label = h('button', { type: 'button', class: 'link ci-sort', dataset: { key },
+      title: `Sort by ${HEADS[key].toLowerCase()}` }, HEADS[key], active ? (sort.dir < 0 ? ' ▼' : ' ▲') : '');
+    label.addEventListener('click', () => {
+      if (key === 'title') { sort.key = ''; sort.dir = -1; render(); return; }    // back to most-related first
+      sort.dir = active ? -sort.dir : -1;            // newest / most first, then the other way
+      sort.key = key;
+      render();
+    });
+    const grip = h('span', { class: 'ci-resize', title: 'Drag to resize', 'aria-hidden': 'true' });
+    grip.addEventListener('pointerdown', (event) => {
+      event.preventDefault();
+      const th = grip.parentElement;
+      const table = th.closest('table');
+      const heads = [...table.querySelectorAll('thead th')];
+      state.widths = heads.map((cell) => cell.offsetWidth);
+      heads.forEach((cell, i) => { cell.style.width = `${state.widths[i]}px`; });
+      table.style.tableLayout = 'fixed';
+      const at = heads.indexOf(th);
+      const startX = event.clientX;
+      const startWidth = state.widths[at];
+      grip.setPointerCapture(event.pointerId);
+      const move = (e) => {
+        state.widths[at] = Math.max(48, startWidth + e.clientX - startX);
+        th.style.width = `${state.widths[at]}px`;
+      };
+      const up = () => { grip.removeEventListener('pointermove', move); grip.removeEventListener('pointerup', up); };
+      grip.addEventListener('pointermove', move);
+      grip.addEventListener('pointerup', up);
+    });
+    return h('th', { class: 'ci-sortable', 'aria-sort': active ? (sort.dir < 0 ? 'descending' : 'ascending') : 'none' }, label, grip);
+  }
 
   const whereStep = () => {
     const parts = [];

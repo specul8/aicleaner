@@ -38,6 +38,17 @@ RENEW_DAYS = 30                       # a server certificate this close to its e
 
 Protect = Callable[[bytes, bool], bytes]
 
+# One authority per thing read, each constrained to its own names (2026-10-18): the Code tab's can only
+# ever vouch for api.anthropic.com, Copilot's only for Copilot's hosts. A leaked key is limited to them.
+KINDS = {
+    "codetab": {"cert": CA_CERT, "key": CA_KEY, "label": "Code tab",
+                "permitted": [HOST], "names": [HOST]},
+    "copilot": {"cert": "copilot-ca.pem", "key": "copilot-ca.key.dpapi", "label": "Copilot",
+                "permitted": ["githubcopilot.com", "copilot-telemetry.githubusercontent.com"],
+                "names": ["*.githubcopilot.com", "*.individual.githubcopilot.com", "*.business.githubcopilot.com",
+                          "*.enterprise.githubcopilot.com", "copilot-telemetry.githubusercontent.com"]},
+}
+
 
 def _dpapi(data: bytes, protect: bool) -> bytes:
     from .secrets import _dpapi as call
@@ -56,19 +67,20 @@ class Authority:
     """The authority in `folder` (aicleaner's state folder). `protect(data, encrypt)` wraps the key;
     DPAPI unless a test gives another."""
 
-    def __init__(self, folder: Path, protect: Protect = _dpapi) -> None:
+    def __init__(self, folder: Path, protect: Protect = _dpapi, kind: str = "codetab") -> None:
         self.folder = Path(folder)
         self._protect = protect
+        self.kind = KINDS[kind]
         self._ca: tuple[x509.Certificate, ec.EllipticCurvePrivateKey] | None = None
         self.leaf: x509.Certificate | None = None
 
     @property
     def ca_path(self) -> Path:
-        return self.folder / CA_CERT
+        return self.folder / self.kind["cert"]
 
     @property
     def key_path(self) -> Path:
-        return self.folder / CA_KEY
+        return self.folder / self.kind["key"]
 
     # ---- the authority ----------------------------------------------------------------------
 
@@ -81,7 +93,7 @@ class Authority:
                 cert = x509.load_pem_x509_certificate(self.ca_path.read_bytes())
                 key = serialization.load_der_private_key(self._protect(self.key_path.read_bytes(), False), None)
             except (OSError, ValueError) as exc:
-                raise AuthorityError(f"the Code tab certificate authority in {self.folder} could not be read ({exc}); "
+                raise AuthorityError(f"the {self.kind['label']} certificate authority in {self.folder} could not be read ({exc}); "
                                      "turn the switch off and on to make a new one") from exc
             if isinstance(key, ec.EllipticCurvePrivateKey) and cert.not_valid_after_utc - _now() > dt.timedelta(days=RENEW_DAYS):
                 self._ca = (cert, key)
@@ -90,7 +102,7 @@ class Authority:
 
     def _make(self) -> x509.Certificate:
         key = ec.generate_private_key(ec.SECP256R1())
-        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"aicleaner Code tab ({socket.gethostname()})"),
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"aicleaner {self.kind['label']} ({socket.gethostname()})"),
                           x509.NameAttribute(NameOID.ORGANIZATION_NAME, "aicleaner (this machine only)")])
         start = _now() - dt.timedelta(hours=1)
         cert = (x509.CertificateBuilder()
@@ -101,8 +113,9 @@ class Authority:
                 .add_extension(x509.KeyUsage(digital_signature=False, content_commitment=False, key_encipherment=False,
                                              data_encipherment=False, key_agreement=False, key_cert_sign=True,
                                              crl_sign=True, encipher_only=False, decipher_only=False), critical=True)
-                # The narrowing that matters: whatever trusts this authority trusts it for one name.
-                .add_extension(x509.NameConstraints(permitted_subtrees=[x509.DNSName(HOST)], excluded_subtrees=None),
+                # The narrowing that matters: whatever trusts this authority trusts it for its names only.
+                .add_extension(x509.NameConstraints(permitted_subtrees=[x509.DNSName(n) for n in self.kind["permitted"]],
+                                                    excluded_subtrees=None),
                                critical=True)
                 .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
                 .sign(key, hashes.SHA256()))
@@ -113,7 +126,7 @@ class Authority:
             self._write(self.key_path, self._protect(der, True))
             self._write(self.ca_path, cert.public_bytes(serialization.Encoding.PEM))
         except OSError as exc:
-            raise AuthorityError(f"the Code tab certificate authority could not be saved in {self.folder} ({exc})") from exc
+            raise AuthorityError(f"the {self.kind['label']} certificate authority could not be saved in {self.folder} ({exc})") from exc
         self._ca = (cert, key)
         return cert
 
@@ -140,11 +153,11 @@ class Authority:
         key = ec.generate_private_key(ec.SECP256R1())
         start = _now() - dt.timedelta(hours=1)
         cert = (x509.CertificateBuilder()
-                .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, HOST)]))
+                .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, self.kind["names"][0])]))
                 .issuer_name(ca_cert.subject).public_key(key.public_key())
                 .serial_number(x509.random_serial_number())
                 .not_valid_before(start).not_valid_after(start + dt.timedelta(days=LEAF_DAYS))
-                .add_extension(x509.SubjectAlternativeName([x509.DNSName(HOST)]), critical=False)
+                .add_extension(x509.SubjectAlternativeName([x509.DNSName(n) for n in self.kind["names"]]), critical=False)
                 .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
                 .add_extension(x509.KeyUsage(digital_signature=True, content_commitment=False, key_encipherment=False,
                                              data_encipherment=False, key_agreement=False, key_cert_sign=False,

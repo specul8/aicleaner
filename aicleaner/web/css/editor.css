@@ -54,12 +54,13 @@
 /* Not known and nothing close (D164): a red wavy line under it, as word processors do. */
 .ac-layer .ac-unknown { text-decoration: underline wavy #f85149; text-decoration-skip-ink: none; text-underline-offset: 3px; }
 .ac-layer .ac-fixed { background: rgba(46, 160, 67, .35); border-radius: 3px; box-shadow: 0 1px 0 rgba(46, 160, 67, .9); }
-/* Just left of Connected, at the far end from Send (D153): beside Send it was clicked by mistake.
-   The toggle takes the push to the right that the link indicator had; the indicator follows it. */
-.ac-toggle { font-size: 12px; padding: .15rem .55rem; margin-left: auto; }
-.ac-toggle + .link-state { margin-left: 0; }
-.ac-toggle .ac-mark { display: inline-block; min-width: 1em; font-weight: 700; color: var(--bad, #f85149); }
-.ac-toggle.on .ac-mark { color: #3fb950; }
+/* The prompt row's Upload: a picture and a page beside the word, at the text's size (2026-10-18). */
+.upload-button { display: inline-flex; align-items: center; gap: .2rem; }
+/* Its marks (2026-10-19): Brad's icons, 16px on their longest side with 2px either side (stored at 48px
+   for high-DPI). */
+.upload-button img.icon-image, .upload-button img.icon-pdf { max-width: 16px; max-height: 16px; width: auto; height: auto;
+  padding: 0 2px; box-sizing: content-box; vertical-align: middle; }
+#session-insert-code { font-family: var(--mono, ui-monospace, monospace); font-weight: 700; }
 .ac-bubble { position: fixed; z-index: 60; padding: .45rem .6rem; border: 1px solid #3fb950; border-radius: 8px;
   background: var(--surface); box-shadow: 0 6px 20px rgba(0, 0, 0, .45); max-width: 28rem; }
 .ac-bubble .hint { margin: 0 0 .35rem; }

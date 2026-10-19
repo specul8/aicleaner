@@ -95,6 +95,26 @@ function bannerContent(status) {
   };
 }
 
+// Copilot in VS Code (release 6): what is covered, said plainly - a filtered chat beside an unfiltered
+// completion is easy to mistake for full coverage (walkthrough 19) - and a warning when it goes quiet.
+function copilotLine(status) {
+  const c = status.copilot || {};
+  if (!c.enabled) return null;
+  const settings = h('a', { href: '#/settings/copilot' }, 'Copilot settings');
+  let warn = '';
+  if (c.error) warn = c.error;
+  else if (c.waiting) warn = `waiting - ${c.waiting}`;
+  else if (!c.vscode_found) warn = 'no VS Code found on this machine';
+  else if (!c.pointed) warn = 'VS Code is not pointed at aicleaner';
+  else if (c.quiet) warn = 'nothing from Copilot for a day - GitHub can change its hosts or shapes; check VS Code is still pointed here';
+  if (warn) {
+    return h('div', { class: 'callout warn copilot-coverage' }, h('b', {}, 'GitHub Copilot in VS Code: '), `${warn}. `, settings);
+  }
+  return h('div', { class: 'callout ok copilot-coverage' }, h('b', {}, 'GitHub Copilot in VS Code: '),
+    'chat, agent, inline completions, next edit suggestions and telemetry are filtered. '
+    + 'Microsoft 365 Copilot is not (it runs in Microsoft\'s cloud). ', settings);
+}
+
 function paintBanner(status) {
   const b = bannerContent(status);
   view.banner.dataset.level = b.level;
@@ -107,7 +127,7 @@ function paintBanner(status) {
     r.state.includes('fallback')
       ? `an edit was rejected, so the last good version${r.fallback_at ? ` (${shortTime(r.fallback_at)})` : ''} is in use. `
       : `a conflicting copy of this file was found (${(r.conflicts || []).join(', ')}). `,
-    h('a', { href: clientHref(r.id) }, 'Show the error'))));
+    h('a', { href: clientHref(r.id) }, 'Show the error'))), ...[copilotLine(status)].filter(Boolean));
 }
 
 function tile(key, label, value, sub, warn) {

@@ -474,6 +474,23 @@ def _looks_like_a_resource(run: str, start: int, end: int) -> bool:
     return bool(before and _all_naming_parts(before)) or bool(after and _all_naming_parts(after))
 
 
+# A client word this short is found by chance inside ordinary words: one client's four-letter word sat
+# in the middle of exchange-online-management and scan-email-files (E3, Brad's examples, 2026-10-19),
+# which then reached Review as resource names carrying that client's name. Such a word counts inside
+# a longer run only at a boundary of it; a longer word is distinctive enough anywhere.
+SHORT_NEEDLE = 4
+
+
+def _at_a_boundary(text: str, start: int, end: int, run: re.Match[str]) -> bool:
+    """True when [start, end) begins or ends at the edge of its run, a change of case or a digit."""
+    def edge(at: int) -> bool:
+        if at <= run.start() or at >= run.end():
+            return True
+        left, right = text[at - 1], text[at]
+        return left.isdigit() or right.isdigit() or (left.islower() and right.isupper())
+    return edge(start) or edge(end)
+
+
 def contained_forms(text: str, mapper: Mapper) -> Iterable[tuple[str, str, bool]]:
     """(run, client, looks_like_a_resource) for every run of letters and digits that contains a
     mapped form but is not that form: whole-word matching never replaces these, so they reach the
@@ -498,7 +515,12 @@ def contained_forms(text: str, mapper: Mapper) -> Iterable[tuple[str, str, bool]
         if before == "." or after == "." or before == "@":
             continue  # a label inside a host or email: the domain detectors own those shapes
         start = hit.start() - run_match.start()
-        yield run, owners.get(hit.group(0).lower(), ""), _looks_like_a_resource(run, start, start + len(hit.group(0)))
+        shaped = _looks_like_a_resource(run, start, start + len(found))
+        # A short word mid-word is another word's letters (E3, 2026-10-19) - unless the run is named
+        # the way resources are (stnwndprd: a type prefix, the client, an environment), D149's case.
+        if len(found) <= SHORT_NEEDLE and not shaped and not _at_a_boundary(text, hit.start(), hit.end(), run_match):
+            continue
+        yield run, owners.get(found.lower(), ""), shaped
 
 
 # Words that say nothing about who a client is, so they are never looked for inside longer words.

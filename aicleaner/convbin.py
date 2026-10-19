@@ -10,6 +10,7 @@ listed exactly as before.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import time
@@ -47,7 +48,11 @@ def delete(projects: Iterable[str], conv_id: str, root: Path, bin_root: Path, pr
     if now - path.stat().st_mtime < BUSY_WINDOW_S:
         raise BinError("that conversation was written to in the last few minutes - a terminal or an editor "
                        "may still have it open; try again later")
-    target = bin_root / time.strftime("%Y%m%d", time.localtime(now)) / path.parent.name
+    # A short fixed name for the project's folder, not its own name (2026-10-18): that name is the whole
+    # project path, and repeated under the bin it pushed a deep project past Windows' 260 characters.
+    # Where it came from is in the metadata, which is what Put back reads.
+    short = hashlib.sha1(path.parent.name.lower().encode("utf-8")).hexdigest()[:12]
+    target = bin_root / time.strftime("%Y%m%d", time.localtime(now)) / short
     target.mkdir(parents=True, exist_ok=True)
     meta = {"id": conv_id, "title": title, "profile": profile, "original": str(path),
             "folder": str(path.parent), "deleted_at": now, "size": path.stat().st_size}

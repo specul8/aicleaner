@@ -175,10 +175,23 @@ class Notifier:
 
     @staticmethod
     def append_to_json(obj: Any, text: str) -> Any:
-        """Add a text block to a Messages API response object."""
+        """The footer at the end of a Messages API response: inside its last text block when the reply
+        ends with text, so that block - what a ralph loop's stop hook reads for its completion promise -
+        still holds what the model wrote (D97); a block of its own after a tool call."""
         if isinstance(obj, dict) and isinstance(obj.get("content"), list):
-            obj["content"].append({"type": "text", "text": text})
+            content = obj["content"]
+            last = content[-1] if content else None
+            if isinstance(last, dict) and last.get("type") == "text" and isinstance(last.get("text"), str):
+                last["text"] += text
+            else:
+                content.append({"type": "text", "text": text})
         return obj
+
+    @staticmethod
+    def stream_delta(text: str, index: int) -> SSEEvent:
+        """The footer as the last piece of an open text block's stream (D97)."""
+        return make_event("content_block_delta", json.dumps({"type": "content_block_delta", "index": index,
+                                                             "delta": {"type": "text_delta", "text": text}}))
 
     @staticmethod
     def stream_events(text: str, index: int) -> list[SSEEvent]:

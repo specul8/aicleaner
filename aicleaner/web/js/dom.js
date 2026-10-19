@@ -195,6 +195,22 @@ export function pickBox(label, attrs) {
     h('input', { type: 'checkbox', 'aria-label': label, ...(attrs || {}) }));
 }
 
+// A list in a dialog where each row carries a tick (E3, Brad 2026-10-19): a click anywhere on a row -
+// not on a link, button or field inside it - clicks the row's own box, so the dialog's handlers see
+// exactly what a click on the box sends. The boxes are given Review's size by the row-tick class.
+export function tickRows(container, rowSelector, boxSelector = 'input[type="checkbox"]') {
+  container.addEventListener('click', (event) => {
+    if (event.target.closest('a, button, input, select, textarea, label, summary')) return;
+    const row = event.target.closest(rowSelector);
+    if (!row || !container.contains(row)) return;
+    const box = row.querySelector(boxSelector);
+    if (!box || box.disabled) return;
+    event.preventDefault();
+    event.stopPropagation();
+    box.click();
+  }, true);
+}
+
 export function pickCell(label, attrs) {
   return h('td', { class: 'pick' }, pickBox(label, { class: 'pick', ...(attrs || {}) }));
 }

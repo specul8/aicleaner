@@ -110,7 +110,7 @@ async def _dispatch(request: web.Request, inner: Any) -> dict[str, Any]:
     method = str(inner.get("method") or "GET").upper()
     target = str(inner.get("path") or "")
     bare = target.split("?", 1)[0]
-    if not bare.startswith("/api/") or bare in (SEALED, *PLAIN) or refused_remotely(bare):
+    if not bare.startswith("/api/") or bare in (SEALED, *PLAIN) or refused_remotely(bare, method):
         return _answer(403, {"error": "local only: open this page on the machine aicleaner runs on to use it"})
     if bare in STREAMED:
         return _answer(403, {"error": "not through the encrypted tunnel: the page polls instead"})

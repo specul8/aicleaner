@@ -20,12 +20,20 @@
     Code tab cannot reach Anthropic while its proxy is down, and this is the way back to work. It
     stays off until it is switched on again in Settings (or Deploy-AiCleaner.ps1 -CodeTab On).
 
+.PARAMETER Only
+    One tool only (item H, the AI tools page): ClaudeCode (Claude Code's and VS Code's routing),
+    CodeTab, or Copilot. Default All - everything, as before. A switch never touches another tool.
+
 .PARAMETER LogPath
     Transcript log path. Pass '' to disable.
 
 .EXAMPLE
     .\Disable-AiCleaner.ps1
     Stop routing through the proxy, right now.
+
+.EXAMPLE
+    .\Disable-AiCleaner.ps1 -Only Copilot
+    Stop filtering GitHub Copilot in VS Code; Claude Code stays routed.
 
 .NOTES
     Contact:       see contact-*.json stored alongside this script
@@ -36,6 +44,7 @@
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
+    [ValidateSet('All', 'ClaudeCode', 'CodeTab', 'Copilot')][string]$Only = 'All',
     [AllowEmptyString()][string]$LogPath = $(
         $dir = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
         Join-Path $dir 'Disable-AiCleaner.log'
@@ -188,15 +197,63 @@ function Set-CodeTabOff {
     }
 }
 
+function Set-CopilotOff {
+    <#
+    .SYNOPSIS
+        The Copilot switch off (Copilot release 6). Returns $true when something changed.
+    .DESCRIPTION
+        As Set-CodeTabOff: through the running proxy when it answers, otherwise `aicleaner copilot-off`,
+        which records the switch as off too. VS Code's proxy setting is taken out, so VS Code reaches
+        Copilot directly. The Copilot certificate stays (this is temporary); the uninstaller removes it.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([bool])]
+    param()
+    $configFile = Join-Path $script:AppFolder 'aicleaner-config.json'
+    $config = Read-JsonFile -Path $configFile
+    if (-not $config -or -not $config.PSObject.Properties['copilot'] -or -not $config.copilot.enabled) { return $false }
+    if (-not $PSCmdlet.ShouldProcess('GitHub Copilot in VS Code', 'Stop filtering it')) { return $false }
+    $port = if ($config.PSObject.Properties['port']) { [int]$config.port } else { 8787 }
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 3 -ErrorAction Stop | Out-Null
+        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
+            -Body '{"settings":{"copilot.enabled":false}}' -TimeoutSec 30 -ErrorAction Stop
+        Write-Status "Copilot: $([string]$answer.rules)" -Level Detail
+        return $true
+    } catch {
+        Write-Verbose "proxy not answering: $($_.Exception.Message)"
+    }
+    $venvPython = Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        Write-Status "Copilot: the Python environment ($venvPython) is missing, so Copilot could not be switched off" -Level Warn
+        return $false
+    }
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location -LiteralPath $script:AppFolder
+    try {
+        & $venvPython -m aicleaner copilot-off --config $configFile 2>&1 | ForEach-Object { Write-Status "Copilot: $_" -Level Detail }
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $savedEap
+    }
+}
+
 $transcriptStarted = $false
 if ($LogPath) { try { Start-Transcript -Path $LogPath -Append | Out-Null; $transcriptStarted = $true } catch { } }
 
 try {
     Write-Status 'Pointing Claude Code and VS Code back at the real API'
-    $changed = Set-RoutingOff
-    if (Set-CodeTabOff) {
+    $changed = 0
+    if ($Only -in 'All', 'ClaudeCode') { $changed += Set-RoutingOff }
+    if (($Only -in 'All', 'CodeTab') -and (Set-CodeTabOff)) {
         $changed++
         Write-Status 'The Code tab is no longer filtered; restart the Claude Desktop app. Switch it back on in Settings.' -Level Detail
+    }
+    if (($Only -in 'All', 'Copilot') -and (Set-CopilotOff)) {
+        $changed++
+        Write-Status 'GitHub Copilot in VS Code is no longer filtered; reload VS Code. Switch it back on in Settings.' -Level Detail
     }
     if ($changed -gt 0) {
         Write-Status "Routing is off ($changed file(s) changed). Sessions follow a value that changes, so they should reach the API again without restarting." -Level Done

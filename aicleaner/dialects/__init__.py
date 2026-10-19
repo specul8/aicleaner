@@ -71,6 +71,14 @@ def get_stream_rewriter(
         from .openai_chat import OpenAIChatStreamRewriter
 
         return OpenAIChatStreamRewriter(mapper, counter, keep_patterns)
+    if dialect == "openai_responses":
+        from .openai_responses import OpenAIResponsesStreamRewriter
+
+        return OpenAIResponsesStreamRewriter(mapper, counter, keep_patterns)
+    if dialect == "openai_completions":
+        from .openai_completions import OpenAICompletionsStreamRewriter
+
+        return OpenAICompletionsStreamRewriter(mapper, counter, keep_patterns)
     return GenericStreamRewriter(mapper, counter, keep_patterns)
 
 

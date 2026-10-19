@@ -15,7 +15,9 @@ function cancelButtonIn(foot) {
   return [...foot.querySelectorAll('button')].find((b) => CANCEL_TEXT.test(b.textContent.trim())) || null;
 }
 
-const SAVE_TEXT = /\bsave\b/i;
+// Green: everything that captures data or starts work (the user, 2026-10-17) - not Next, which only
+// moves on, and not Replace, which overwrites.
+const SAVE_TEXT = /\bsave\b|^(create|import|send|start|add|upload|copy|keep both|use |ask claude|apply|generate|submit|suggest)/i;
 const DELETE_TEXT = /^(delete|remove)\b|lose the changes/i;
 
 // Save green, Delete (and anything that throws work away) red; the rest as they were.

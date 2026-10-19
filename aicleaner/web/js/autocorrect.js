@@ -189,40 +189,32 @@ function insertText(box, start, end, text) {
   }
 }
 
-// `opts.conversation()`: the conversation's text, for "words already used". Returns { toggle, stack,
-// attach }: the button for beside the link indicator, the element to put where the box was, and
-// attach(another box) -> its stack, for the prompt's other text parts (feature 118: the prompt is
-// text boxes with snippets between them). One switch and one set of words; each box its own marks.
+// `opts.conversation()`: the conversation's text, for "words already used". Returns { stack, attach }:
+// the element to put where the box was, and attach(another box) -> its stack, for the prompt's other
+// text parts (feature 118: the prompt is text boxes with snippets between them). One setting and one
+// set of words; each box its own marks. Switched in Settings (its button left the prompt row, the
+// user 2026-10-18); each stack's data-autocorrect says on or off.
 export function attachAutocorrect(box, opts = {}) {
   const shared = { on: false, skip: [], own: [], replace: new Map(), onSince: 0 };
-  const mark = h('span', { class: 'ac-mark', 'aria-hidden': 'true' });
-  const toggle = h('button', { type: 'button', class: 'ac-toggle', 'aria-pressed': 'false',
-    title: 'Correct spelling as you type' }, 'Autocorrect ', mark);
   const wired = new Set();
   let openOne = null;                      // the box whose bubble is open: one bubble at a time
 
-  const paintToggle = () => {
-    toggle.setAttribute('aria-pressed', String(shared.on));
-    mark.textContent = shared.on ? '✓' : '✗';
-    toggle.classList.toggle('on', shared.on);
+  const showState = () => { for (const one of wired) one.stack.dataset.autocorrect = shared.on ? 'on' : 'off'; };
+  // The settings as saved: from the config on load, and from Settings' Save while the page is open.
+  const apply = (s) => {
+    const was = shared.on;
+    if ('prompt.autocorrect' in s) shared.on = Boolean(s['prompt.autocorrect']);
+    if (shared.on !== was || !shared.onSince) shared.onSince = Date.now();   // never what is already there
+    if ('prompt.autocorrect_skip' in s) shared.skip = s['prompt.autocorrect_skip'] || [];
+    if ('prompt.autocorrect_words' in s) shared.own = s['prompt.autocorrect_words'] || [];
+    if ('prompt.autocorrect_replace' in s) shared.replace = replacements(s['prompt.autocorrect_replace']);
+    showState();
+    if (shared.on && !was) loadWords().catch(sayError);
   };
-  getJSON('/api/config').then((config) => {
-    const s = config.settings || {};
-    shared.on = Boolean(s['prompt.autocorrect']);
-    shared.onSince = Date.now();           // a draft already in the box is left as it is
-    shared.skip = s['prompt.autocorrect_skip'] || [];
-    shared.own = s['prompt.autocorrect_words'] || [];
-    shared.replace = replacements(s['prompt.autocorrect_replace']);
-    paintToggle();
-    if (shared.on) loadWords().catch(() => {});
-  }).catch(() => paintToggle());
-  toggle.addEventListener('click', async () => {
-    shared.on = !shared.on;
-    shared.onSince = Date.now();           // from now on, never what is already there
-    paintToggle();
-    if (shared.on) loadWords().catch(sayError);
-    try { await postJSON('/api/config', { settings: { 'prompt.autocorrect': shared.on } }); } catch (error) { sayError(error); }
-  });
+  getJSON('/api/config').then((config) => apply(config.settings || {})).catch(() => showState());
+  // Until this page is left: a later Session page has its own.
+  const onSettings = (event) => { if (first.stack.isConnected) apply(event.detail || {}); else window.removeEventListener('aicleaner:settings', onSettings); };
+  window.addEventListener('aicleaner:settings', onSettings);
   // Registered once, not per box: text parts come and go as snippets are added and removed.
   document.addEventListener('mousedown', (event) => {
     if (openOne && !openOne.owns(event.target)) openOne.closeBubble();
@@ -230,8 +222,8 @@ export function attachAutocorrect(box, opts = {}) {
   document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && openOne) openOne.closeBubble(); });
 
   const first = wire(box);
+  showState();
   return {
-    toggle,
     stack: first.stack,
     attach(other) { return wire(other).stack; },
     clear() { for (const one of [...wired]) { if (one.stack.isConnected || one === first) one.clear(); else wired.delete(one); } },
@@ -483,6 +475,7 @@ export function attachAutocorrect(box, opts = {}) {
 
     const one = { stack, clear() { state.fixes = []; closeBubble(); paint(); }, refresh };
     wired.add(one);
+    stack.dataset.autocorrect = shared.on ? 'on' : 'off';
     return one;
   }
 }

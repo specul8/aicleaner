@@ -7,6 +7,7 @@
 
 import { getJSON, postJSON, sayError } from '../api.js';
 import { h, setChildren } from '../dom.js';
+import { aiToolsTable } from '../aitools.js';
 
 const STEPS = ['What happens', 'Your first client', 'Remote access', 'Your AI tools', 'Done'];
 const view = { step: 0, main: null, ctx: null, dns: null, remote: null };
@@ -40,9 +41,37 @@ function paint() {
     view.step += 1;
     paint();
   });
-  setChildren(view.main, h('h1', {}, 'Set up aicleaner'), tabs,
-    h('section', { class: 'card setup-card', dataset: { step: String(view.step) } }, ...body),
+  const card = h('section', { class: 'card setup-card', dataset: { step: String(view.step) } }, ...body);
+  setChildren(view.main, h('h1', {}, 'Set up aicleaner'), tabs, card,
     h('div', { class: 'form-row setup-nav' }, back, next));
+  if (status.remote) lockLocalActions(card);
+}
+
+// Through remote access the wizard is shown whole (E4, Brad 2026-10-19), but what runs this machine's
+// scripts is disabled and says so - as Settings' local-only cards do. A step that draws more buttons
+// later (remote access's stages) is watched, so a button added after the first paint is locked too.
+const LOCAL_ACTIONS = '.setup-enable, .setup-remote-go, .setup-remote-replace';
+const LOCAL_ONLY = 'Can only be changed where aicleaner is deployed';
+
+function lockLocalActions(card) {
+  const lock = () => {
+    let any = false;
+    for (const button of card.querySelectorAll(LOCAL_ACTIONS)) {
+      if (!button.dataset.localOnly) {        // each button once; the observer watches children only
+        button.disabled = true;
+        button.title = LOCAL_ONLY;
+        button.dataset.localOnly = '1';
+      }
+      any = true;
+    }
+    if (any && !card.querySelector('.local-only-note')) {
+      const heading = card.querySelector('h2');
+      const note = h('p', { class: 'chip local-only-note' }, `${LOCAL_ONLY}: this step's action runs on that machine.`);
+      if (heading) heading.after(note); else card.prepend(note);
+    }
+  };
+  lock();
+  new MutationObserver(lock).observe(card, { childList: true, subtree: true });
 }
 
 function welcome() {
@@ -58,12 +87,9 @@ function welcome() {
   ];
 }
 
-function tools(status) {
-  const rows = ((status.routing || {}).clients) || [];
-  const table = rows.length ? h('table', { class: 'routing-table' }, h('tbody', {}, rows.map((row) => h('tr', {},
-    h('th', {}, row.client),
-    h('td', {}, h('span', { class: `chip ${row.routed ? 'ok' : 'bad'}` }, row.routed ? 'through aicleaner' : 'direct to the AI service')))))) :
-    h('p', { class: 'hint' }, 'No AI tool settings were found on this machine yet. Install Claude Code or Claude Desktop, then come back.');
+function tools() {
+  // Every AI tool aicleaner knows, found or not, filtered or not, signed in or not (item H).
+  const table = aiToolsTable();
   const output = h('pre', { class: 'setup-output', hidden: true });
   const go = h('button', { type: 'button', class: 'primary setup-enable' }, 'Route them through aicleaner');
   go.addEventListener('click', async () => {
@@ -84,7 +110,8 @@ function tools(status) {
   return [
     h('h2', {}, 'Your AI tools'),
     h('p', {}, 'Each AI tool has a setting that says where to send requests. Routing it through aicleaner changes that one '
-      + 'setting, after checking the filter is ready - a running tool picks it up without a restart.'),
+      + 'setting, after checking the filter is ready - a running tool picks it up without a restart. '
+      + 'Each tool is also signed in to from here.'),
     table, h('div', { class: 'form-row' }, go), output,
   ];
 }

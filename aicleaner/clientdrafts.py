@@ -25,6 +25,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from . import fileio
 from .mapping import classify
 
 DRAFTS_FOLDER = "client-drafts"
@@ -103,9 +104,14 @@ class DraftStore:
         clean["updated"] = time.time()
         path = self._path(clean["id"])
         self.folder.mkdir(parents=True, exist_ok=True)
-        temp = path.with_suffix(".tmp")
+        # Its own .tmp per save, swapped in by fileio.replace (2026-10-18): two quick saves of one draft
+        # shared a single .tmp, and a scanner or the other save holding it failed the rename (WinError 32).
+        temp = path.with_name(f"{path.stem}.{uuid.uuid4().hex[:8]}.tmp")
         temp.write_text(json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8")
-        temp.replace(path)
+        try:
+            fileio.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
         return clean
 
     def load(self, draft_id: str) -> dict[str, Any]:

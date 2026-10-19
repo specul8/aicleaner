@@ -45,7 +45,8 @@ FILE_CSP = web.RequestKey("file_csp", str)
 # the desk while the filter was being debugged. That is over: the tunnel is something to rely on
 # now, and an open surface behind a better sign-in is a better lock on a propped-open door.
 #
-#   /api/secrets   the credential list, and switching redaction off
+#   /api/secrets   switching redaction off (the mode) and deleting a saved secret - the list and adding
+#                  one reach since H2 (Brad, 2026-10-19; REMOTE_WRITES below)
 #   /api/rehydrate a token turned back into a name on demand - bulk extraction, one call at a time
 #   /api/tokenise  confirms whether a given string is a client's, the same question backwards
 #
@@ -57,9 +58,13 @@ FILE_CSP = web.RequestKey("file_csp", str)
 # same person looking after it. Refusing it bought no protection and cost a real job - trimming a
 # client file down by hand to triage a bug is what export is for.
 #
-# Secrets stays refused, and the distinction is deliberate: an API key is not client data. Losing
-# one is a different kind of loss, recoverable only by rotating it, and nobody needs to read a
-# credential from a train.
+# Secrets stays refused where it weakens redaction, and the distinction is deliberate: an API key is
+# not client data. Losing one is a different kind of loss, recoverable only by rotating it, and
+# nobody needs to read a credential from a train. Since H2 (Brad, 2026-10-19): "one should be able to
+# enter new secrets remotely and see which secrets are being replaced. In no situation can it be
+# switched off remotely, and there's no way to 'see' secrets previously entered." The list carries
+# labels and lengths only - no value ever comes back out of usersecrets - so listing and adding reach;
+# the mode and deleting do not.
 #
 # Rehydrate and tokenise stay refused, settled 2026-09-26, and not by the same test as export.
 # The question is not "is this data the person is entitled to" - it is - but "does reaching it
@@ -72,7 +77,23 @@ REMOTE_REFUSED_PREFIXES: tuple[str, ...] = (
     "/api/setup")      # the setup wizard runs this machine's scripts (feature 106)
 
 
-def refused_remotely(path: str) -> bool:
+# The reads the setup wizard draws itself with (E4, Brad 2026-10-19: "the setup wizard ... should be
+# visible remotely" - what acts on this machine shown, but disabled). Reads only: every write under
+# /api/setup, and its log, stay on this machine.
+REMOTE_READS: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/api/setup/remote/state"), ("GET", "/api/setup/dns"),
+    # H2 (2026-10-19): which secrets are being replaced (labels only), and the mode, read not changed.
+    ("GET", "/api/secrets"), ("GET", "/api/secrets/mode")})
+# Writes under a refused prefix that reach anyway, each one named (H2): adding a saved secret strengthens
+# redaction; it never weakens it, and the value goes in, never out.
+REMOTE_WRITES: frozenset[tuple[str, str]] = frozenset({("POST", "/api/secrets")})
+
+
+def refused_remotely(path: str, method: str = "") -> bool:
+    """True for what is never served through remote access. A caller that names no method is refused
+    as before - only a named read or write on the lists is let through."""
+    if (method.upper(), path) in REMOTE_READS | REMOTE_WRITES:
+        return False
     return path.startswith(REMOTE_REFUSED_PREFIXES)
 
 LOOPBACK_NAMES = {"127.0.0.1", "localhost", "::1"}
@@ -151,7 +172,7 @@ def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None) -> 
             request[ACCESS_EMAIL] = str(claims.get("email", "")).lower()
             request[ACCESS_COUNTRY] = str(claims.get("country", ""))
             request[REMOTE] = True
-            if refused_remotely(path):
+            if refused_remotely(path, request.method):
                 return web.json_response({"error": "local only: open this page on the machine aicleaner runs "
                                                    "on to use it"}, status=403)
         if ui and not loopback and not remote:

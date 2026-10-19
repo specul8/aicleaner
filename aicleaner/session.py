@@ -72,6 +72,7 @@ async def _read_line(stream: asyncio.StreamReader) -> bytes:
 # so the session's own logic is unchanged whether it started the broker or found it after a restart.
 
 BROKER_START_S = 15
+APPROVE_MCP_TIMEOUT_MS = 12 * 60 * 60 * 1000   # how long Claude Code waits on a permission or question: 12 hours
 
 
 class _BrokerStdin:
@@ -415,6 +416,7 @@ KEPT_EVENTS = frozenset({
 })
 KEPT_SYSTEM = frozenset({
     "init", "task_started", "task_notification", "task_updated", "background_tasks_changed",
+    "compact_boundary",          # drawn in the transcript where the conversation was compacted (E5.1)
 })
 
 
@@ -460,6 +462,9 @@ def kept(event: dict[str, Any]) -> bool:
     return kind in KEPT_EVENTS
 
 
+COMPACTING = "compacting the conversation..."
+
+
 def doing_after(doing: str, event: dict[str, Any]) -> str:
     """What Claude is doing once this event has happened, worded as the page's stream does it.
 
@@ -467,6 +472,16 @@ def doing_after(doing: str, event: dict[str, Any]) -> str:
     delta says nothing about whether more is coming. The tool's name only, never its input: an
     input is a command line or a path, the sort of string that carries a client name.
     """
+    # Compacting (E5.1, Brad 2026-10-19: "I have no idea when you are compacting"): the CLI says when it
+    # starts (status "compacting") and when it ends (status None, then compact_boundary) - a minute or
+    # two in which nothing else arrives.
+    if event.get("type") == "system":
+        if event.get("subtype") == "status":
+            if event.get("status") == "compacting":
+                return COMPACTING
+            return "" if doing == COMPACTING else doing
+        if event.get("subtype") == "compact_boundary":
+            return ""
     # The CLI wraps the API's events in `stream_event` (--include-partial-messages).
     inner = event.get("event") if isinstance(event.get("event"), dict) else event
     kind = inner.get("type")
@@ -639,6 +654,7 @@ class Session:
         self.projects = [Path(p) for p in (projects or [])]
         self.permission_mode = permission_mode
         self.approve_timeout_s = approve_timeout_s
+        self.origin = ""               # where the prompts are being typed (origin.py), set per prompt
         self.events: deque[dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         # Sending the page only what it has not seen (D140): which buffer an event number belongs
         # to, and the newest number that has fallen off its front - a page holding an older one
@@ -648,6 +664,10 @@ class Session:
         self._new_epoch()
         self.slash_commands: list[str] = []      # what the CLI's init names (feature 84)
         self.transcript_folders: list[str] = []   # where its conversations may be filed (DECISIONS 64)
+        # A new conversation's title (E3 part 10): {'name': typed} or {'auto': True}, with a count of
+        # its replies; None for a resumed one. on_reply is the host's handler.
+        self.title_plan: dict[str, Any] | None = None
+        self.on_reply: Any = None
         self.pending: dict[str, Pending] = {}
         # For the status poll (feature 44): turns finished so far, which only counts up, and
         # whether one is in progress. A page compares one poll with the next to say "it is done".
@@ -701,6 +721,40 @@ class Session:
         self.epoch = uuid.uuid4().hex[:12]
         self._dropped_upto = 0
 
+    def catch_up(self, projects: list[str]) -> bool:
+        """A stopped session's buffer from the transcript of the conversation it last ran, when that
+        file has changed (E3, Brad 2026-10-19). One client's pane showed its last sitting on this page
+        (09/10) while the conversation had gone on to 16/10 in VS Code. Read only when the file's
+        size or time moves, so a long transcript is not parsed on every poll. True when refilled."""
+        if self.running or not self.session_id:
+            return False
+        from .history import _transcript, holding, replay
+
+        folder = holding([*projects, *self.transcript_folders], self.session_id)
+        path = _transcript(folder, self.session_id, None) if folder else None
+        if path is None:
+            return False
+        try:
+            stat = path.stat()
+        except OSError:
+            return False
+        stamp = (stat.st_size, stat.st_mtime)
+        if stamp == getattr(self, "_caught_up", None):
+            return False
+        self._caught_up = stamp
+        events = replay(folder, self.session_id, MAX_EVENTS)
+        if not events:
+            return False
+        self.events.clear()
+        self._new_epoch()                       # the page's numbers no longer apply: drawn afresh
+        self._replaying = True
+        try:
+            for event in events:
+                self._emit({**event, "replayed": True})
+        finally:
+            self._replaying = False
+        return True
+
     def events_since(self, since: int) -> list[dict[str, Any]] | None:
         """The kept events after `since`, or None when some may have been dropped since then."""
         if since < self._dropped_upto:
@@ -751,6 +805,9 @@ class Session:
             config = {"mcpServers": {"aicleaner": {
                 "command": sys.executable,
                 "args": ["-m", "aicleaner.mcp_approve"],
+                # A question waits for the person, not for Claude Code's 30-minute MCP idle limit
+                # (the user, 2026-10-18: two questions were cut off; "it should be 12 hours or so").
+                "timeout": APPROVE_MCP_TIMEOUT_MS,
                 "env": {"AICLEANER_APPROVE_URL": self.approve_url,
                         "AICLEANER_APPROVE_TOKEN": self.approve_token,
                         "PYTHONPATH": str(Path(__file__).resolve().parent.parent)},
@@ -1295,7 +1352,13 @@ class Session:
             sent = f"{brief}\n\n{text}"
             self._briefed = True
             self._emit({"type": "brief", "text": brief})
-        message = {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": sent}]}}
+        content = [{"type": "text", "text": sent}]
+        # Not with a slash command: sent as typed, or the CLI does not recognise it as one (the user,
+        # 2026-10-18: /ralph-loop:help arrived as an ordinary message with the note after it).
+        if self.origin and not text.lstrip().startswith("/"):
+            # Where it was typed (origin.py, 2026-10-18): a block of its own, left out of the page's view.
+            content.append({"type": "text", "text": self.origin})
+        message = {"type": "user", "message": {"role": "user", "content": content}}
         self._process.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
         await self._process.stdin.drain()
         self._emit({"type": "prompt", "text": text})
@@ -1544,6 +1607,8 @@ class Session:
             self.busy = False
             if not self._replaying:
                 self._flush_soon()             # the next waiting prompt, if any (D176)
+                if self.on_reply is not None:
+                    self.on_reply(self)        # a new conversation's title (E3 part 10)
         elif event.get("type") in ("exited", "stopped"):
             self.busy = False
         self.doing = doing_after(self.doing, event)
@@ -1765,6 +1830,11 @@ class SessionHost:
         except SessionError:
             selected = running[0] if running else (self.profiles[0].name if self.profiles else "")
         clock = time.perf_counter()
+        # The one the page shows, if stopped, brought up to date with its conversation's transcript
+        # (E3): it may have gone on outside the page since it last ran here.
+        shown = self.sessions.get(selected)
+        if shown is not None and not shown.running:
+            shown.catch_up([str(p) for p in self._profile_projects(selected)])
         sessions = {n: s.state() for n, s in self.sessions.items()}
         if parts is not None:                    # Diagnostics (feature 91): what this answer cost
             parts.append(("sessions", (time.perf_counter() - clock) * 1000))
@@ -1901,7 +1971,8 @@ class SessionHost:
         except SessionError:
             return []
 
-    async def start(self, name: str = "", project: str = "", resume: str = "", model: str = "") -> dict[str, Any]:
+    async def start(self, name: str = "", project: str = "", resume: str = "", model: str = "",
+                    title: str = "") -> dict[str, Any]:
         profile = self.profile(name)
         existing = self.sessions.get(profile.name)
         if existing is not None and existing.running:
@@ -1933,11 +2004,15 @@ class SessionHost:
             from . import codetab_settings
             if codetab_settings.applies():
                 await asyncio.to_thread(codetab_settings.apply_attribution, [str(home)])
+        self.plan_title(session, title, resume)          # its title: typed, or written by the model (E3)
         return await session.start(project=str(home) if home else project, resume=resume,
                                    model=model or profile.model)
 
-    async def prompt(self, text: str, name: str = "") -> str:
-        return await self._session(name).prompt(text)
+    async def prompt(self, text: str, name: str = "", origin: str = "") -> str:
+        session = self._session(name)
+        if origin:
+            session.origin = origin
+        return await session.prompt(text)
 
     async def send_queued_now(self, item_id: str, name: str = "") -> str:
         return await self._session(name).send_queued_now(item_id)
@@ -1954,6 +2029,13 @@ class SessionHost:
             if session.running and session.session_id == session_id:
                 return session.take_waiting()
         return []
+
+    def origin_of(self, session_id: str) -> str:
+        """Where the running session with this conversation id is being typed from (origin.py)."""
+        for session in self.sessions.values():
+            if session.running and session.session_id == session_id:
+                return session.origin
+        return ""
 
     async def stop(self, name: str = "") -> None:
         session = self._session(name)
@@ -2079,15 +2161,45 @@ class SessionHost:
         except RuntimeError as exc:
             raise SessionError(str(exc)) from exc
 
-    def suggest_titles(self, name: str, every: bool = False) -> int:
-        """Titles, in a background thread, for the untitled conversations Continue lists: the newest 25,
-        or with "all" ticked every one (the user, 2026-10-17)."""
+    def plan_title(self, session: "Session", title: str = "", resume: str = "") -> None:
+        """How a conversation started from the page gets its title (E3 part 10, feedback #3; Brad
+        2026-10-19): a Session Name typed at the start becomes the person's title once it has an id (its
+        first reply); left blank, the model writes one after the first reply and again after the fifth.
+        A resumed conversation keeps whatever title it has."""
+        name = str(title or "").strip()[:200]
+        session.title_plan = None if resume else ({"name": name, "replies": 0} if name else {"auto": True, "replies": 0})
+        session.on_reply = self._title_after_reply
+
+    def _title_after_reply(self, session: "Session") -> None:
+        plan = session.title_plan
+        if not plan or not session.session_id:
+            return
+        plan["replies"] += 1
+        replies = plan["replies"]
+        try:
+            if plan.get("name"):
+                self.rename_conversation(session.profile.name, session.session_id, plan["name"])
+                session.title_plan = None
+            elif replies in (1, 5):
+                self.title_queue().add(session.profile.name, [session.session_id])
+                if replies >= 5:
+                    session.title_plan = None
+        except SessionError as exc:          # no title is no reason to disturb the conversation
+            log.info("no title for %s yet: %s", session.session_id, exc)
+
+    def suggest_titles(self, name: str, every: bool = False, ids: list[str] | None = None) -> int:
+        """Titles, in a background thread. With `ids` (E3, Brad 2026-10-19: the Suggest titles dialog's
+        ticks): exactly those, titled or not - and only conversations this profile lists as its own, so
+        a page cannot queue another client's by naming it. Without: the untitled ones Continue lists,
+        the newest 25 or with "all" ticked every one (the user, 2026-10-17)."""
         from .titles import load
+        listed = self.past(name, 5000 if (every or ids is not None) else 25)
+        own = [row["id"] for group in listed if not group.get("outside") for row in group["sessions"]]
+        if ids is not None:
+            wanted = {str(i).lower() for i in ids}
+            return self.title_queue().add(name, [conv for conv in own if conv.lower() in wanted])
         labels = load(self.state_dir())
-        listed = self.past(name, 5000 if every else 25)
-        untitled = [row["id"] for group in listed if not group.get("outside") for row in group["sessions"]
-                    if row["id"].lower() not in labels]
-        return self.title_queue().add(name, untitled)
+        return self.title_queue().add(name, [conv for conv in own if conv.lower() not in labels])
 
     def title_queue(self) -> Any:
         """The background titles, four at a time, with the progress the page's toast shows (2026-10-17)."""

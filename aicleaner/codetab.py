@@ -26,6 +26,7 @@ from typing import Any
 from aiohttp import web
 
 from .codetab_ca import HOST, Authority
+from .copilot import is_copilot
 
 log = logging.getLogger("aicleaner.codetab")
 
@@ -95,9 +96,15 @@ async def _close(writer: asyncio.StreamWriter) -> None:
 class CodeTab:
     """Both listeners for one proxy. `handle(request)` is Proxy.handle."""
 
-    def __init__(self, handle: Any, authority: Authority, port: int, client_max_mb: int = 64) -> None:
+    def __init__(self, handle: Any, authority: Authority | None, port: int, client_max_mb: int = 64) -> None:
         self._handle = handle
+        # None: the Code tab is off and only Copilot is read (2026-10-18); api.anthropic.com passes through.
         self.authority = authority
+        # Copilot's reader (2026-10-18): its own authority, constrained to Copilot's hosts; started by
+        # set_copilot when the copilot.enabled switch is on.
+        self._copilot_runner: web.AppRunner | None = None
+        self._copilot: tuple[Authority, Any] | None = None
+        self.copilot_port = 0
         self.port = port
         self._client_max = client_max_mb * 1024 * 1024
         self._server: asyncio.base_events.Server | None = None
@@ -115,14 +122,15 @@ class CodeTab:
         return self._server is not None
 
     async def start(self) -> None:
-        self._context = await asyncio.to_thread(self.authority.server_context)
-        app = web.Application(client_max_size=self._client_max, middlewares=[self._mark])
-        app.router.add_route("*", "/{tail:.*}", self._handle)
-        self._runner = web.AppRunner(app, access_log=None, handle_signals=False)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, "127.0.0.1", 0, ssl_context=self._context)
-        await site.start()
-        self.reader_port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+        if self.authority is not None:
+            self._context = await asyncio.to_thread(self.authority.server_context)
+            app = web.Application(client_max_size=self._client_max, middlewares=[self._mark])
+            app.router.add_route("*", "/{tail:.*}", self._handle)
+            self._runner = web.AppRunner(app, access_log=None, handle_signals=False)
+            await self._runner.setup()
+            site = web.TCPSite(self._runner, "127.0.0.1", 0, ssl_context=self._context)
+            await site.start()
+            self.reader_port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
         try:
             self._server = await asyncio.start_server(self._client, "127.0.0.1", self.port, limit=HEAD_LIMIT)
         except OSError:
@@ -133,7 +141,41 @@ class CodeTab:
         self.started_at = time.time()
         log.info("Code tab proxy listening on 127.0.0.1:%d (reader on %d)", self.port, self.reader_port)
 
+    async def set_copilot(self, authority: Authority | None, handle: Any = None) -> None:
+        """Copilot's reader started (an authority and a handler given) or stopped (None)."""
+        if authority is None or handle is None:
+            self._copilot = None
+            if self._copilot_runner is not None:
+                await self._copilot_runner.cleanup()
+                self._copilot_runner = None
+                self.copilot_port = 0
+            return
+        self._copilot = (authority, handle)
+        if self._copilot_runner is not None:
+            return
+        context = await asyncio.to_thread(authority.server_context)
+        app = web.Application(client_max_size=self._client_max)
+        app.router.add_route("*", "/{tail:.*}", handle)
+        self._copilot_runner = web.AppRunner(app, access_log=None, handle_signals=False)
+        await self._copilot_runner.setup()
+        site = web.TCPSite(self._copilot_runner, "127.0.0.1", 0, ssl_context=context)
+        await site.start()
+        self.copilot_port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+        log.info("Copilot reader listening on 127.0.0.1:%d", self.copilot_port)
+
+    def reader_for(self, host: str, port: int) -> tuple[str, int] | None:
+        """Where a CONNECT to host:port is joined when it is read here, or None to pass it through."""
+        name = host.lower().rstrip(".")
+        if port != 443:
+            return None
+        if name == HOST and self._runner is not None:
+            return ("127.0.0.1", self.reader_port)
+        if self.copilot_port and is_copilot(name):
+            return ("127.0.0.1", self.copilot_port)
+        return None
+
     async def stop(self) -> None:
+        await self.set_copilot(None)
         if self._renewer is not None:
             self._renewer.cancel()
             self._renewer = None
@@ -153,12 +195,20 @@ class CodeTab:
         """The server certificate renewed in place before it ends; the proxy may run for months."""
         while True:
             await asyncio.sleep(RENEW_CHECK_S)
-            if self._context is not None and self.authority.needs_renewal():
+            if self._context is not None and self.authority is not None and self.authority.needs_renewal():
                 try:
                     await asyncio.to_thread(self.authority.load_into, self._context)
                     log.info("Code tab server certificate renewed")
                 except Exception as exc:  # noqa: BLE001 - the old one is still good for weeks
                     log.warning("Code tab certificate renewal failed: %s", exc)
+            if self._copilot is not None and self._copilot[0].needs_renewal():
+                authority, handle = self._copilot
+                try:
+                    await self.set_copilot(None)
+                    await self.set_copilot(authority, handle)
+                    log.info("Copilot server certificate renewed")
+                except Exception as exc:  # noqa: BLE001 - logged; the next check tries again
+                    log.warning("Copilot certificate renewal failed: %s", exc)
 
     async def _answer(self, writer: asyncio.StreamWriter, status: str, why: str = "") -> None:
         body = (why + "\n").encode("utf-8") if why else b""
@@ -193,8 +243,10 @@ class CodeTab:
             log.info("Code tab: refused %s (blocked: error and log intake)", host)
             await self._answer(writer, "403 Forbidden", f"aicleaner: {host} is blocked")
             return
-        read_here = host.lower().rstrip(".") == HOST and port == 443
-        target = ("127.0.0.1", self.reader_port) if read_here else (host, port)
+        # Not `reader`: that is the client's stream, piped below.
+        joined = self.reader_for(host, port)
+        read_here = joined is not None
+        target = joined or (host, port)
         try:
             up_reader, up_writer = await asyncio.wait_for(asyncio.open_connection(*target), CONNECT_TIMEOUT_S)
         except (OSError, asyncio.TimeoutError) as exc:
@@ -214,4 +266,5 @@ class CodeTab:
 
     def summary(self) -> dict[str, Any]:
         return {"listening": self.running, "port": self.port, "tunnels": dict(self.tunnels.most_common(20)),
-                "refused": dict(self.refused), "last_error": self.last_error, **self.authority.summary()}
+                "refused": dict(self.refused), "last_error": self.last_error, "copilot_reader": bool(self.copilot_port),
+                **(self.authority.summary() if self.authority is not None else {})}

@@ -17,7 +17,7 @@
 
 .NOTES
     Contact:       see contact-*.json stored alongside this script
-    Last-modified: 2026-09-18
+    Last-modified: 2026-10-19
     Requires:      Windows PowerShell 5.1 or PowerShell 7+
 #>
 
@@ -68,6 +68,39 @@ function Write-ContactAttribution {
     if ($parts.Count -gt 0) { Write-Host ('aicleaner | ' + ($parts -join ' | ')) }
 }
 
+function Remove-CopilotProxy {
+    <#
+    .SYNOPSIS
+        VS Code's proxy setting taken out while aicleaner is stopped (Copilot release 6, Brad 2026-10-19).
+    .DESCRIPTION
+        Pointed at a proxy that is not running, VS Code reaches nothing - marketplace, Settings Sync,
+        Copilot. So Stop takes it out (`aicleaner copilot-off --keep-switch`: the Copilot switch stays
+        on) and the next start puts it back. Also run when nothing was listening, so a Stop after a
+        crash gives VS Code its connection back. Nothing to do unless the switch is on.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+    $configFile = Join-Path $script:AppFolder 'aicleaner-config.json'
+    if (-not (Test-Path -LiteralPath $configFile)) { return }
+    try { $config = Get-Content -LiteralPath $configFile -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return }
+    if (-not $config.PSObject.Properties['copilot'] -or -not $config.copilot.enabled) { return }
+    $venvPython = Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        Write-Warning "VS Code still points at aicleaner: the Python environment ($venvPython) is missing"
+        return
+    }
+    if (-not $PSCmdlet.ShouldProcess('VS Code settings', 'Take out the proxy setting while aicleaner is stopped')) { return }
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location -LiteralPath $script:AppFolder
+    try {
+        & $venvPython -m aicleaner copilot-off --keep-switch --config $configFile 2>&1 | ForEach-Object { Write-Host "    Copilot: $_" }
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $savedEap
+    }
+}
+
 Write-ContactAttribution
 
 if ($StopSessions) {
@@ -88,9 +121,9 @@ if ($StopSessions) {
 }
 
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $conn) { Write-Host "==> Nothing is listening on port $Port; aicleaner is not running" -ForegroundColor Green; exit 0 }
+if (-not $conn) { Write-Host "==> Nothing is listening on port $Port; aicleaner is not running" -ForegroundColor Green; Remove-CopilotProxy; exit 0 }
 $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
-if (-not $proc) { Write-Host "==> Port $Port is held by pid $($conn.OwningProcess), which is no longer running" -ForegroundColor Yellow; exit 0 }
+if (-not $proc) { Write-Host "==> Port $Port is held by pid $($conn.OwningProcess), which is no longer running" -ForegroundColor Yellow; Remove-CopilotProxy; exit 0 }
 if ($proc.ProcessName -notlike 'python*') {
     Write-Warning "Port $Port is held by $($proc.ProcessName) (pid $($proc.Id)), not aicleaner; not stopping it"
     exit 1
@@ -99,4 +132,5 @@ if ($PSCmdlet.ShouldProcess("pid $($proc.Id) ($($proc.ProcessName))", 'Stop aicl
     Stop-Process -Id $proc.Id -Force
     Start-Sleep -Milliseconds 800
     Write-Host "==> aicleaner stopped (was pid $($proc.Id))" -ForegroundColor Green
+    Remove-CopilotProxy
 }

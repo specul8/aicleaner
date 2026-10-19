@@ -612,6 +612,36 @@ def cmd_codetab_off(cfg: Config) -> int:
     return 0
 
 
+def cmd_copilot_off(cfg: Config, keep_switch: bool, remove_cert: bool) -> int:
+    """Copilot in VS Code put back (release 6, spec 2026-10-19-copilot-6-wiring.md): VS Code's proxy
+    setting taken out, so VS Code connects directly. Stop-AiCleaner keeps the switch on (`keep_switch`:
+    the next start points VS Code here again); Disable turns it off; Uninstall also takes the Copilot
+    certificate out of the person's Windows store (Windows asks them to confirm) and its files."""
+    from . import copilot_settings
+    from .codetab_ca import Authority
+
+    state = Path(cfg.state_dir) if cfg.state_dir else Path(cfg.mapping).parent / "state"
+    url = f"http://127.0.0.1:{cfg.codetab_port}"
+    try:
+        if cfg.copilot_enabled and not keep_switch:
+            cfg.update_settings({"copilot.enabled": False})
+        said = copilot_settings.apply(False, state, url)
+        if remove_cert:
+            authority = Authority(state, kind="copilot")
+            if authority.ca_path.exists():
+                thumb = copilot_settings.thumbprint(authority.ca_path)
+                store = copilot_settings.cert_store()
+                if store.has(thumb):
+                    store.remove(thumb)
+                    said = "; ".join(s for s in (said, "the Copilot certificate removed from your Windows certificates") if s)
+            authority.remove()
+    except (copilot_settings.SettingsError, ValueError, OSError) as exc:
+        print(f"Copilot: {exc}", file=sys.stderr)
+        return 1
+    print(said or "Copilot: VS Code was not pointed at aicleaner")
+    return 0
+
+
 def _covers(existing: str, pattern: str) -> bool:
     """True when a pattern already in the config covers this one."""
     import fnmatch
@@ -623,11 +653,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aicleaner")
     parser.add_argument("command", choices=["run", "check", "tokenise", "rehydrate", "scan", "preflight",
                                             "scan-tokens", "set-key", "seed", "split", "prune", "detail",
-                                            "mcp-audit", "unwire-claude", "codetab-off"])
+                                            "mcp-audit", "unwire-claude", "codetab-off", "copilot-off"])
     parser.add_argument("path", nargs="?", default=".",
                         help="scan / preflight / scan-tokens: folder; set-key: dialect; seed and prune: client id")
     parser.add_argument("--index", type=int, default=None, help="seed: numeric client index (default: digits in the id)")
     parser.add_argument("--stdin", action="store_true", help="set-key: read the key from stdin")
+    parser.add_argument("--keep-switch", action="store_true",
+                        help="copilot-off: leave copilot.enabled on (Stop-AiCleaner; the next start points VS Code here)")
+    parser.add_argument("--remove-cert", action="store_true",
+                        help="copilot-off: also remove the Copilot certificate from your Windows store (uninstall)")
     parser.add_argument("--apply", action="store_true",
                         help="prune: actually remove what the dry run listed")
     parser.add_argument("--config", default=_default_config(), help="path to aicleaner-config.json")
@@ -695,6 +729,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_unwire_claude(cfg)
     if args.command == "codetab-off":
         return cmd_codetab_off(cfg)
+    if args.command == "copilot-off":
+        return cmd_copilot_off(cfg, args.keep_switch, args.remove_cert)
 
     from .proxy import run
 

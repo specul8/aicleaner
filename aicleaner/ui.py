@@ -131,6 +131,7 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # much as the desk. Same standing as placeholder_kinds, which it narrows.
                    "detect.quiet_kinds",
                    "detect.owner_add_kinds",
+                   "detect.ignore_add_kinds",
                    "scan.generated_markers", "session.projects", "folders.roots",
                    # Every mode, bypassPermissions included (decided 2026-09-28). It is the one
                    # setting whose absence was felt hardest from the phone: the default is the
@@ -145,7 +146,13 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "editor.preview_dblclick",
                    # Prompt autocorrect (feature 94): a typing aid.
                    "prompt.autocorrect", "prompt.autocorrect_skip", "prompt.autocorrect_words",
-                   "prompt.autocorrect_replace")
+                   "prompt.autocorrect_replace",
+                   # Copilot in VS Code (Brad, 2026-10-19): on or off from anywhere; only adding its
+                   # certificate needs someone at the machine, so remotely it waits for that.
+                   "copilot.enabled",
+                   # Where this browser keeps the tunnel key (H2, Brad 2026-10-19): "more about the
+                   # storage than the code itself, is protected either way".
+                   "remote.key_storage")
 LOCAL_ONLY_SETTINGS = tuple(k for k in Config.EDITABLE if k not in REMOTE_SETTINGS)
 from .mapping import (GLOBAL_ID, SOURCE_MANUAL, SOURCE_REVIEW, MappingError)
 from . import bashguard, rules
@@ -204,6 +211,26 @@ def feature_request_url(title: str = "") -> str:
         pass
     repo = re.sub(r"\.git$", "", repo).rstrip("/")
     return f"{repo}/issues/new" + (f"?title={urllib.parse.quote(title)}" if title else "")
+
+
+COPILOT_QUIET_S = 24 * 3600   # nothing from Copilot this long, with it on: the Overview warns
+
+
+def _copilot_status(proxy) -> dict:
+    """Copilot in VS Code for the Overview (release 6): on or not, what is waiting, how many VS Code
+    settings files point here, and whether its traffic has gone quiet (GitHub can change hosts)."""
+    if proxy is None or not proxy.cfg.copilot_enabled:
+        return {"enabled": False}
+    try:
+        info = proxy.copilot_summary()
+    except Exception as exc:  # noqa: BLE001 - the status poll never fails on it
+        return {"enabled": True, "error": str(exc)}
+    vscode = info.get("vscode") or {}
+    heard = max(info.get("last_at") or 0.0, info.get("since") or 0.0)
+    quiet = bool(heard) and not info.get("waiting") and time.time() - heard > COPILOT_QUIET_S
+    return {"enabled": True, "waiting": info.get("waiting", ""), "error": info.get("error", ""),
+            "vscode_found": bool(vscode.get("vscode_found")), "pointed": int(vscode.get("pointed") or 0),
+            "last_at": info.get("last_at") or 0.0, "quiet": quiet}
 
 
 def _health_state(cfg) -> dict | None:
@@ -816,7 +843,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             elif action == "retitle":
                 answer = await asyncio.to_thread(host.retitle_conversation, name, conv_id)
             else:
-                answer = {"started": await asyncio.to_thread(host.suggest_titles, name, bool(body.get("all"))),
+                ids = body.get("ids")              # the dialog's ticks (E3); absent, the untitled listed
+                ids = [str(i) for i in ids][:5000] if isinstance(ids, list) else None
+                answer = {"started": await asyncio.to_thread(host.suggest_titles, name, bool(body.get("all")), ids),
                           "progress": host.title_queue().progress()}
         except SessionError as problem:
             return err(problem, status=409)
@@ -1691,7 +1720,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             state = await session_host().start(name=str(body.get("name", "")),
                                                project=str(body.get("project", "")),
                                                resume=str(body.get("resume", "")),
-                                               model=str(body.get("model", "")))
+                                               model=str(body.get("model", "")),
+                                               title=str(body.get("title", ""))[:200])
         except SessionError as exc:
             return err(exc)
         return web.json_response(state)
@@ -1702,7 +1732,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         body = await request.json()
         try:
             # "queued": a turn is running, so it waits on the page until that turn ends (D176).
-            outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")))
+            from .origin import page_note
+            # Where it was typed, said to Claude (the user, 2026-10-18): remote access or this machine.
+            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""))
+            outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")), origin=note)
         except SessionError as exc:
             return err(exc)
         return web.json_response({"ok": True, "outcome": outcome})
@@ -1747,7 +1780,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                 "account before you continue:" if len(taken) == 1 else
                 "The user sent these messages while you were working - read them now and take them "
                 "into account before you continue:")
-        return web.json_response({"ok": True, "text": "\n\n".join([lead, *taken])})
+        find = getattr(session, "origin_of", None)
+        origin = find(str(body.get("session_id", ""))) if find else ""
+        return web.json_response({"ok": True, "text": "\n\n".join([lead, *taken, *([origin] if origin else [])])})
 
     async def tool_check(request: web.Request) -> web.Response:
         """Asked by the PreToolUse hook before every tool call, with its id: a call in which two
@@ -2578,6 +2613,12 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                                   "windows": bashguard.applies(),
                                   "config_path": str(proxy.cfg.path or ""), "contact_file": contact.get().source, "clients": [c["id"] for c in mf.load_tolerant(record=False)[0].data["clients"]]})
 
+    async def copilot_get(request: web.Request) -> web.Response:
+        """The Copilot card (release 6): the switch's state, the certificate, VS Code's files, traffic."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        return web.json_response(await asyncio.to_thread(proxy.copilot_summary))
+
     async def codetab_get(request: web.Request) -> web.Response:
         """The Code tab card (feature 117): what is in place, and whether this Claude Code's PowerShell
         tool can be kept off the proxy (2.1.296 and later)."""
@@ -2661,10 +2702,14 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                     said = f"the setting was saved, but {exc}"
                     log.warning("bash guard not updated: %s", exc)
                 rules_said = " ".join(s for s in (rules_said, said) if s)
-            # The Code tab switch (feature 117): listeners and Claude Code's settings, this machine only.
-            if ("codetab.enabled" in changes or "codetab.port" in changes) and not request.get(REMOTE):
+            # The Code tab switch (feature 117), this machine only, and Copilot's (2026-10-18): the forward
+            # proxy's readers, Claude Code's settings and VS Code's. Copilot's acts remotely too; its
+            # certificate is only added from here (trust), where Windows can ask the person.
+            switches = ("codetab.enabled", "codetab.port")
+            remote = bool(request.get(REMOTE))
+            if (any(key in changes for key in switches) and not remote) or "copilot.enabled" in changes:
                 try:
-                    said = await proxy.apply_codetab()
+                    said = await proxy.apply_codetab(trust=not remote)
                 except Exception as exc:  # noqa: BLE001 - saved; the reason is the answer
                     said = f"the setting was saved, but {exc}"
                     log.warning("Code tab not applied: %s", exc)
@@ -2795,13 +2840,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         return web.json_response(await proxy.update_info(force=request.query.get("check") == "1"))
 
     async def updates_apply(request: web.Request) -> web.Response:
-        """Update now: the installed Deploy-AiCleaner.ps1 -Action Update, handed off. On this machine
-        only - it runs the installer, as the setup wizard does (guard.REMOTE_REFUSED_PREFIXES)."""
+        """Update now: the installed Deploy-AiCleaner.ps1 -Action Update, handed off. From anywhere since
+        H2 (Brad, 2026-10-19): it is Update automatically on demand - no new risk of leakage, no prompt
+        on the machine."""
         if proxy is None:
             return err(ValueError("unavailable"))
-        if request.get(REMOTE):
-            return err(ValueError("Update now runs the installer, so it is offered on the machine aicleaner "
-                                  "runs on; through the tunnel, turn on Update automatically instead"), status=403)
         from .restart import RestartError
         try:
             log_path = proxy.start_update()
@@ -2839,6 +2882,65 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(ValueError("Enable-AiCleaner.ps1 did not finish within three minutes"), status=504)
         text = out.decode("utf-8", errors="replace")
         return web.json_response({"ok": child.returncode == 0, "output": text[-6000:]})
+
+    async def setup_disable(request: web.Request) -> web.Response:
+        """One tool's routing taken off (item H): Disable-AiCleaner.ps1 -Only, so the AI tools card's
+        switch never touches another tool. Under /api/setup, so it reaches as far as enabling does."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        body = await json_or_empty(request)
+        only = str(body.get("only") or "")
+        if only not in ("ClaudeCode", "CodeTab", "Copilot"):
+            return err(ValueError("only must be ClaudeCode, CodeTab or Copilot"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Disable-AiCleaner.ps1"
+        from .restart import powershell
+        child = await asyncio.create_subprocess_exec(
+            powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Only", only,
+            "-LogPath", "", cwd=str(root), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(child.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            child.kill()
+            return err(ValueError("Disable-AiCleaner.ps1 did not finish within two minutes"), status=504)
+        return web.json_response({"ok": child.returncode == 0, "output": out.decode("utf-8", errors="replace")[-6000:]})
+
+    # ---- the AI tools (item H, 2026-10-19; aitools.py) ------------------------------------------
+    # Read and signed in to from anywhere (spec decision 4): sign-in prompts nothing on this machine.
+
+    from . import aitools
+    claude_login = aitools.ClaudeLogin()
+
+    async def json_or_empty(request: web.Request) -> dict:
+        # Not `can_read_body`: a middleware has already read the body to log the action, which makes
+        # it False although request.json() still returns the cached body (the code arrived empty).
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    async def aitools_get(request: web.Request) -> web.Response:
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        copilot = await asyncio.to_thread(proxy.copilot_summary)
+        tools = await aitools.rows(proxy.cfg, copilot)
+        return web.json_response({"tools": tools, "login": claude_login.view(), "remote": bool(request.get(REMOTE))})
+
+    async def aitools_login(request: web.Request) -> web.Response:
+        """Claude Code's sign-in: start it (POST), or read where it is (GET)."""
+        if request.method == "GET":
+            return web.json_response(claude_login.view())
+        body = await json_or_empty(request)
+        return web.json_response(await claude_login.start(console=bool(body.get("console"))))
+
+    async def aitools_login_code(request: web.Request) -> web.Response:
+        body = await json_or_empty(request)
+        return web.json_response(await claude_login.submit(str(body.get("code") or "")))
+
+    async def aitools_login_cancel(request: web.Request) -> web.Response:
+        return web.json_response(await claude_login.cancel())
 
     async def setup_remote(request: web.Request) -> web.Response:
         """Remote access from the wizard: Enable-RemoteControl.ps1's API route, unattended. Detached,
@@ -3078,6 +3180,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # What each client is pointed at, and when this proxy started - so the page can say
             # whether filtering is happening, and whether a Restart actually took (feature 60).
             "routing": routing,
+            # Copilot in VS Code (release 6): the Overview's coverage line and its "stopped arriving".
+            "copilot": _copilot_status(proxy),
             "started_at": getattr(proxy, "started_at", 0.0) if proxy is not None else 0.0,
             "requests_seen": seen,
             "activity": activity(),
@@ -3430,6 +3534,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/scan", scan_start)
     app.router.add_get("/api/config", config_get)
     app.router.add_get("/api/codetab", codetab_get)
+    app.router.add_get("/api/copilot", copilot_get)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
     app.router.add_get("/api/feedback/state", feedback_get_state)
@@ -3443,6 +3548,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/updates/apply", updates_apply)
     app.router.add_get("/api/setup/dns", setup_dns)
     app.router.add_post("/api/setup/enable", setup_enable)
+    app.router.add_post("/api/setup/disable", setup_disable)
+    app.router.add_get("/api/aitools", aitools_get)
+    app.router.add_route("*", "/api/aitools/claude-code/login", aitools_login)
+    app.router.add_post("/api/aitools/claude-code/login/code", aitools_login_code)
+    app.router.add_post("/api/aitools/claude-code/login/cancel", aitools_login_cancel)
     app.router.add_get("/api/client-drafts", draft_list)
     app.router.add_post("/api/client-drafts", draft_save)
     app.router.add_get("/api/client-drafts/{did}", draft_get)

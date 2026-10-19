@@ -121,8 +121,10 @@ def _text_of(message: Any) -> str:
         return content
     if not isinstance(content, list):
         return ""
+    from .origin import is_note
+    # aicleaner's note on where a prompt was typed (origin.py) is not part of what was typed.
     return " ".join(block.get("text", "") for block in content
-                    if isinstance(block, dict) and block.get("type") == "text")
+                    if isinstance(block, dict) and block.get("type") == "text" and not is_note(block.get("text", "")))
 
 
 def _describe(path: Path) -> tuple[str, str, str]:
@@ -426,4 +428,14 @@ def _event_of(line: str) -> dict[str, Any] | None:
         text = SPACES.sub(" ", _text_of(record.get("message"))).strip()
         if text and not text.startswith(SKIP_PREFIXES):
             return {"type": "prompt", "text": text, **stamp}
+    if kind == "system" and record.get("subtype") == "compact_boundary":
+        # Where the conversation was compacted (E5.1): the transcript writes its numbers in camelCase,
+        # the stream in snake_case - replayed in the stream's shape, so the page reads one form.
+        meta = record.get("compactMetadata") or record.get("compact_metadata") or {}
+        if isinstance(meta, str):
+            meta = {}
+        names = {"preTokens": "pre_tokens", "postTokens": "post_tokens", "durationMs": "duration_ms", "trigger": "trigger"}
+        return {"type": "system", "subtype": "compact_boundary",
+                "compact_metadata": {snake: meta.get(camel, meta.get(snake)) for camel, snake in names.items()},
+                **stamp}
     return None
