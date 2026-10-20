@@ -1,32 +1,55 @@
-// Move a conversation to another project session (J3; Brad, 2026-10-20). The dialog names the conversation,
-// lists the other project sessions, and offers - unticked - to MOVE the files it made there too, listing
-// them first. Files a command made cannot be told apart from the rest, so they stay (said).
+// Move a conversation to another project session (J3; Brad, 2026-10-20). The dialog lists every conversation
+// of this session (not just the newest 25) and every other session as a destination, one per line, and
+// offers - unticked - to MOVE the files the chosen conversation made there too, listing them first. Files a
+// command made cannot be told apart from the rest, so they stay (said).
 
 import { getJSON, postJSON, say, sayError } from './api.js';
-import { h } from './dom.js';
+import { h, setChildren } from './dom.js';
 import { arrangeSheet } from './sheet.js';
 
-// name: the project session it is in; row: the conversation (id, label/title); onMoved: after a move.
-export async function openMoveConversation(name, row, onMoved) {
-  let info;
+function label(row) {
+  return row.label || row.title || row.id;
+}
+
+// name: the project session it is in; chosenId: the conversation to start on; onMoved: after a move.
+export async function openMoveConversation(name, chosenId, onMoved) {
+  let rows;
+  let targets;
   try {
-    info = await getJSON(`/api/session/conversations/move?name=${encodeURIComponent(name)}&id=${encodeURIComponent(row.id)}`);
+    const past = await getJSON(`/api/session/past?name=${encodeURIComponent(name)}&limit=5000`);
+    rows = (past.projects || []).filter((group) => !group.outside).flatMap((group) => group.sessions || []);
+    rows.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+    if (!rows.length) { say('No conversations in this project session to move.', 'warn'); return; }
+    const first = rows.find((r) => r.id === chosenId) || rows[0];
+    targets = (await getJSON(`/api/session/conversations/move?name=${encodeURIComponent(name)}&id=${encodeURIComponent(first.id)}`)).targets;
+    chosenId = first.id;
   } catch (error) { sayError(error); return; }
-  if (!info.targets.length) { say('There is no other project session to move it to.', 'warn'); return; }
-  const choices = info.targets.map((t, i) => h('label', { class: 'check move-target' },
-    h('input', { type: 'radio', name: 'move-to', value: t.name, checked: i === 0 ? true : null }),
-    ` ${t.name}`, t.client ? h('span', { class: 'muted' }, ` - ${t.client}`) : null,
-    t.home ? h('span', { class: 'muted mono move-home' }, `  ${t.home}`) : null));
+  if (!targets.length) { say('There is no other project session to move it to.', 'warn'); return; }
+
+  const conversation = h('select', { name: 'move-conversation', 'aria-label': 'Conversation to move' },
+    ...rows.map((row) => h('option', { value: row.id, selected: row.id === chosenId ? true : null }, label(row))));
+  const destinations = h('div', { class: 'move-targets', role: 'radiogroup', 'aria-label': 'Move it to' },
+    ...targets.map((t, i) => h('label', { class: 'check move-target' },
+      h('input', { type: 'radio', name: 'move-to', value: t.name, checked: i === 0 ? true : null }),
+      ` ${t.name}`, t.client ? h('span', { class: 'muted' }, ` - ${t.client}`) : null)));
   const files = h('input', { type: 'checkbox', name: 'move-files' });
-  const fileList = info.files.length
-    ? h('ul', { class: 'move-files-list mono' }, ...info.files.map((f) => h('li', {}, f)))
-    : h('p', { class: 'hint' }, 'It has not written any files that are still here.');
+  const fileList = h('div', { class: 'move-files-list' });
+  const showFiles = async () => {
+    setChildren(fileList, h('p', { class: 'hint' }, 'Looking for the files it made...'));
+    try {
+      const info = await getJSON(`/api/session/conversations/move?name=${encodeURIComponent(name)}&id=${encodeURIComponent(conversation.value)}`);
+      setChildren(fileList, info.files.length
+        ? h('ul', { class: 'mono' }, ...info.files.map((f) => h('li', {}, f)))
+        : h('p', { class: 'hint' }, 'It has not written any files that are still here.'));
+    } catch (error) { setChildren(fileList, h('p', { class: 'hint bad' }, error.message || String(error))); }
+  };
+  conversation.addEventListener('change', showFiles);
   const go = h('button', { type: 'button', class: 'move-go' }, 'Move');
   const cancel = h('button', { type: 'button' }, 'Cancel');
-  const dialog = h('dialog', { id: 'move-conversation', class: 'sheet move-dialog', 'aria-label': 'Move a conversation' },
-    h('h2', {}, 'Move this conversation'),
-    h('p', {}, h('b', {}, row.label || row.title || row.id), ` - from ${name} to:`),
-    h('div', { class: 'move-targets' }, ...choices),
+  const dialog = h('dialog', { id: 'move-conversation', class: 'sheet move-dialog', 'aria-label': 'Move conversation' },
+    h('h2', {}, 'Move conversation'),
+    h('label', { class: 'field' }, `Conversation in ${name}`, conversation),
+    h('div', { class: 'field' }, h('span', {}, 'Move it to'), destinations),
     h('p', { class: 'hint' }, 'It is filed under the chosen session\'s home folder and continues there, with that session\'s '
       + 'folders, client filter and brief. Its title goes with it.'),
     h('label', { class: 'check' }, files, ' Also move the files it made (moved, not copied)'),
@@ -42,7 +65,7 @@ export async function openMoveConversation(name, row, onMoved) {
     if (!to) return;
     go.disabled = true;
     try {
-      const done = await postJSON('/api/session/conversations/move', { name, id: row.id, to, files: files.checked });
+      const done = await postJSON('/api/session/conversations/move', { name, id: conversation.value, to, files: files.checked });
       close();
       const moved = done.files_moved.length ? ` ${done.files_moved.length} file(s) moved with it.` : '';
       const left = done.files_left.length ? ` ${done.files_left.length} left where they were (the name was taken): ${done.files_left.join(', ')}` : '';
@@ -53,4 +76,5 @@ export async function openMoveConversation(name, row, onMoved) {
   document.body.append(dialog);
   arrangeSheet(dialog, { dirty: () => false });
   dialog.showModal();
+  showFiles();
 }

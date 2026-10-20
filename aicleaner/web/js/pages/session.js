@@ -2983,13 +2983,12 @@ export async function render(main, context = {}) {
     title: 'Choose conversations for the model to title: every conversation listed, the unnamed ones ticked to start with' }, 'Suggest titles');
   // Move to another project session (J3, Brad 2026-10-20): from Casual chats to a client, mostly.
   const moveButton = h('button', { type: 'button', id: 'session-move-conversation', class: 'conv-action',
-    title: 'Move the chosen conversation to another project session - from Casual chats to a client, say' }, 'Move to...');
+    title: 'Move a conversation to another project session - from Casual chats to a client, say' }, 'Move conversation');
   const chosenRow = () => (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id === resume.value);
   moveButton.addEventListener('click', async (event) => {
     event.preventDefault();
-    const row = chosenRow();
-    if (!row) { say('Choose a conversation in Continue first.', 'warn'); return; }
-    await openMoveConversation(view.name, row, async () => { await loadPast({ quiet: true }); paint(); });
+    const row = chosenRow();                       // the dialog starts on it, and lists every other one
+    await openMoveConversation(view.name, row ? row.id : '', async () => { await loadPast({ quiet: true }); paint(); });
   });
   renameButton.addEventListener('click', async (event) => {
     event.preventDefault();

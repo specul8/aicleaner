@@ -1568,3 +1568,6 @@ input[type="checkbox"].row-tick { width: 26px; height: 26px; margin: 0 .35rem 0 
 .aitools-row .chip { margin: 0; }
 .aitools-row .hint { margin: 2px 0; }
 .aitools-login input[name="login-code"] { min-width: 0; flex: 1 1 10em; }
+
+/* Move conversation (J3): each destination on its own line (Brad, 2026-10-20). */
+.move-targets .move-target { display: block; margin: 4px 0; }

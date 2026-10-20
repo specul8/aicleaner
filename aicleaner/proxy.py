@@ -861,18 +861,23 @@ class Proxy:
 
     async def openai_handle(self, request: web.Request) -> web.StreamResponse:
         """What the OpenAI reader serves (item K3): Codex's Responses conversation - over its WebSocket or
-        HTTP - filtered as Copilot's is; every other path on chatgpt.com / api.openai.com forwarded untouched."""
+        HTTP - filtered as Copilot's is. Fail closed (security review of v0.9.290): every request that
+        carries a body, whatever its path, goes through the full filter - the conversation's own sub-paths
+        (compacting, /responses/compact) included, as anything Codex sends could hold the person's text; a
+        body that cannot be read as JSON is refused rather than sent. Only a request with no body - model
+        lists, account checks - goes on untouched."""
         forwarder = self.openai_forwarder()
         self.openai_last_at = time.time()
-        if request.path in OPENAI_READ:
-            if request.method == "GET" and request.headers.get("Upgrade", "").lower() == "websocket":
-                return await self.copilot_socket(request, forwarder=forwarder, app="ChatGPT (Codex)")
-            if request.method == "POST":
-                host = request.host.split(":")[0].lower()
-                request[COPILOT] = forwarder.upstream or f"https://{host}"
-                request[COPILOT_AS] = "openai_responses"
-                request[AGENT_APP] = "ChatGPT (Codex)"
-                return await self.handle(request)
+        path = "/" + "/".join(part for part in request.path.split("/") if part)
+        conversation = any(path == read or path.startswith(read + "/") for read in OPENAI_READ)
+        if conversation and request.method == "GET" and request.headers.get("Upgrade", "").lower() == "websocket":
+            return await self.copilot_socket(request, forwarder=forwarder, app="ChatGPT (Codex)")
+        if request.can_read_body or request.method in ("POST", "PUT", "PATCH"):
+            host = request.host.split(":")[0].lower()
+            request[COPILOT] = forwarder.upstream or f"https://{host}"
+            request[COPILOT_AS] = "openai_responses" if conversation else "openai"
+            request[AGENT_APP] = "ChatGPT (Codex)"
+            return await self.handle(request)
         return await forwarder.handle(request)
 
     async def copilot_telemetry(self, request: web.Request) -> web.StreamResponse:

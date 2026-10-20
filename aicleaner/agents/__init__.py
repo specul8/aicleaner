@@ -67,5 +67,12 @@ def command_for(which: Agent) -> list[str]:
 
 
 def protocol_args(which: Agent) -> list[str]:
-    """The flags that make the CLI speak its protocol on stdio."""
-    return {"copilot": ["--acp"], "codex": ["app-server"]}.get(which.id, [])
+    """The flags that make the CLI speak its protocol on stdio. Codex is held to OpenAI's own provider
+    (security review of v0.9.290): a custom provider or base URL in its config would send the
+    conversation somewhere aicleaner does not read."""
+    return {"copilot": ["--acp"],
+            "codex": ["app-server", "-c", 'model_provider="openai"']}.get(which.id, [])
+
+
+# Environment that would point an agent somewhere aicleaner does not read: taken out of its process.
+UNREAD_ENV = {"codex": ("OPENAI_BASE_URL", "OPENAI_API_BASE", "CODEX_BASE_URL")}

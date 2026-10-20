@@ -108,8 +108,11 @@ class AcpBridge:
         self.args = args
         self.cwd = os.getcwd()
         self.url, self.token = approval_of(args.mcp_config)
+        from . import UNREAD_ENV
+        # Nothing that points the agent past aicleaner's reader reaches it (security review of v0.9.290).
+        env = {k: v for k, v in os.environ.items() if k not in UNREAD_ENV.get(args.agent, ())}
         self.proc = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr,
-                                     cwd=self.cwd, bufsize=0)
+                                     cwd=self.cwd, bufsize=0, env=env)
         self.next_id = 0
         self.pending: dict[int, dict[str, Any]] = {}
         self.ready: dict[int, threading.Event] = {}
