@@ -1808,9 +1808,12 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if proxy is None:
             return err(ValueError("unavailable"))
         entries, _problem = proxy.profile_store.load()
-        return web.json_response({"folder": proxy.cfg.session_casual_folder,
+        roots = list(proxy.cfg.folder_roots)
+        # Only what lies inside the root folders is offered: they are what aicleaner may reach (Brad, 2026-10-20).
+        offered = [s for s in await asyncio.to_thread(casual.suggestions) if casual.inside(Path(s["path"]), roots)]
+        return web.json_response({"folder": proxy.cfg.session_casual_folder, "has_roots": bool(roots),
                                   "profile": casual.PROFILE if any(e["name"] == casual.PROFILE for e in entries) else "",
-                                  "suggestions": await asyncio.to_thread(casual.suggestions)})
+                                  "suggestions": offered})
 
     async def casual_post(request: web.Request) -> web.Response:
         from .casual import CasualError

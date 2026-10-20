@@ -1397,16 +1397,20 @@ class Proxy:
         self.session.agents_dir = self._state_path()
 
     def set_casual_folder(self, folder: str) -> dict[str, Any]:
-        """The casual-chats folder chosen (item J): created if missing, added to the allowed folders
-        when outside them, saved as session.casual_folder, and the Casual chats project session made
-        (or pointed at it) - so Chat now has somewhere to go. Raises CasualError with the reason."""
+        """The casual-chats folder chosen (item J): inside the root folders - the source of truth for what
+        aicleaner may read or write (Brad, 2026-10-20) - created there if missing, saved as
+        session.casual_folder, and the Casual chats project session made (or pointed at it), so Chat now
+        has somewhere to go. A folder outside the roots is refused, never added to them; CasualError says why."""
         from . import casual
 
+        if not self.cfg.folder_roots:
+            raise casual.CasualError("no root folders are set yet - add one under Settings, "
+                                     "\"Folders the pages may reach\", then choose a folder inside it")
+        if not casual.inside(Path(folder.strip().strip('"')), list(self.cfg.folder_roots)):
+            raise casual.CasualError(f"{folder} is not inside a root folder - choose one inside them, or add its "
+                                     "location under Settings, \"Folders the pages may reach\"")
         path = casual.prepare(folder)
-        changes: dict[str, Any] = {"session.casual_folder": str(path)}
-        if not casual.inside(path, list(self.cfg.folder_roots)):
-            changes["folders.roots"] = [*self.cfg.folder_roots, str(path)]
-        self.cfg.update_settings(changes)
+        self.cfg.update_settings({"session.casual_folder": str(path)})
         entries, _problem = self.profile_store.load()
         mine = next((e for e in entries if e["name"] == casual.PROFILE), None)
         if mine is None:

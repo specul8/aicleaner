@@ -5,25 +5,39 @@
 // the setup wizard's "Casual chats" step and the Settings card's field.
 
 import { getJSON, postJSON, say, sayError } from './api.js';
-import { h } from './dom.js';
+import { h, setChildren } from './dom.js';
+import { folderPicker, folderRoots, noFoldersYet } from './picker.js';
 import { arrangeSheet } from './sheet.js';
 
 // A folder field with the drives this machine has offered as one-click choices. onSaved(answer) runs
 // once the folder is set up (created, allowed, Casual chats made).
+// The folder is chosen by browsing the root folders - the only places aicleaner may read or write (Brad,
+// 2026-10-20) - with New folder to make one there; with no root folders yet, a link to the setting instead.
 export function casualFolderField(onSaved, saveLabel = 'Save the folder') {
-  const input = h('input', { type: 'text', name: 'casual-folder', class: 'wide', autocomplete: 'off',
-    placeholder: 'e.g. C:\\Users\\you\\OneDrive\\AI Chats', 'aria-label': 'Folder for casual chats' });
+  const input = h('input', { type: 'text', name: 'casual-folder', class: 'wide', autocomplete: 'off', readonly: true,
+    placeholder: 'Browse to a folder inside your root folders', 'aria-label': 'Folder for casual chats' });
+  const browse = folderPicker(input, { label: 'Browse', title: 'A folder for casual chats', firstRoot: true,
+    chooseLabel: 'Use this folder' });
   const offers = h('div', { class: 'form-row casual-offers' });
   const note = h('p', { class: 'hint casual-note' });
+  const noRoots = h('div', { class: 'casual-no-roots', hidden: true });
   const save = h('button', { type: 'button', class: 'casual-save' }, saveLabel);
-  getJSON('/api/session/casual').then((info) => {
+  const row = h('div', { class: 'form-row' }, input, browse, save);
+  getJSON('/api/session/casual').then(async (info) => {
+    if (!info.has_roots) {
+      const roots = await folderRoots(true);
+      setChildren(noRoots, noFoldersYet(Boolean(roots.editable)));
+      noRoots.hidden = false;
+      row.hidden = true;
+      return;
+    }
     if (info.folder) {
       input.value = info.folder;
       note.textContent = `Casual chats keeps its files in ${info.folder}.`;
     }
     offers.replaceChildren(...(info.suggestions || []).map((s) => {
       const pick = h('button', { type: 'button', class: 'casual-offer', title: s.path }, s.label);
-      pick.addEventListener('click', () => { input.value = s.path; input.focus(); });
+      pick.addEventListener('click', () => { input.value = s.path; });
       return pick;
     }));
   }).catch(() => {});
@@ -40,7 +54,7 @@ export function casualFolderField(onSaved, saveLabel = 'Save the folder') {
       save.disabled = false;
     }
   });
-  return { element: h('div', { class: 'casual-field' }, offers, h('div', { class: 'form-row' }, input, save), note), input };
+  return { element: h('div', { class: 'casual-field' }, noRoots, offers, row, note), input };
 }
 
 function askForFolder() {

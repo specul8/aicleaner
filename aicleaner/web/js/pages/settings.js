@@ -228,14 +228,22 @@ function danger(section, active, saying) {
   return section;
 }
 
+function viewLogButton() {
+  const button = h('button', { type: 'button', class: 'view-log' }, 'View log');
+  button.addEventListener('click', () => { window.location.hash = '#/log'; });
+  return button;
+}
+
 function loggingCard(s) {
   const detail = checkbox('detail', 'Write the substitution log', s['logs.detail']);
   const every = checkbox('detail-every', 'Log every value on every request (diagnosis)', s['logs.detail_every_request']);
   const retention = h('input', { type: 'number', name: 'retention', min: '0', value: String(s['logs.detail_retention_days']) });
   return card('logging', 'Logging',
     'The substitution log records what was replaced and by what, whose it is, what was done, and who was driving - real names, kept on this machine, read on the Log page. A value is logged the first time a session sends it and again when what happens to it changes. The evidence log (counts only) is always written.',
-    [h('div', { class: 'form-row' }, detail, every), h('div', { class: 'form-row' },
-      h('label', { class: 'field' }, 'Keep substitution log files for (days; 0 keeps them forever)', retention))],
+    // The Log page is opened from here since it left the menu (Brad, 2026-10-20).
+    [h('div', { class: 'form-row' }, viewLogButton()),
+      h('div', { class: 'form-row' }, detail, every), h('div', { class: 'form-row' },
+        h('label', { class: 'field' }, 'Keep substitution log files for (days; 0 keeps them forever)', retention))],
     () => ({ 'logs.detail': detail.querySelector('input').checked,
       'logs.detail_every_request': every.querySelector('input').checked,
       'logs.detail_retention_days': Number(retention.value) }));
