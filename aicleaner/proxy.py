@@ -870,7 +870,9 @@ class Proxy:
         self.openai_last_at = time.time()
         path = "/" + "/".join(part for part in request.path.split("/") if part)
         conversation = any(path == read or path.startswith(read + "/") for read in OPENAI_READ)
-        if conversation and request.method == "GET" and request.headers.get("Upgrade", "").lower() == "websocket":
+        # Every WebSocket on these hosts is read frame by frame, whatever its path (security review of
+        # v0.9.291): one passed through unread would be a way round the filter.
+        if request.headers.get("Upgrade", "").lower() == "websocket":
             return await self.copilot_socket(request, forwarder=forwarder, app="ChatGPT (Codex)")
         if request.can_read_body or request.method in ("POST", "PUT", "PATCH"):
             host = request.host.split(":")[0].lower()
