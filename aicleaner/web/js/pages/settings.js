@@ -10,6 +10,7 @@ import { forgetKey, isSealed } from '../sealed.js';
 import { forgetPreviewChoice } from '../previewjump.js';
 import { openFeedback } from '../feedback.js';
 import { aiToolsTable } from '../aitools.js';
+import { casualFolderField } from '../chatnow.js';
 
 const view = { main: null, ctx: null, config: null, host: null, cards: [], watching: false };
 
@@ -40,6 +41,19 @@ function showCard(name) {
   const section = view.host.querySelector(`section[data-card="${CSS.escape(name)}"]`);
   if (!section) return;
   section.scrollIntoView({ block: 'center' });
+  // Cards above it fill in as their data arrives (the AI tools list, the casual-chats folders) and push
+  // it down after the scroll: kept in view while the page settles, unless the reader scrolls first.
+  let moved = false;
+  const reader = () => { moved = true; };
+  window.addEventListener('wheel', reader, { once: true, passive: true });
+  window.addEventListener('touchmove', reader, { once: true, passive: true });
+  const settle = new ResizeObserver(() => { if (!moved) section.scrollIntoView({ block: 'center' }); });
+  settle.observe(view.host);
+  setTimeout(() => {
+    settle.disconnect();
+    window.removeEventListener('wheel', reader);
+    window.removeEventListener('touchmove', reader);
+  }, 3000);
   section.classList.add('found');
   // Long enough to catch the eye on a page you have just landed on, then gone: a highlight that
   // stays becomes part of the furniture and stops meaning anything.
@@ -82,7 +96,7 @@ function paintCards() {
     menuLayoutCard(),
     aiToolsCard(),                                 // item H: sign-in works remotely; routing stays local
     loggingCard(s), notificationsCard(s, Boolean(view.config.remote)), kindsCard(s, kinds),
-    nearMissCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
+    nearMissCard(s), ocrCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
     view.config.windows ? bashGuardCard(s) : null,
     view.config.windows ? codeTabCard(s) : null,   // remotely: shown, locked by its keys (E4)
     view.config.windows ? copilotCard(s) : null,   // remotely too; its certificate waits for the machine
@@ -467,12 +481,22 @@ function sessionCard(s) {
   // Titles when a session stops (item E, 2026-10-16): on by default; one short request to a small model.
   const titles = checkbox('auto-titles', 'Write a title for a conversation when its session stops (a short request to a small model, filtered as usual)',
     s['session.auto_titles'] !== false);
+  // The casual-chats folder (item J): asked for here when Project Sessions is on and none is chosen.
+  const casual = casualFolderField(null);
+  const casualAsk = h('p', { class: 'hint casual-ask', hidden: true },
+    'Choose a folder for casual chats - chats that belong to no client or project, started with Chat now in the menu.');
+  const askIfNeeded = () => {
+    casualAsk.hidden = !(on.querySelector('input').checked && !s['session.casual_folder'] && !casual.input.value.trim());
+  };
+  on.querySelector('input').addEventListener('change', askIfNeeded);
+  setTimeout(askIfNeeded, 0);
   return card('session', 'Session page',
     'On: the Session page can start Claude Code on this machine in your profiles\' folders, with every request filtered and every action waiting for your approval. Through the tunnel it works from your phone. Off: the page and its API refuse, and switching it off stops any session that is running. Takes effect straight away.',
     [h('div', { class: 'form-row' }, on),
       h('div', { class: 'form-row' }, h('label', { class: 'field' },
         'Sessions running at once (0 = no cap; the machine is the limit). Lowering it stops nothing - it only refuses new starts until enough have stopped.', most)),
-      h('div', { class: 'form-row' }, titles)],
+      h('div', { class: 'form-row' }, titles),
+      h('h3', {}, 'Casual chats'), casualAsk, casual.element],
     () => ({ 'session.enabled': on.querySelector('input').checked,
       'session.auto_titles': titles.querySelector('input').checked,
       // A cleared box is the default, never "no cap" by accident.
@@ -623,6 +647,23 @@ function copilotCard(s) {
     'With this on, VS Code\'s proxy setting points at aicleaner on this machine: Copilot\'s chat, agent, inline completions, next edit suggestions, public code matching and telemetry are read and filtered; everything else VS Code sends - sign-in, extensions, Settings Sync - passes through untouched. VS Code needs to trust aicleaner\'s Copilot certificate, which can only vouch for Copilot\'s own hosts; it is added to your Windows certificates the first time this is turned on here, and Windows asks you to confirm. The first time it is turned on is done at the machine, where that confirmation is answered; the certificate then stays installed while Copilot is off, so after that it can be turned on or off from anywhere. While aicleaner is stopped VS Code\'s proxy setting is taken out, so VS Code keeps working - unfiltered - until it starts again. Microsoft 365 Copilot (Word, Teams, Outlook) is not covered: it runs in Microsoft\'s cloud. Reload VS Code after changing it.',
     [h('div', { class: 'form-row' }, on), status],
     () => ({ 'copilot.enabled': on.querySelector('input').checked }));
+}
+
+// Reading text out of images and scanned PDFs (J2, Brad 2026-10-20: these had no card). Remote or local.
+function ocrCard(s) {
+  const on = checkbox('ocr', 'Read the text in images and scanned PDFs (so it is filtered as text)', s['attachments.ocr']);
+  const pages = h('input', { type: 'number', name: 'ocr_max_pages', min: '1', max: '500', class: 'narrow',
+    value: String(s['attachments.ocr_max_pages'] || 10), 'aria-label': 'Most pages read from a scanned PDF' });
+  const seconds = h('input', { type: 'number', name: 'ocr_timeout_s', min: '5', max: '600', class: 'narrow',
+    value: String(s['attachments.ocr_timeout_s'] || 60), 'aria-label': 'Longest a reading may take, in seconds' });
+  return card('ocr', 'Text in images and scanned PDFs',
+    'An image or a scanned PDF in a request is read on this machine, and the text it holds is filtered like any other text before anything leaves. With this off, such attachments are replaced by a notice instead. The limits keep a large scan from holding a request up.',
+    [h('div', { class: 'form-row' }, on),
+      h('div', { class: 'form-row' }, h('label', { class: 'field' }, 'Most pages read from a scanned PDF', pages),
+        h('label', { class: 'field' }, 'Longest a reading may take (seconds)', seconds))],
+    () => ({ 'attachments.ocr': on.querySelector('input').checked,
+      'attachments.ocr_max_pages': Number(pages.value) || 10,
+      'attachments.ocr_timeout_s': Number(seconds.value) || 60 }));
 }
 
 // The file tabs on the Session page (feature 92): what a double-click in a Markdown preview does.
@@ -1017,7 +1058,14 @@ export async function render(main, ctx) {
   }
   view.host = h('div', { class: 'settings-columns' });
   view.jump = h('nav', { class: 'settings-jump', 'aria-label': 'Go to a setting' });
-  main.append(view.jump, view.host);
+  // Through remote access (J4, Brad 2026-10-20): why some controls are shown but cannot be used here.
+  const remoteNote = view.config.remote ? h('p', { class: 'callout settings-remote-note' },
+    h('b', {}, 'Through remote access: '),
+    'every setting is shown, but some cannot be changed from here - those that would let client data reach the AI '
+    + 'service unfiltered, those that trigger a prompt on the machine where aicleaner is deployed, and those that could '
+    + 'give access to other systems (such as reading stored secrets). They are greyed out, saying so; change them at that machine.')
+    : null;
+  main.append(...[view.jump, remoteNote, view.host].filter(Boolean));
   paintCards();
   paintJump();
   showCard(ctx.route && ctx.route.id);

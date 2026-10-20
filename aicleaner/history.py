@@ -15,6 +15,8 @@ open, and we do not.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -40,6 +42,20 @@ OPEN_FACTOR = 8                 # files read per row asked for, before the searc
 UUID = re.compile(r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE)
 NOT_NAME = re.compile(r"[^A-Za-z0-9]")
 log = logging.getLogger(__name__)
+
+# Another agent's transcript folder for the code running inside `using_root` (item K). A context
+# variable rather than an argument through every function: asyncio.to_thread copies it into the thread.
+_ROOT: contextvars.ContextVar[Path | None] = contextvars.ContextVar("aicleaner_transcript_root", default=None)
+
+
+@contextlib.contextmanager
+def using_root(root: str | Path | None):
+    """Inside it, transcript_root() is `root` (None: Claude Code's own, as outside)."""
+    token = _ROOT.set(Path(root) if root else None)
+    try:
+        yield
+    finally:
+        _ROOT.reset(token)
 SPACES = re.compile(r"\s+")
 
 
@@ -86,9 +102,14 @@ def forget_remembered() -> None:
 
 
 def transcript_root(home: str | Path = "") -> Path:
-    """Where Claude Code keeps its transcripts, honouring CLAUDE_CONFIG_DIR."""
+    """Where Claude Code keeps its transcripts, honouring CLAUDE_CONFIG_DIR - or, inside `using_root`,
+    another agent's (item K: the bridge writes Copilot's and Codex's conversations in Claude Code's
+    shape under aicleaner's state folder, so everything here reads them unchanged)."""
     if home:
         return Path(home) / "projects"
+    chosen = _ROOT.get()
+    if chosen is not None:
+        return chosen
     configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
     base = Path(configured) if configured else Path.home() / ".claude"
     return base / "projects"

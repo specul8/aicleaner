@@ -133,7 +133,8 @@ def _row(tool: str, name: str, found: bool, filtered: bool | None, filter_note: 
             "signed_in": signed_in, "sign_in": sign_in, "detail": detail}
 
 
-async def rows(cfg: Any, copilot: dict[str, Any] | None = None, base: Path | None = None) -> list[dict[str, Any]]:
+async def rows(cfg: Any, copilot: dict[str, Any] | None = None, base: Path | None = None,
+               logins: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """One row per tool aicleaner knows, in the order the page shows them."""
     port = int(getattr(cfg, "port", 8787))
     routed = {e["client"]: e["routed"] for e in routing.clients(port, home=base,
@@ -169,18 +170,137 @@ async def rows(cfg: Any, copilot: dict[str, Any] | None = None, base: Path | Non
                     if cfg.copilot_enabled else "not filtered - Settings > GitHub Copilot in VS Code",
                     None, {"kind": "steps", "steps": "VS Code owns this sign-in: in VS Code, Accounts (the person icon, "
                                                      "bottom left) > Sign in with GitHub to use GitHub Copilot."}))
-    copilot_cli = bool(_which("copilot")) or (home(base) / ".copilot").is_dir()
-    out.append(_row("copilot-cli", "GitHub Copilot CLI", copilot_cli, False,
-                    "not filtered yet (planned: sessions driven by it, item K)", None,
-                    {"kind": "steps", "steps": "In a terminal on the machine: copilot, then /login - it shows a code "
-                                               "to enter at github.com/login/device, which works from any device."}))
-    codex = bool(_which("codex")) or (home(base) / ".codex").is_dir() or _extension("openai.chatgpt", base)
+    from .agents import CODEX, COPILOT, command_for
+
+    logins = logins or {}
+    # Found = runnable here (on PATH or in aicleaner's own folder); installed from the card when not.
+    copilot_cli = bool(command_for(COPILOT))
+    signed = logins.get("copilot-cli")
+    out.append(_row("copilot-cli", "GitHub Copilot CLI", copilot_cli, copilot_cli,
+                    "filtered in Project sessions: its traffic goes through aicleaner's Copilot reader"
+                    if copilot_cli else "not installed - Install puts it in aicleaner's own folder (needs Node.js)",
+                    True if signed == "done" else None,
+                    {"kind": "device", "agent": "copilot", "installed": copilot_cli,
+                     "steps": "Sign in shows a link and a code; enter the code at that link from any device."}))
+    codex = bool(command_for(CODEX))
     codex_signed = (home(base) / ".codex" / "auth.json").is_file() if codex else None
-    out.append(_row("codex", "Codex (ChatGPT's coding agent: VS Code and CLI)", codex, False,
-                    "not filtered yet (needs a capture first, as Copilot's did)", codex_signed,
-                    {"kind": "steps", "steps": "In VS Code's Codex panel: Sign in, with your ChatGPT account; or in a "
-                                               "terminal on the machine: codex login."}))
+    if logins.get("codex") == "done":
+        codex_signed = True
+    out.append(_row("codex", "Codex (ChatGPT's coding agent: VS Code and CLI)", codex, codex,
+                    "filtered in Project sessions: its traffic goes through aicleaner's OpenAI reader" if codex
+                    else "not installed - Install puts it in aicleaner's own folder (needs Node.js)", codex_signed,
+                    {"kind": "device", "agent": "codex", "installed": codex,
+                     "steps": "Sign in shows a link and a code; enter the code at that link from any device, with "
+                              "your ChatGPT account."}))
     return out
+
+
+# ---- other agents: installed when chosen, signed in with a device code (item K) -------------
+
+DEVICE_URL = re.compile(r"https://\S*(login/device|/device)\S*")
+DEVICE_CODE = re.compile(r"\b([A-Z0-9]{4}-[A-Z0-9]{4,5})\b")
+SIGN_IN_ARGS = {"copilot": ["login", "--device-code"], "codex": ["login", "--device-auth"]}
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+async def install(agent_id: str) -> dict[str, Any]:
+    """The agent's CLI installed into aicleaner's own folder with npm (`--prefix`): no administrator and no
+    prompt, so it works through remote access too. Needs Node.js."""
+    from .agents import AGENTS, install_dir
+
+    which = AGENTS.get(agent_id)
+    if which is None or which.id == "claude":
+        return {"ok": False, "output": f"{agent_id} is not installed this way"}
+    npm = os.environ.get("AICLEANER_NPM", "").strip() or _which("npm") or shutil.which("npm") or ""
+    if not npm:
+        return {"ok": False, "output": "Node.js (npm) is needed to install it and is not on this machine: "
+                                       "install Node.js LTS from nodejs.org, then try again"}
+    target = install_dir()
+    target.mkdir(parents=True, exist_ok=True)
+    runner = ["cmd", "/c", npm] if npm.lower().endswith((".cmd", ".bat")) else [npm]
+    process = await asyncio.create_subprocess_exec(*runner, "install", "--prefix", str(target), "--no-fund", "--no-audit",
+                                                   which.package, stdout=asyncio.subprocess.PIPE,
+                                                   stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(process.communicate(), timeout=600)
+    except asyncio.TimeoutError:
+        process.kill()
+        return {"ok": False, "output": "npm did not finish within ten minutes"}
+    text = out.decode("utf-8", "replace")[-3000:]
+    return {"ok": process.returncode == 0, "output": text}
+
+
+class DeviceLogin:
+    """An agent's own device-code sign-in (Copilot: `copilot login --device-code`; Codex: `codex login
+    --device-auth`; both probed 2026-10-20): the link and the one-time code it prints are shown on the
+    page, the person signs in on any device, and the CLI finishes by itself."""
+
+    def __init__(self, agent_id: str) -> None:
+        self.agent_id = agent_id
+        self.process: asyncio.subprocess.Process | None = None
+        self.state = "idle"           # idle | waiting | done | failed
+        self.url = ""
+        self.code = ""
+        self.message = ""
+        self.output: list[str] = []
+
+    def view(self) -> dict[str, Any]:
+        return {"state": self.state, "url": self.url, "code": self.code, "message": self.message}
+
+    async def start(self) -> dict[str, Any]:
+        from .agents import AGENTS, command_for
+
+        if self.process is not None and self.process.returncode is None:
+            return self.view()
+        command = command_for(AGENTS[self.agent_id])
+        if not command:
+            self.state, self.message = "failed", "not installed on this machine - install it first"
+            return self.view()
+        self.state, self.url, self.code, self.message, self.output = "waiting", "", "", "", []
+        env = {**os.environ, "BROWSER": "none"}
+        self.process = await asyncio.create_subprocess_exec(*command, *SIGN_IN_ARGS[self.agent_id],
+                                                            stdin=asyncio.subprocess.DEVNULL,
+                                                            stdout=asyncio.subprocess.PIPE,
+                                                            stderr=asyncio.subprocess.STDOUT, env=env)
+        asyncio.create_task(self._read())
+        for _ in range(300):
+            if self.url and self.code or self.process.returncode is not None:
+                break
+            await asyncio.sleep(0.1)
+        if not (self.url and self.code) and self.state == "waiting":
+            self.state = "failed" if self.process.returncode not in (None, 0) else self.state
+            self.message = self.message or "no sign-in code was shown: " + " ".join(self.output[-3:])[-300:]
+        return self.view()
+
+    async def _read(self) -> None:
+        assert self.process is not None and self.process.stdout is not None
+        while True:
+            line = await self.process.stdout.readline()
+            if not line:
+                break
+            text = ANSI.sub("", line.decode("utf-8", "replace")).strip()
+            if not text:
+                continue
+            self.output.append(text)
+            if not self.url:
+                found = DEVICE_URL.search(text)
+                if found:
+                    self.url = found.group(0).rstrip(".,)")
+            if not self.code:
+                found = DEVICE_CODE.search(text)
+                if found:
+                    self.code = found.group(1)
+        code = await self.process.wait()
+        if code == 0:
+            self.state, self.message = "done", (self.output[-1] if self.output else "Signed in")
+        else:
+            self.state, self.message = "failed", " ".join(self.output[-2:])[-300:] or f"sign-in ended ({code})"
+
+    async def cancel(self) -> dict[str, Any]:
+        if self.process is not None and self.process.returncode is None:
+            self.process.kill()
+        self.state, self.url, self.code, self.message = "idle", "", "", ""
+        return self.view()
 
 
 # ---- Claude Code's sign-in, driven from the page ---------------------------------------------

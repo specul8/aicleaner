@@ -28,6 +28,9 @@ from aiohttp import web
 from .codetab_ca import HOST, Authority
 from .copilot import is_copilot
 
+# Codex's hosts (item K3): read by the OpenAI reader when a Codex session needs it.
+OPENAI_HOSTS = {"chatgpt.com", "api.openai.com"}
+
 log = logging.getLogger("aicleaner.codetab")
 
 # A request key: set on everything the reader takes in, so the proxy knows the dialect (there is
@@ -105,6 +108,8 @@ class CodeTab:
         self._copilot_runner: web.AppRunner | None = None
         self._copilot: tuple[Authority, Any] | None = None
         self.copilot_port = 0
+        self._openai_runner: web.AppRunner | None = None
+        self.openai_port = 0
         self.port = port
         self._client_max = client_max_mb * 1024 * 1024
         self._server: asyncio.base_events.Server | None = None
@@ -163,6 +168,26 @@ class CodeTab:
         self.copilot_port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
         log.info("Copilot reader listening on 127.0.0.1:%d", self.copilot_port)
 
+    async def set_openai(self, authority: Authority | None, handle: Any = None) -> None:
+        """Codex's reader (item K3) for chatgpt.com and api.openai.com, started or stopped as Copilot's is."""
+        if authority is None or handle is None:
+            if self._openai_runner is not None:
+                await self._openai_runner.cleanup()
+                self._openai_runner = None
+                self.openai_port = 0
+            return
+        if self._openai_runner is not None:
+            return
+        context = await asyncio.to_thread(authority.server_context)
+        app = web.Application(client_max_size=self._client_max)
+        app.router.add_route("*", "/{tail:.*}", handle)
+        self._openai_runner = web.AppRunner(app, access_log=None, handle_signals=False)
+        await self._openai_runner.setup()
+        site = web.TCPSite(self._openai_runner, "127.0.0.1", 0, ssl_context=context)
+        await site.start()
+        self.openai_port = site._server.sockets[0].getsockname()[1]  # type: ignore[union-attr]
+        log.info("OpenAI (Codex) reader listening on 127.0.0.1:%d", self.openai_port)
+
     def reader_for(self, host: str, port: int) -> tuple[str, int] | None:
         """Where a CONNECT to host:port is joined when it is read here, or None to pass it through."""
         name = host.lower().rstrip(".")
@@ -172,10 +197,13 @@ class CodeTab:
             return ("127.0.0.1", self.reader_port)
         if self.copilot_port and is_copilot(name):
             return ("127.0.0.1", self.copilot_port)
+        if self.openai_port and name in OPENAI_HOSTS:
+            return ("127.0.0.1", self.openai_port)
         return None
 
     async def stop(self) -> None:
         await self.set_copilot(None)
+        await self.set_openai(None)
         if self._renewer is not None:
             self._renewer.cancel()
             self._renewer = None

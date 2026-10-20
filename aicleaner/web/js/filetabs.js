@@ -269,9 +269,51 @@ export function fileTabs(ctx) {
         tab.editor.focus();
         tab.editor.setSelectionRange(caret[0], caret[1]);
         tab.editor.scrollTop = caret[2];
+      } else {
+        putBack(tab);
       }
+      follow(tab);
     } finally {
       tab.repainting = false;
+    }
+  }
+
+  // Where the reader was in each tab (bug, Brad 2026-10-20: switching to a file tab always showed it
+  // from line 1). Recorded as it changes - a scroll, a selection, the editor losing focus when another
+  // tab is clicked - and put back whenever the tab is drawn again: from another file tab, from the
+  // conversation, or from another session. Per view (source or preview), since their heights differ.
+  function placeKey(tab) { return tab.mode === 'preview' ? 'preview' : 'source'; }
+
+  function follow(tab) {
+    const scroller = scrollerOf(tab);
+    if (!scroller || scroller.dataset.followed) return;
+    scroller.dataset.followed = '1';
+    const record = () => {
+      if (activeTab() !== tab || tab.repainting || !ctx.pane.contains(scroller)) return;
+      tab.place = tab.place || {};
+      const box = tab.editor && scroller === tab.editor ? tab.editor : null;
+      tab.place[placeKey(tab)] = { top: scroller.scrollTop, left: scroller.scrollLeft,
+        caret: box ? [box.selectionStart, box.selectionEnd] : null };
+    };
+    scroller.addEventListener('scroll', record, { passive: true });
+    if (scroller === tab.editor) {
+      for (const type of ['select', 'keyup', 'mouseup', 'blur']) scroller.addEventListener(type, record);
+    }
+  }
+
+  function putBack(tab) {
+    const place = tab.place && tab.place[placeKey(tab)];
+    const scroller = place ? scrollerOf(tab) : null;
+    if (!scroller) return;
+    if (place.caret && scroller === tab.editor) {
+      const end = tab.editor.value.length;
+      tab.editor.setSelectionRange(Math.min(place.caret[0], end), Math.min(place.caret[1], end));
+    }
+    scroller.scrollTop = place.top;
+    scroller.scrollLeft = place.left;
+    // A preview's images can grow it after it is drawn: once more when they have.
+    if (scroller.querySelector && scroller.querySelector('img')) {
+      requestAnimationFrame(() => { if (activeTab() === tab) scroller.scrollTop = place.top; });
     }
   }
 

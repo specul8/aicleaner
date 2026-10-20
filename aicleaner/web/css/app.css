@@ -1554,11 +1554,17 @@ input[type="checkbox"].row-tick { width: 26px; height: 26px; margin: 0 .35rem 0 
 /* A new conversation's name, under the Continue list (E3 part 10). */
 .session-new-name { width: 100%; margin: .3rem 0 .1rem; }
 
-/* The AI tools list (item H): Settings card and the wizard's "Your AI tools" step. Settings packs its
-   cards into narrow columns, so each tool is one stacked block - name, filtering, sign-in. */
-.aitools-row { border-top: 1px solid var(--border); padding: 8px 0; overflow-wrap: anywhere; min-width: 0; }
-.aitools-name { font-weight: 600; margin-bottom: 4px; }
+/* The AI tools list (item H): Settings card and the wizard's "Your AI tools" step. Each tool one line -
+   name and its state - opened with its chevron for the rest (J4, 2026-10-20). Settings packs its cards
+   into narrow columns, so the body stacks. */
+.aitools-row { border-top: 1px solid var(--border); padding: 6px 0; overflow-wrap: anywhere; min-width: 0; }
+.aitools-summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; list-style: none; }
+.aitools-summary::-webkit-details-marker { display: none; }
+.aitools-summary::before { content: "\25B8"; display: inline-block; width: 1em; color: var(--muted); transition: transform 0.15s; }
+.aitools-row[open] > .aitools-summary::before { transform: rotate(90deg); }
+.aitools-name { font-weight: 600; margin-right: 4px; }
+.aitools-body { padding: 4px 0 4px 1.3em; }
 .aitools-label { font-size: 0.85em; color: var(--muted); margin-top: 4px; }
-.aitools-row .chip { margin: 0 4px 4px 0; }
+.aitools-row .chip { margin: 0; }
 .aitools-row .hint { margin: 2px 0; }
 .aitools-login input[name="login-code"] { min-width: 0; flex: 1 1 10em; }

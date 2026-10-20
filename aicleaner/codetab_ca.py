@@ -47,6 +47,11 @@ KINDS = {
                 "permitted": ["githubcopilot.com", "copilot-telemetry.githubusercontent.com"],
                 "names": ["*.githubcopilot.com", "*.individual.githubcopilot.com", "*.business.githubcopilot.com",
                           "*.enterprise.githubcopilot.com", "copilot-telemetry.githubusercontent.com"]},
+    # Codex (item K3, 2026-10-20): a ChatGPT-signed-in Codex turn goes to chatgpt.com (probed); an API-key
+    # one to api.openai.com. Given to the Codex process only (CODEX_CA_CERTIFICATE), never the Windows store.
+    "openai": {"cert": "openai-ca.pem", "key": "openai-ca.key.dpapi", "label": "OpenAI",
+               "permitted": ["chatgpt.com", "api.openai.com"],
+               "names": ["chatgpt.com", "api.openai.com"]},
 }
 
 

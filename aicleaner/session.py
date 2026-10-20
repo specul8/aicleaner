@@ -23,6 +23,7 @@ session driven this way can read and plan but cannot quietly edit.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -592,13 +593,15 @@ class Profile:
     # A worktree session (DECISIONS 66): the profile it belongs to, and its {"name", "repo", "path"}.
     worktree_of: str = ""
     worktree: dict[str, str] = field(default_factory=dict)
+    # The AI service its conversations use (item K): claude, copilot or codex.
+    agent: str = "claude"
 
     def as_dict(self) -> dict[str, Any]:
         return {"name": self.name, "client": self.client, "label": self.label or self.name,
                 "projects": [str(p) for p in self.projects], "model": self.model, "brief": self.brief,
                 "share": str(self.share) if self.share else "",
                 "workspaces": [str(w) for w in self.workspaces], "home_override": self.home_override,
-                "homes_before": list(self.homes_before),
+                "homes_before": list(self.homes_before), "agent": self.agent,
                 "worktree_of": self.worktree_of, "worktree": dict(self.worktree)}
 
 
@@ -638,6 +641,9 @@ class Session:
                  approve_url: str = "", profile: "Profile | None" = None,
                  sessions_dir: Path | None = None, thinking_display: str = "summarized") -> None:
         self.profile = profile
+        # Another agent's environment and transcript folder (item K), set by the host before each start.
+        self.agent_env: dict[str, str] = {}
+        self.transcripts_root: Path | None = None
         # Current models omit thinking text unless asked; "summarized" is what the transcript's
         # thinking line shows (the user, 2026-10-01). Empty leaves the CLI's default.
         self.thinking_display = thinking_display
@@ -722,6 +728,13 @@ class Session:
         self._dropped_upto = 0
 
     def catch_up(self, projects: list[str]) -> bool:
+        """As _catch_up, reading this session's agent's transcripts (item K)."""
+        from .history import using_root
+
+        with using_root(self.transcripts_root):
+            return self._catch_up(projects)
+
+    def _catch_up(self, projects: list[str]) -> bool:
         """A stopped session's buffer from the transcript of the conversation it last ran, when that
         file has changed (E3, Brad 2026-10-19). One client's pane showed its last sitting on this page
         (09/10) while the conversation had gone on to 16/10 in VS Code. Read only when the file's
@@ -781,6 +794,8 @@ class Session:
             "pending": [{"id": p.id, "tool": p.tool, "detail": p.detail, "asked_at": p.asked_at}
                         for p in self.pending.values()],
             "busy": self.busy,
+            # Why the conversation cannot be switched now (item J); "" when it can, or not running.
+            "switch_blocked": work_in_progress(self) if self.running else "",
             "doing": self.doing,
             "queued": [dict(item) for item in self.queued],
             "events": list(self.events),
@@ -797,7 +812,11 @@ class Session:
     def _command(self, project: Path, resume: str, model: str) -> list[str]:
         check_resume(resume)
         check_model(model)
-        command = [self.claude, "--print", "--verbose", "--output-format", "stream-json",
+        # Another AI service (item K): aicleaner's bridge stands where Claude Code would, given the same
+        # arguments, and speaks the agent's own protocol on its other side (agents/bridge.py).
+        program = ([sys.executable, "-m", "aicleaner.agents.bridge", "--agent", self.agent]
+                   if self.agent != "claude" else [self.claude])
+        command = [*program, "--print", "--verbose", "--output-format", "stream-json",
                    "--input-format", "stream-json", "--include-partial-messages",
                    "--permission-mode", self.permission_mode]
         if self.approve_url:
@@ -858,7 +877,16 @@ class Session:
             environment["ANTHROPIC_BASE_URL"] = self.base_url
         environment.setdefault("MCP_TOOL_TIMEOUT", str(QUESTION_WAIT_MS))
         environment.setdefault("CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT", "0")
+        # Tool search, which Claude Code turns off for a base URL that is not Anthropic's unless told the
+        # proxy forwards tool_reference blocks - aicleaner does (checked live, 2026-10-20).
+        environment.setdefault("ENABLE_TOOL_SEARCH", "true")
+        environment.update(self.agent_env)
         return environment
+
+    @property
+    def agent(self) -> str:
+        """The AI service this session's conversations use (item K)."""
+        return (self.profile.agent if self.profile is not None else "claude") or "claude"
 
     async def start(self, project: str, resume: str = "", model: str = "") -> dict[str, Any]:
         """Start a session in one of the configured project folders."""
@@ -874,7 +902,9 @@ class Session:
         # the buffer starts empty and the earlier turns live in the CLI's own transcript. Seed
         # them, so resuming looks like picking something up rather than starting over. Off the
         # loop: it opens and parses a file that can be long.
-        if resume:
+        # Another agent replays a resumed conversation itself, through the bridge (item K): seeding it
+        # from its transcript here as well would draw every earlier turn twice.
+        if resume and self.agent == "claude":
             # Filed under the folder it began in, a conversation kept going back there (the user,
             # 2026-10-12): moved under this folder first, it is this project's from now on.
             from .history import refile
@@ -913,6 +943,7 @@ class Session:
         self.folder = self.sessions_dir / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
         self.folder.mkdir(parents=True, exist_ok=True)
         env = {"ANTHROPIC_BASE_URL": self.base_url} if self.base_url else {}
+        env.update(self.agent_env)                      # another agent's (item K): proxy, certificate, command
         launch = {"command": command, "cwd": str(folder), "env": env,
                   "profile": self.profile.name if self.profile else "", "project": str(folder),
                   "resume": resume, "model": model, "approve_token": self.approve_token,
@@ -978,7 +1009,9 @@ class Session:
         self._load_queue()
         self._replaying = True
         resume = str(launch.get("resume") or "")
-        if resume and self.project:
+        # Another agent's earlier turns were replayed by its bridge inside this sitting (item K), which the
+        # broker replays now: seeding them as well would show them twice.
+        if resume and self.project and self.agent == "claude":
             # Only what came before this sitting: the resumed conversation writes to the file the
             # seed reads, and the broker replays the sitting itself - seeding it too showed it
             # twice (D109).
@@ -1694,6 +1727,32 @@ class Session:
                     "answers": dict(answers), "late": True})
 
 
+def work_in_progress(session: Any) -> str:
+    """Why this running session cannot change conversation now, or "" when it can (item J): a turn in
+    progress, a prompt queued, or a permission question waiting for an answer."""
+    if session.busy:
+        return "a turn is in progress - let it finish, or stop it, to switch conversation"
+    if session.queued:
+        return "a prompt is queued - let it go, or cancel it, to switch conversation"
+    if session.pending:
+        return "a question is waiting for an answer - answer it to switch conversation"
+    return ""
+
+
+def _agent_history(method: Callable) -> Callable:
+    """A SessionHost method that reads a profile's conversations, run reading them where that profile's
+    agent keeps them (item K): Claude Code's own folder, or the bridge's for Copilot and Codex."""
+    @functools.wraps(method)
+    def wrapper(self: "SessionHost", name: str = "", *args: Any, **kwargs: Any) -> Any:
+        try:
+            profile = self.profile(name)
+        except SessionError:
+            return method(self, name, *args, **kwargs)
+        with self.history_of(profile):
+            return method(self, name, *args, **kwargs)
+    return wrapper
+
+
 class SessionHost:
     """Every profile, and the sessions running for them.
 
@@ -1715,6 +1774,11 @@ class SessionHost:
         self.approve_url = approve_url
         self.max_running = max(0, int(max_running or 0))     # 0 = no cap: the machine is the limit
         self.auto_titles = True       # session.auto_titles (item E): set by the proxy from the config
+        # Another AI service's filtering, made ready by the proxy before such a session starts (item K):
+        # async (agent) -> the environment its process needs - the forward proxy, its certificate.
+        self.prepare_agent: Any = None
+        # Where agents other than Claude Code file their conversations: under the proxy's state folder.
+        self.agents_dir: Path | None = None
         self.profiles: list[Profile] = list(profiles or [])
         self.sessions: dict[str, Session] = {}
         # What the tree needs from outside the host, set by whoever owns it: the allowed folder
@@ -1992,6 +2056,7 @@ class SessionHost:
         # first start. Every start uses the profile as it is now: an edited brief, folder list or
         # share applies from the next start, as the page says it will.
         session.profile = profile
+        await self._ready_agent(session, profile)
         # One starting folder per profile, its home (DECISIONS 64): every conversation is filed in
         # one place. The rest of the profile's folders go to Claude Code with --add-dir. The page's
         # `project` is no longer a choice and is ignored.
@@ -2007,6 +2072,111 @@ class SessionHost:
         self.plan_title(session, title, resume)          # its title: typed, or written by the model (E3)
         return await session.start(project=str(home) if home else project, resume=resume,
                                    model=model or profile.model)
+
+    async def switch(self, name: str = "", resume: str = "", title: str = "") -> dict[str, Any]:
+        """Another conversation in a running session (item J): the current one stopped - titled as a
+        stop titles it - and the chosen one started, or a new one when `resume` is empty. Refused
+        while there is work in progress. Not running: an ordinary start."""
+        profile = self.profile(name)
+        existing = self.sessions.get(profile.name)
+        if existing is None or not existing.running:
+            return await self.start(profile.name, resume=resume, title=title)
+        if resume and resume == existing.session_id:
+            return existing.state()
+        why = work_in_progress(existing)
+        if why:
+            raise SessionError(f"{profile.name}: {why}")
+        await self.stop(profile.name)
+        return await self.start(profile.name, resume=resume, title=title)
+
+    def agent_root(self, profile: Profile | None) -> Path | None:
+        """Where this profile's agent files its conversations: None for Claude Code (its own folder)."""
+        from .agents import agent, transcripts_root
+
+        if profile is None or self.agents_dir is None:
+            return None
+        return transcripts_root(self.agents_dir, agent(profile.agent))
+
+    def history_of(self, profile: Profile | None):
+        """Read this profile's conversations where its agent keeps them (item K): a `with` block."""
+        from .history import using_root
+
+        return using_root(self.agent_root(profile))
+
+    async def _ready_agent(self, session: "Session", profile: Profile) -> None:
+        """For another AI service (item K): its command found, its filtering made ready by the proxy,
+        and the bridge's environment set. A session whose traffic cannot be filtered does not start."""
+        from .agents import agent, command_for, protocol_args
+
+        which = agent(profile.agent)
+        session.agent_env = {}
+        session.transcripts_root = None
+        if which.id == "claude":
+            return
+        command = command_for(which)
+        if not command:
+            raise SessionError(f"{which.label} is not installed on this machine - install it from the AI tools card "
+                               "(Settings) and start again")
+        if self.prepare_agent is None:
+            raise SessionError(f"{which.label} cannot be filtered here, so it is not started")
+        environment = await self.prepare_agent(which)
+        root = self.agent_root(profile)
+        session.transcripts_root = root
+        session.agent_env = {**environment,
+                             "AICLEANER_AGENT_COMMAND": json.dumps([*command, *protocol_args(which)]),
+                             "AICLEANER_AGENT_TRANSCRIPTS": str(root) if root else "",
+                             "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+
+    def _found_transcript(self, profile: Profile, conv_id: str) -> Path | None:
+        from . import history
+
+        folder = history.holding(self.conversation_folders(profile), conv_id)
+        return history._transcript(folder, conv_id, None) if folder else None
+
+    @_agent_history
+    def files_of_conversation(self, name: str, conv_id: str) -> list[str]:
+        """The files the conversation made that a move could take with it (J3) - listed before it does."""
+        from . import convmove
+
+        profile = self.profile(name)
+        transcript = self._found_transcript(profile, conv_id)
+        if transcript is None:
+            raise SessionError(f"that conversation is not one of {profile.name}'s")
+        return [str(p) for p, _root in convmove.written_files(transcript, self.run_folders(profile) + (
+            [profile.share] if profile.share else []))]
+
+    @_agent_history
+    def move_conversation(self, name: str, conv_id: str, to: str, files: bool = False) -> dict[str, Any]:
+        """A conversation filed under another project session's home (J3), and with `files` the files it
+        made moved there too. Refused while that conversation is running here."""
+        from . import convmove, history
+
+        source = self.profile(name)
+        target = self.profile(to)
+        if source.name == target.name:
+            raise SessionError("choose another project session to move it to")
+        running = self.sessions.get(source.name)
+        if running is not None and running.running and running.session_id == conv_id:
+            raise SessionError("that conversation is running - stop it, then move it")
+        transcript = self._found_transcript(source, conv_id)
+        if transcript is None:
+            raise SessionError(f"that conversation is not one of {source.name}'s")
+        home_text = self.home_of(target).get("folder") or ""
+        folders = self.run_folders(target)
+        home = Path(home_text) if home_text else (folders[0] if folders else None)
+        if home is None:
+            raise SessionError(f"{target.name} has no home folder to move it to")
+        moved_files: list[str] = []
+        left_files: list[str] = []
+        if files:
+            found = convmove.written_files(transcript, self.run_folders(source) + ([source.share] if source.share else []))
+            moved_files, left_files = convmove.move_files(found, home)
+        done = history.refile(conv_id, home, self.conversation_folders(source))
+        if done is None and not history.holding([str(home)], conv_id):
+            raise SessionError(f"the conversation could not be filed under {home} (one with its id may be there already)")
+        log.info("conversation %s moved from %s to %s (%d file(s) moved, %d left)", conv_id, source.name,
+                 target.name, len(moved_files), len(left_files))
+        return {"ok": True, "to": target.name, "home": str(home), "files_moved": moved_files, "files_left": left_files}
 
     async def prompt(self, text: str, name: str = "", origin: str = "") -> str:
         session = self._session(name)
@@ -2059,6 +2229,7 @@ class SessionHost:
                 except SessionError:
                     pass
 
+    @_agent_history
     def earlier(self, name: str, before: float, limit: int = EARLIER_LIMIT) -> dict[str, Any]:
         """The conversation from before what the page already shows (feature 82): up to `limit` of
         the transcript's events said before `before`, read from whichever of the profile's folders
@@ -2079,6 +2250,7 @@ class SessionHost:
         more = len(events) > wanted
         return {"events": events[-wanted:], "more": more}
 
+    @_agent_history
     def past(self, name: str = "", limit: int = 25, include_robots: bool = False) -> list[dict[str, Any]]:
         """Conversations already held in this profile's folders, newest first.
 
@@ -2098,6 +2270,7 @@ class SessionHost:
         return conversations(self.conversation_folders(profile), limit=limit,
                              include_robots=include_robots, ours=ours, labels=load_titles(self.state_dir()))
 
+    @_agent_history
     def search_conversations(self, name: str, query: str, everywhere: bool = False) -> dict[str, Any]:
         """Conversations of this profile (or of every profile) ranked for a topic (2026-10-16).
 
@@ -2143,6 +2316,7 @@ class SessionHost:
             raise SessionError("no such conversation in this profile's folders")
         return path
 
+    @_agent_history
     def rename_conversation(self, name: str, conv_id: str, title: str) -> dict[str, Any]:
         """The person's title, which always wins; empty puts the model's (or the first prompt) back."""
         from .titles import set_title
@@ -2151,6 +2325,7 @@ class SessionHost:
             raise SessionError("titles need a state folder")
         return {"label": set_title(self.state_dir(), conv_id, title, "person")}
 
+    @_agent_history
     def retitle_conversation(self, name: str, conv_id: str, only_if_grown: bool = False) -> dict[str, Any]:
         from .titles import retitle
         if self.state_dir() is None:
@@ -2243,6 +2418,7 @@ class SessionHost:
             raise SessionError("no such consolidation")
         return dict(state)
 
+    @_agent_history
     def title_after_stop(self, name: str, conv_id: str) -> None:
         """session.auto_titles: the conversation that just ended, if it grew, retitled in the background."""
         if not self.auto_titles or not conv_id:
@@ -2291,6 +2467,7 @@ class SessionHost:
         from . import convbin
         return convbin.purge(self.bin_root(), self.profile(name).name, conv_id)
 
+    @_agent_history
     def agent_report(self, name: str, tool_id: str) -> dict[str, Any]:
         """A sub-agent's report, found by the Agent call's id in this profile's folders (2026-10-16)."""
         from .agentreport import report

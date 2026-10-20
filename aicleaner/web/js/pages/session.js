@@ -17,6 +17,7 @@ import { handOverWheel } from '../wheelchain.js';
 import { isSealed } from '../sealed.js';
 import { renderMarkdown } from '../markdown.js';
 import { paintWorktree } from '../worktree.js';
+import { openMoveConversation } from '../convmovedialog.js';
 import { begin } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { openSuggestTitles } from '../titlesdialog.js';
@@ -447,6 +448,9 @@ function compactedText(meta) {
   return `Conversation compacted - earlier turns summarised${details ? ` (${details})` : ''}`;
 }
 
+// Thinking blocks the reader closed (J7): open by default, so only the closed ones are remembered.
+const closedThinking = new Set();
+
 function transcript(events, { after = null, placeholder = true } = {}) {
   const lines = [];
   let wasReplayed = Boolean(after && after.replayed);
@@ -469,11 +473,15 @@ function transcript(events, { after = null, placeholder = true } = {}) {
       const thoughts = ((event.message || {}).content || [])
         .filter((c) => c.type === 'thinking' && String(c.thinking || '').trim()).map((c) => c.thinking);
       if (thoughts.length) {
-        // Filled when opened, with any JSON in it laid out (2026-10-16). Never rehydrated (D8), so
-        // set as plain text, not through withRestoredNames.
-        const text = h('div', { class: 'thinking-text' });
-        const box = h('details', { class: 'thinking' }, h('summary', {}, 'thinking'), text);
-        fillOnOpen(box, text, () => [prettyJsonIn(thoughts.join('\n\n'))]);
+        // Open by default (J7, Brad 2026-10-20: "useful to read and allow me to course-correct when you
+        // are working"); one the reader closes stays closed when the transcript is drawn again. Any JSON
+        // in it laid out (2026-10-16). Never rehydrated (D8), so set as plain text, not through
+        // withRestoredNames.
+        const key = String((event.message || {}).id || event.uuid || event.seq || thoughts[0].slice(0, 80));
+        const text = h('div', { class: 'thinking-text' }, prettyJsonIn(thoughts.join('\n\n')));
+        const box = h('details', { class: 'thinking', open: closedThinking.has(key) ? null : true },
+          h('summary', {}, 'thinking'), text);
+        box.addEventListener('toggle', () => { if (box.open) closedThinking.delete(key); else closedThinking.add(key); });
         lines.push(h('div', { class: 'turn tool thinking-turn' }, h('span', { class: 'who' }, ''), box));
       }
       const parts = ((event.message || {}).content || []).filter((c) => c.type === 'text').map((c) => c.text);
@@ -683,6 +691,19 @@ function queueChips(queued) {
   return [head, ...chips];
 }
 
+// The CLI's own list of what runs in the background (`background_tasks_changed`), as of the last
+// one sent, and which tool call started each task (`task_started`). Null when none was ever sent.
+function liveTasks(events) {
+  let live = null;
+  const toolOfTask = new Map();
+  for (const event of events || []) {
+    if (event.type !== 'system') continue;
+    if (event.subtype === 'task_started' && event.task_id && event.tool_use_id) toolOfTask.set(event.task_id, event.tool_use_id);
+    if (event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) live = event.tasks.filter(Boolean);
+  }
+  return { live, toolOfTask };
+}
+
 function backgroundTasks(events) {
   const found = new Map();
   for (const event of events || []) {
@@ -701,10 +722,27 @@ function backgroundTasks(events) {
   }
   const done = finishedIds(events);
   const now = Date.now() / 1000;
-  return [...found.values()].filter((task) => {
+  // The CLI's live list decides (bug, Brad 2026-10-20: a 90-minute watcher vanished from the page after
+  // 30 minutes while still running): a task it names is shown however long it runs, and one it names
+  // whose starting call has left the page's buffer is shown from the list itself. Only a task the list
+  // never mentioned falls back to going stale - the old safety net for a missed "finished".
+  const { live, toolOfTask } = liveTasks(events);
+  const liveTools = new Set();
+  const listed = [];
+  for (const task of live || []) {
+    const toolId = toolOfTask.get(task.task_id);
+    if (toolId) liveTools.add(toolId);
+    if (!toolId || !found.has(toolId)) {
+      listed.push({ id: toolId || task.task_id, name: task.task_type || 'task',
+        label: String(task.description || '').trim(), at: 0 });
+    }
+  }
+  const kept = [...found.values()].filter((task) => {
+    if (liveTools.has(task.id)) return true;
     if (done.has(task.id)) return false;
     return !task.at || (now - task.at) < STARTED_GOES_STALE_AFTER;
   });
+  return [...kept, ...listed];
 }
 
 // ---- what the page already holds (D140) --------------------------------------------------------
@@ -1446,14 +1484,46 @@ function permissionCards(state) {
 // AskUserQuestion?" over its raw JSON, as though it were a tool to permit. Now each question shows
 // its options - radio buttons, or checkboxes where several may apply - and an "Other" box, and
 // Answer sends the choices back; Claude Code receives them as the question's answers.
+// What has been ticked and typed in each open question, by its request id (J5, Brad 2026-10-20: switching
+// to another session and back lost every answer - the card is drawn afresh each time). Kept for the life
+// of the page; the card puts it back whenever it is drawn again.
+const questionDrafts = new Map();
+
+function saveDraft(card, id) {
+  const draft = {};
+  for (const set of card.querySelectorAll('fieldset.question')) {
+    draft[set.dataset.question] = {
+      picked: [...set.querySelectorAll('input:checked')].map((box) => box.value),
+      other: set.querySelector('.other-answer').value,
+    };
+  }
+  questionDrafts.set(id, draft);
+}
+
+function restoreDraft(card, id) {
+  const draft = questionDrafts.get(id);
+  if (!draft) return;
+  for (const set of card.querySelectorAll('fieldset.question')) {
+    const saved = draft[set.dataset.question];
+    if (!saved) continue;
+    for (const box of set.querySelectorAll('input')) box.checked = saved.picked.includes(box.value);
+    const other = set.querySelector('.other-answer');
+    other.value = saved.other || '';
+  }
+}
+
 function questionCard(name, request) {
   const questions = (request.detail || {}).questions || [];
-  return h('div', { class: 'card question-card', dataset: { permission: request.id } },
+  const card = h('div', { class: 'card question-card', dataset: { permission: request.id } },
     h('h3', {}, `${name}: Claude is asking`),
     ...questions.map((q, i) => questionSet(q, `q${request.id}-${i}`)),
     h('div', { class: 'form-row' },
       h('button', { type: 'button', class: 'primary answer-question', dataset: { id: request.id } }, 'Answer'),
       h('button', { type: 'button', class: 'deny', dataset: { id: request.id } }, 'Decline')));
+  restoreDraft(card, request.id);
+  card.addEventListener('change', () => saveDraft(card, request.id));
+  card.addEventListener('input', () => saveDraft(card, request.id));
+  return card;
 }
 
 // One question: every option on its own line with its description under it, then Other - a choice
@@ -2331,6 +2401,10 @@ export async function render(main, context = {}) {
   // "Start a new conversation" is chosen; blank, the model writes one after the first reply and the fifth.
   const newName = h('input', { type: 'text', id: 'session-new-name', class: 'session-new-name', maxlength: '200',
     placeholder: 'Session Name - Leave blank to auto-generate one', 'aria-label': 'Name for the new conversation', hidden: true });
+  // Another conversation while the session runs (item J): shown when one other than the running one is
+  // chosen; the session stops the current conversation and starts the chosen one (or a new one).
+  const switchButton = h('button', { type: 'button', id: 'session-switch', class: 'primary', hidden: true },
+    'Switch to this conversation');
   // Conversations a program started are hidden - except the ones started here, which are listed
   // (2026-09-30). This shows the rest too, including Session-page ones from before that fix.
   // Every conversation you or aicleaner started, not just the newest 25 (the user, 2026-10-17). Ones a
@@ -2599,15 +2673,25 @@ export async function render(main, context = {}) {
         .sort((a, b) => b.updated - a.updated)[0];
       if (newest && Array.from(resume.options).some((option) => option.value === newest.id)) resume.value = newest.id;
     }
-    resume.disabled = Boolean(session.running || view.pastLoading);
-    newName.hidden = Boolean(session.running || resume.value);
+    if (session.running && view.resumeChosen !== view.name && session.session_id
+        && Array.from(resume.options).some((option) => option.value === session.session_id)) {
+      resume.value = session.session_id;              // what is running, until another is chosen
+    }
+    // Switching conversation while it runs (item J): allowed while idle; while a turn runs, a prompt
+    // waits or a question is open, the list is disabled and says why.
+    const blocked = session.running ? String(session.switch_blocked || '') : '';
+    resume.disabled = Boolean(view.pastLoading || blocked);
+    if (view.paintAgent) view.paintAgent();
+    const another = Boolean(session.running && view.resumeChosen === view.name && resume.value !== (session.session_id || ''));
+    switchButton.hidden = !another || Boolean(blocked);
+    newName.hidden = Boolean(resume.value) || (session.running && !another);
     // Across every folder, not just the selected one: the chosen conversation may belong to
     // another of this profile's folders now that Continue offers them all.
     const picked = (view.past || [])
       .flatMap((entry) => entry.sessions || [])
       .find((row) => row.id === resume.value);
     // Each third is cut to fit, so each closed box carries its whole value on hover (D62).
-    resume.title = picked ? picked.title : '';
+    resume.title = blocked ? `Cannot switch conversation now: ${blocked}` : (picked ? picked.title : '');
     modeSelect.title = MODE_WHY[modeSelect.value] || '';
     resumeLine.textContent = picked && picked.busy
       ? 'That transcript was written to minutes ago, so a terminal or an editor may still have it '
@@ -2897,7 +2981,16 @@ export async function render(main, context = {}) {
     title: 'Ask the model for a title saying what the chosen conversation most recently worked on' }, 'Retitle');
   const suggestButton = h('button', { type: 'button', id: 'session-suggest-titles', class: 'conv-action',
     title: 'Choose conversations for the model to title: every conversation listed, the unnamed ones ticked to start with' }, 'Suggest titles');
+  // Move to another project session (J3, Brad 2026-10-20): from Casual chats to a client, mostly.
+  const moveButton = h('button', { type: 'button', id: 'session-move-conversation', class: 'conv-action',
+    title: 'Move the chosen conversation to another project session - from Casual chats to a client, say' }, 'Move to...');
   const chosenRow = () => (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id === resume.value);
+  moveButton.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const row = chosenRow();
+    if (!row) { say('Choose a conversation in Continue first.', 'warn'); return; }
+    await openMoveConversation(view.name, row, async () => { await loadPast({ quiet: true }); paint(); });
+  });
   renameButton.addEventListener('click', async (event) => {
     event.preventDefault();
     const row = chosenRow();
@@ -3136,13 +3229,13 @@ export async function render(main, context = {}) {
     h('div', { class: 'form-row session-head' }, heading, conversationTitle, clientChip, runningLine,
       h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start'), chat),
     h('div', { class: 'session-controls' },
-      h('label', { class: 'field' }, 'Continue', resume, newName, showAll),
+      h('label', { class: 'field' }, 'Continue', resume, newName, switchButton, showAll),
       h('div', { class: 'field' }, h('span', {}, 'Starts in (home folder)'), homeShown),
       modeField),
     // What can be done with conversations: buttons across the card's width, side by side first and then
     // wrapping, a label on one or two lines each (the user, 2026-10-17). In the Continue field - a third
     // of the card - they stood one under another.
-    h('div', { class: 'conv-actions' }, searchButton, renameButton, retitleButton,
+    h('div', { class: 'conv-actions' }, searchButton, renameButton, retitleButton, moveButton,
       suggestButton, consolidateButton, deleteButton, binButton),
     resumeLine,
     worktreeSlot);
@@ -3189,6 +3282,32 @@ export async function render(main, context = {}) {
   const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
   const insertCodeButton = h('button', { type: 'button', id: 'session-insert-code', class: 'btn', 'aria-label': 'Insert code snippet',
     title: 'Insert code snippet: paste or type code in an editor with line numbers and no wrapping, then add it to the prompt' }, '</>');
+  // The AI service this project session's conversations use (item K; the user, 2026-10-18: "a drop-down
+  // switch underneath the prompt"). Changing it while a conversation runs starts a new one with the chosen
+  // service - a conversation cannot change service - and is refused while a turn is busy.
+  const agentPick = h('select', { id: 'session-agent', 'aria-label': 'AI service', title: 'The AI service this project session uses' },
+    h('option', { value: 'claude' }, 'Claude Code'),
+    h('option', { value: 'copilot' }, 'GitHub Copilot'),
+    h('option', { value: 'codex' }, 'ChatGPT (Codex)'));
+  agentPick.addEventListener('change', async () => {
+    const wanted = agentPick.value;
+    agentPick.disabled = true;
+    try {
+      await postJSON('/api/session/agent', { name: view.name, agent: wanted });
+      say(`${view.name} uses ${agentPick.selectedOptions[0].textContent} from its next conversation.`, 'ok');
+      await refresh();
+      await loadPast({ quiet: true });                 // Continue lists that service's conversations
+    } catch (error) {
+      sayError(error);
+    } finally {
+      agentPick.disabled = false;
+      view.paintAgent();
+    }
+  });
+  // Shown as the profile has it, each time the page paints (paint() calls it once it exists).
+  view.paintAgent = () => {
+    if (!agentPick.disabled) agentPick.value = profileOf(view.name).agent || 'claude';
+  };
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
     codeSlot,
     prompt.element,
@@ -3198,6 +3317,7 @@ export async function render(main, context = {}) {
       h('button', { type: 'button', id: 'session-send', class: 'primary' }, 'Send'),
       insertCodeButton,
       readButton,
+      agentPick,
       // Beside Send, because that is where the eye already is when waiting for a reply,
       // and waiting is when "is this thing still connected?" gets asked (feature 65).
       h('span', { id: 'session-link', class: 'link-state', hidden: true })),
@@ -3390,6 +3510,22 @@ export async function render(main, context = {}) {
   // a conversation filed elsewhere is found where it is (DECISIONS 64).
   // A choice made here - "Start a new conversation" included - is kept until the session changes.
   resume.addEventListener('change', () => { view.resumeChosen = view.name; paint(); });
+  switchButton.addEventListener('click', async () => {
+    switchButton.disabled = true;
+    try {
+      await postJSON('/api/session/switch',
+        { name: view.name, resume: resume.value, title: resume.value ? '' : newName.value.trim() });
+      newName.value = '';
+      view.resumeChosen = '';
+      say(resume.value ? `${view.name} switched conversation.` : `${view.name} started a new conversation.`, 'ok');
+      await refresh();
+      subscribe(view.name, refresh, applyEvent);
+    } catch (error) {
+      sayError(error);
+    } finally {
+      switchButton.disabled = false;
+    }
+  });
 
   // What Send does, so the key and the button cannot drift apart (feature 48).
   async function sendPrompt() {
@@ -3787,6 +3923,7 @@ export async function render(main, context = {}) {
     for (const b of card ? card.querySelectorAll('button') : []) b.disabled = true;
     try {
       const result = await postJSON('/api/session/permission', { id, name: view.name, ...body });
+      questionDrafts.delete(id);         // answered: nothing to put back (J5)
       // The question closed before the answer arrived (the session restarted, say): Claude has
       // moved on, so it goes in the transcript and in the prompt box, ready to send - never lost.
       if (result && result.late && body.answers) {

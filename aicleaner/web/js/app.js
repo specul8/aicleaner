@@ -19,6 +19,7 @@ import { begin, setTiming } from './timing.js';
 import { confirmLeave, dirty } from './unsaved.js';
 import { isSealed, openTunnel } from './sealed.js';
 import { openFeedback } from './feedback.js';
+import { chatNow } from './chatnow.js';
 
 const PAGES = { overview, review, clients, global: clients, secrets, settings, session, log: logPage, wiki, setup };
 
@@ -393,6 +394,11 @@ function setupTopFlyouts() {
   const feedbackItem = document.getElementById('nav-feedback');
   if (feedbackItem) {
     feedbackItem.addEventListener('click', (event) => { event.preventDefault(); openFeedback(); });
+  }
+  // Chat now (item J): a new conversation in Casual chats, opened on the Session page.
+  const chatItem = document.getElementById('nav-chat-now');
+  if (chatItem) {
+    chatItem.addEventListener('click', (event) => { event.preventDefault(); chatNow(); });
   }
 }
 

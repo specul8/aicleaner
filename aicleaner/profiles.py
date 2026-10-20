@@ -30,6 +30,15 @@ class ProfileError(ValueError):
     """A profile that cannot be saved, with a message meant for the person editing it."""
 
 
+def _agent_of(entry: dict[str, Any]) -> str:
+    from .agents import AGENTS
+
+    value = str(entry.get("agent") or "claude").strip().lower()
+    if value not in AGENTS:
+        raise ProfileError(f"{entry.get('name', 'a profile')}: {value} is not an AI service aicleaner knows")
+    return value
+
+
 def _clean(entry: dict[str, Any]) -> dict[str, Any]:
     """One profile, with every field the rest of the code expects present and of the right type."""
     if not isinstance(entry, dict):
@@ -74,6 +83,8 @@ def _clean(entry: dict[str, Any]) -> dict[str, Any]:
         "homes_before": [str(h).strip() for h in (entry.get("homes_before") or []) if str(h).strip()],
         "model": str(entry.get("model", "")).strip(),
         "brief": str(entry.get("brief", "")),
+        # The AI service its conversations use (item K): claude, copilot or codex; claude when unset.
+        "agent": _agent_of(entry),
     }
 
 

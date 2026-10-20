@@ -112,6 +112,11 @@ class Forwarder:
 
     async def _http(self, request: web.Request, host: str, body: bytes | None = None) -> web.StreamResponse:
         headers = {k: v for k, v in request.headers.items() if k.lower() not in REQUEST_SKIP}
+        # A client that asks for no encoding gets none (2026-10-20): aiohttp otherwise adds its own
+        # "Accept-Encoding: gzip, deflate", the reply comes back gzipped, and this forwards it as it came -
+        # to a client (Codex) that never asked for gzip and cannot read it.
+        if not any(k.lower() == "accept-encoding" for k in headers):
+            headers["Accept-Encoding"] = "identity"
         if body is None:
             body = await request.read()
         url = f"{self.upstream or 'https://' + host}{request.path_qs}"

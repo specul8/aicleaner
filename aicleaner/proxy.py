@@ -99,6 +99,11 @@ _REQ = web.RequestKey("aicleaner_request", dict)
 # (2026-10-18): openai for chat, openai_responses for the Responses API.
 COPILOT = web.RequestKey("aicleaner_copilot", str)
 COPILOT_AS = web.RequestKey("aicleaner_copilot_dialect", str)
+# Which app a request read by an agent's reader came from, for the substitution log (item K3).
+AGENT_APP = web.RequestKey("aicleaner_agent_app", str)
+# Codex's paths that carry the conversation (item K3): ChatGPT-signed-in on chatgpt.com, API key on
+# api.openai.com. Everything else on those hosts goes on untouched.
+OPENAI_READ = {"/backend-api/codex/responses", "/v1/responses"}
 # The Copilot paths filtered so far, and how (spec "Order of work"); the rest still go on untouched.
 COPILOT_READ = {"/chat/completions": "openai", "/responses": "openai_responses",
                 # Release 5: public code matching - `source` is the person's code going to GitHub.
@@ -265,6 +270,8 @@ class Proxy:
         self.copilot_error = ""
         self.copilot_last_at = 0.0
         self.copilot_since = 0.0
+        # Readers a Project session's agent needs (item K), started on demand: {"copilot"}.
+        self.agent_readers: set[str] = set()
         # Candidates are per host: the folder may be OneDrive-synced between machines.
         self.store = (CandidateStore(Path(cfg.mapping).parent / f"candidates-{evidence.host}.jsonl")
                       if cfg.detect_enabled else None)
@@ -361,15 +368,21 @@ class Proxy:
         shares = self.share_store.load()
         folded = {cid.lower(): folder for cid, folder in shares.items()}
         profiles = []
+        from .casual import PROFILE as CASUAL
+
         for e in entries:
             share = Path(folded[e["client"].lower()]) if folded.get(e.get("client", "").lower()) else None
+            # Casual chats has no client, so no client share: its folder is its share (item J).
+            if share is None and e["name"] == CASUAL and not e.get("client") and self.cfg.session_casual_folder:
+                share = Path(self.cfg.session_casual_folder)
             label = labels.get(e.get("client", ""), "") or e["name"]
             profiles.append(Profile(name=e["name"], client=e.get("client", ""), label=label,
                                     projects=[Path(f) for f in e.get("projects", [])],
                                     model=e.get("model", ""), brief=e.get("brief", ""), share=share,
                                     workspaces=[Path(w) for w in e.get("workspaces", [])],
                                     home_override=e.get("home_override", ""),
-                                    homes_before=list(e.get("homes_before") or [])))
+                                    homes_before=list(e.get("homes_before") or []),
+                                    agent=e.get("agent", "claude") or "claude"))
             # Each worktree is a session of its own, `<profile> @ <name>` (DECISIONS 66): everything
             # keyed by a session's name - reattach, the menu, notices, the address - works unchanged.
             # Its home is the worktree, and only the worktree: the repo it came from is the other
@@ -378,7 +391,7 @@ class Proxy:
                 profiles.append(Profile(name=f"{e['name']} @ {w['name']}", client=e.get("client", ""),
                                         label=label, projects=[Path(w["path"])], model=e.get("model", ""),
                                         brief=e.get("brief", ""), share=share, home_override=w["path"],
-                                        worktree_of=e["name"], worktree=dict(w)))
+                                        worktree_of=e["name"], worktree=dict(w), agent=e.get("agent", "claude") or "claude"))
         return profiles
 
     def read_profiles(self) -> list[dict]:
@@ -839,6 +852,29 @@ class Proxy:
             return await self.handle(request)
         return await forwarder.handle(request)
 
+    def openai_forwarder(self) -> Any:
+        """Codex's requests that are not its conversation, sent on untouched (item K3)."""
+        if getattr(self, "_openai_forwarder", None) is None:
+            from .copilot import Forwarder
+            self._openai_forwarder = Forwarder()
+        return self._openai_forwarder
+
+    async def openai_handle(self, request: web.Request) -> web.StreamResponse:
+        """What the OpenAI reader serves (item K3): Codex's Responses conversation - over its WebSocket or
+        HTTP - filtered as Copilot's is; every other path on chatgpt.com / api.openai.com forwarded untouched."""
+        forwarder = self.openai_forwarder()
+        self.openai_last_at = time.time()
+        if request.path in OPENAI_READ:
+            if request.method == "GET" and request.headers.get("Upgrade", "").lower() == "websocket":
+                return await self.copilot_socket(request, forwarder=forwarder, app="ChatGPT (Codex)")
+            if request.method == "POST":
+                host = request.host.split(":")[0].lower()
+                request[COPILOT] = forwarder.upstream or f"https://{host}"
+                request[COPILOT_AS] = "openai_responses"
+                request[AGENT_APP] = "ChatGPT (Codex)"
+                return await self.handle(request)
+        return await forwarder.handle(request)
+
     async def copilot_telemetry(self, request: web.Request) -> web.StreamResponse:
         """Copilot's telemetry (release 5): it carries code - the next edit suggestion's prediction is
         copied into it - so every string in every event is tokenised before it goes on. Nothing comes
@@ -869,7 +905,8 @@ class Proxy:
                      session=session_name, session_client=session_client)
         return response
 
-    async def copilot_socket(self, request: web.Request) -> web.StreamResponse:
+    async def copilot_socket(self, request: web.Request, forwarder: Any = None,
+                             app: str = "GitHub Copilot") -> web.StreamResponse:
         """Copilot's Responses conversation over a WebSocket (release 4, 2026-10-19). Each frame Copilot
         sends is filtered by _filter_body, exactly as an HTTP request is, and sent only if it passes; a
         refusal goes back to Copilot as an error frame. Each frame back is one Responses event, restored
@@ -879,13 +916,14 @@ class Proxy:
         from .sse import make_event
 
         started = time.monotonic()
-        forwarder = self.copilot_forwarder()
+        forwarder = forwarder or self.copilot_forwarder()
         host = request.host.split(":")[0].lower()
         tail = request.path.lstrip("/")
         request[COPILOT] = forwarder.upstream or f"https://{host}"
         request[COPILOT_AS] = "openai_responses"
+        request[AGENT_APP] = app
         session_name, session_client = self._session_of(request)
-        driver = {**(await self._driver(session_name)), "app": "GitHub Copilot"}
+        driver = {**(await self._driver(session_name)), "app": app}
         found = self.mapper.find_real(_outside_body(request, tail))
         if found:
             log.warning("canary: a client name in the URL or headers of the Copilot socket (clients: %s)",
@@ -972,7 +1010,8 @@ class Proxy:
         try:
             # The forward proxy runs while either reader is wanted: the Code tab's (api.anthropic.com)
             # or Copilot's (2026-10-18). A change of which one rebuilds it; the port is shared.
-            wanted = self.cfg.codetab_enabled or self.cfg.copilot_enabled
+            # Or a Project session driving GitHub Copilot CLI (item K), which needs Copilot's reader.
+            wanted = self.cfg.codetab_enabled or self.cfg.copilot_enabled or bool(self.agent_readers)
             authority = self.codetab_authority() if self.cfg.codetab_enabled else None
             if authority is not None:
                 await asyncio.to_thread(authority.ensure)
@@ -990,13 +1029,20 @@ class Proxy:
                 self.codetab = tab
             copilot_said = ""
             if self.codetab is not None:
-                if self.cfg.copilot_enabled:
+                if self.cfg.copilot_enabled or "copilot" in self.agent_readers:
                     copilot_authority = Authority(self._state_path(), kind="copilot")
                     await asyncio.to_thread(copilot_authority.ensure)
                     await self.codetab.set_copilot(copilot_authority, self.copilot_handle)
-                    copilot_said = await self._apply_copilot_vscode(copilot_authority, url, trust)
+                    if self.cfg.copilot_enabled:
+                        copilot_said = await self._apply_copilot_vscode(copilot_authority, url, trust)
                 else:
                     await self.codetab.set_copilot(None)
+                if "openai" in self.agent_readers:
+                    openai_authority = Authority(self._state_path(), kind="openai")
+                    await asyncio.to_thread(openai_authority.ensure)
+                    await self.codetab.set_openai(openai_authority, self.openai_handle)
+                else:
+                    await self.codetab.set_openai(None)
             if not self.cfg.copilot_enabled:
                 copilot_said = await self._apply_copilot_vscode(None, url, False)
             if self.cfg.codetab_enabled:
@@ -1046,6 +1092,36 @@ class Proxy:
             raise
         self.copilot_error = ""
         return said
+
+    async def prepare_agent(self, which: Any) -> dict[str, str]:
+        """Another AI service's filtering made ready for a Project session (item K): the forward proxy and
+        that agent's reader running, and the environment its process needs - the proxy, and the agent's
+        certificate in the variable it reads, given to that process alone (no Windows store, no prompt;
+        probed 2026-10-20 with Copilot CLI in ACP mode). Raises SessionError when it cannot be filtered."""
+        from .session import SessionError
+
+        if which.reader not in ("copilot", "openai"):
+            raise SessionError(f"{which.label} cannot be filtered here yet, so it is not started")
+        if not codetab_settings.applies():
+            raise SessionError(f"{which.label} is filtered through the forward proxy, which runs on Windows only")
+        self.agent_readers.add(which.reader)
+        await self.apply_codetab()
+        port = 0 if self.codetab is None else (self.codetab.copilot_port if which.reader == "copilot"
+                                               else self.codetab.openai_port)
+        if not port:
+            raise SessionError(f"{which.label} cannot be filtered: the forward proxy did not start "
+                               f"({self.codetab_error or 'see the log'})")
+        authority = Authority(self._state_path(), kind=which.reader)
+        url = f"http://127.0.0.1:{self.cfg.codetab_port}"
+        env = {"HTTPS_PROXY": url, "HTTP_PROXY": url, "https_proxy": url, "http_proxy": url,
+               "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"}
+        if which.reader == "copilot":
+            env["NODE_EXTRA_CA_CERTS"] = str(authority.ca_path)
+        else:
+            # Codex's own binaries read CODEX_CA_CERTIFICATE (found in them, 2026-10-20): a bundle that is
+            # added to the system roots for that process, never written anywhere else.
+            env["CODEX_CA_CERTIFICATE"] = str(authority.ca_path)
+        return env
 
     def copilot_store(self) -> Any:
         """Where the Copilot certificate is trusted: the person's Windows store (a file in tests)."""
@@ -1131,10 +1207,17 @@ class Proxy:
         timeout = aiohttp.ClientTimeout(total=None, sock_read=self.cfg.upstream_timeout_s)
         self._session = aiohttp.ClientSession(timeout=timeout, auto_decompress=True)
         await self.audit_mcp()
+        # Claude Code's own settings are kept in step at a start only by a proxy that is an install - started
+        # from its config file - or one under a test home (AICLEANER_CLIENT_HOME). A proxy built in code
+        # with neither (a probe) touches nothing: one, 2026-10-20, rewrote the person's real hooks with the
+        # repository's Python and took the deliver hook out of every running session on the machine.
+        writes_settings = self.cfg.path is not None or bool(os.environ.get("AICLEANER_CLIENT_HOME", "").strip())
+        if not writes_settings:
+            log.info("not an installed proxy: Claude Code's settings are left as they are")
         # The Bash guard's hook kept in step with its switch at every start (feature 98), so a deploy
         # installs it - on by default - and points it at this install's Python and script.
         try:
-            said = await asyncio.to_thread(bashguard.apply, self.cfg.claude_bash_guard)
+            said = await asyncio.to_thread(bashguard.apply, self.cfg.claude_bash_guard) if writes_settings else ""
             if said:
                 log.info(said)
         except bashguard.GuardError as exc:
@@ -1156,14 +1239,15 @@ class Proxy:
         # the page can drive sessions - otherwise there is never anything waiting to hand over.
         try:
             said = await asyncio.to_thread(deliver.apply, self.cfg.claude_deliver_between_tools
-                                           and self.session is not None, self.cfg.port)
+                                           and self.session is not None, self.cfg.port) if writes_settings else ""
             if said:
                 log.info(said)
         except deliver.DeliverError as exc:
             log.warning("deliver hook not applied: %s", exc)
         # The rename-collapse guard: every session on the machine, since the proxy sees them all.
         try:
-            said = await asyncio.to_thread(deliver.apply_collapse_guard, self.cfg.claude_collapse_guard, self.cfg.port)
+            said = await asyncio.to_thread(deliver.apply_collapse_guard, self.cfg.claude_collapse_guard,
+                                           self.cfg.port) if writes_settings else ""
             if said:
                 log.info(said)
         except deliver.DeliverError as exc:
@@ -1172,18 +1256,19 @@ class Proxy:
         # 2026-10-14): read here, so sessions may Read them. Only a block already there is touched.
         try:
             said = await asyncio.to_thread(rules.apply, self.cfg.allow_images, reading=self.reads_images(),
-                                           only_if_present=True)
+                                           only_if_present=True) if writes_settings else ""
             if said and not said.startswith("no change"):
                 log.info(said)
         except rules.RulesError as exc:
             log.warning("rules block not updated: %s", exc)
         # The Code tab switch (feature 117) kept in step at every start, as the bash guard is.
         try:
-            await self.apply_codetab()
+            if writes_settings:
+                await self.apply_codetab()
         except (codetab_settings.SettingsError, AuthorityError) as exc:
             log.warning("Code tab not applied: %s", exc)
         # No co-author lines in commits or pull requests (feature 117, decision 8): merged where missing.
-        if codetab_settings.applies():
+        if codetab_settings.applies() and writes_settings:
             try:
                 await asyncio.to_thread(codetab_settings.apply_attribution, self.session_folders())
             except Exception as exc:  # noqa: BLE001 - never stops the proxy
@@ -1300,6 +1385,42 @@ class Proxy:
         # The tree draws from the profile's workspace files (D99), within the allowed folder locations.
         self.session.allowed_roots = self._allowed_roots
         self.session.auto_titles = cfg.session_auto_titles     # item E
+        # Other AI services (item K): their filtering made ready here, their conversations filed in state.
+        self.session.prepare_agent = self.prepare_agent
+        self.session.agents_dir = self._state_path()
+
+    def set_casual_folder(self, folder: str) -> dict[str, Any]:
+        """The casual-chats folder chosen (item J): created if missing, added to the allowed folders
+        when outside them, saved as session.casual_folder, and the Casual chats project session made
+        (or pointed at it) - so Chat now has somewhere to go. Raises CasualError with the reason."""
+        from . import casual
+
+        path = casual.prepare(folder)
+        changes: dict[str, Any] = {"session.casual_folder": str(path)}
+        if not casual.inside(path, list(self.cfg.folder_roots)):
+            changes["folders.roots"] = [*self.cfg.folder_roots, str(path)]
+        self.cfg.update_settings(changes)
+        entries, _problem = self.profile_store.load()
+        mine = next((e for e in entries if e["name"] == casual.PROFILE), None)
+        if mine is None:
+            entries.append(casual.profile_entry(path))
+        elif not mine.get("client"):
+            mine["projects"] = [str(path)]
+        self.profile_store.save(entries, set(self.client_labels()) or None)
+        self.reload_profiles()
+        return {"folder": str(path), "profile": casual.PROFILE}
+
+    def casual_profile(self) -> str:
+        """Casual chats' profile name when it exists, made again from the folder when it was deleted."""
+        from . import casual
+
+        entries, _problem = self.profile_store.load()
+        if any(e["name"] == casual.PROFILE for e in entries):
+            return casual.PROFILE
+        if not self.cfg.session_casual_folder:
+            return ""
+        self.set_casual_folder(self.cfg.session_casual_folder)
+        return casual.PROFILE
 
     async def apply_session_enabled(self) -> None:
         """Follow session.enabled without a restart: on builds the host, off stops every running
@@ -1319,6 +1440,8 @@ class Proxy:
             self.codetab = None
         if getattr(self, "_copilot_forwarder", None) is not None:
             await self._copilot_forwarder.close()
+        if getattr(self, "_openai_forwarder", None) is not None:
+            await self._openai_forwarder.close()
         if self.session is not None:
             # A session lives in its own broker (DECISIONS 49): this proxy lets go and the next one
             # re-attaches. Its model requests fail while no proxy answers, and Claude Code retries.
@@ -1642,7 +1765,7 @@ class Proxy:
         if request.get(CODETAB):
             driver = {**driver, "app": "Claude Desktop Code tab"}
         elif copilot_to:
-            driver = {**driver, "app": "GitHub Copilot"}
+            driver = {**driver, "app": request.get(AGENT_APP) or "GitHub Copilot"}
         request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver,
                          "project": "", "held": None, "unprotected": [], "declined": [], "canary": []}
         self._open[request[_REQ]["id"]] = {"session": session_name, "started": time.time(), "content_at": None}

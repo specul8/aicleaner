@@ -152,8 +152,12 @@ class Config:
     # produced and nowhere else: an engine misreads, a person typing does not, and over a whole
     # request nearly every match would be an ordinary long word replaced by a client's token.
     near_miss: bool = True
-    # Driving a Claude Code session from the UI (see session.py); off until asked for.
+    # Driving a Claude Code session from the UI (see session.py). On for an install by default since
+    # item J (2026-10-20: "Project Sessions on by default") - the loader below; a program building a
+    # Config in code (the tests) still starts with it off.
     session_enabled: bool = False
+    # The casual-chats folder (item J): chat assets that belong to no project; Casual chats lives there.
+    session_casual_folder: str = ""
     # The file editor's PowerShell commands, compiled from this machine (feature 80).
     editor_compile_powershell: bool = True
     # Double-click in a Markdown preview (feature 92): ask the first time, jump to the source with
@@ -258,6 +262,7 @@ class Config:
         "detect.auto_map_client_resources": ("auto_map_client_resources", bool),
         "detect.near_miss": ("near_miss", bool),
         "session.enabled": ("session_enabled", bool),
+        "session.casual_folder": ("session_casual_folder", str),
         "remote.enabled": ("remote_enabled", bool),
         "remote.encrypt": ("remote_encrypt", bool),
         "remote.key_storage": ("remote_key_storage", str),
@@ -461,7 +466,8 @@ class Config:
         except (TypeError, ValueError):
             cfg.debug_timings_since = 0
         ses = data.get("session") or {}
-        cfg.session_enabled = _flag(ses, "enabled", False, "session.enabled")
+        cfg.session_enabled = _flag(ses, "enabled", True, "session.enabled")
+        cfg.session_casual_folder = os.path.expandvars(str(ses.get("casual_folder", "") or "")).strip()
         cfg.session_claude = os.path.expandvars(str(ses.get("claude", "claude")))
         cfg.session_projects = [os.path.expandvars(str(p)) for p in (ses.get("projects") or [])]
         cfg.session_permission_mode = str(ses.get("permission_mode", "manual"))

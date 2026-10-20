@@ -152,7 +152,11 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "copilot.enabled",
                    # Where this browser keeps the tunnel key (H2, Brad 2026-10-19): "more about the
                    # storage than the code itself, is protected either way".
-                   "remote.key_storage")
+                   "remote.key_storage",
+                   # Reading text out of images and scanned PDFs (J2, Brad 2026-10-20): its own card.
+                   "attachments.ocr", "attachments.ocr_max_pages", "attachments.ocr_timeout_s",
+                   # The casual-chats folder (item J): it prompts nothing on the machine.
+                   "session.casual_folder")
 LOCAL_ONLY_SETTINGS = tuple(k for k in Config.EDITABLE if k not in REMOTE_SETTINGS)
 from .mapping import (GLOBAL_ID, SOURCE_MANUAL, SOURCE_REVIEW, MappingError)
 from . import bashguard, rules
@@ -1630,16 +1634,13 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
         except (ValueError, claudetrust.TrustError) as exc:
             return err(exc)
-        return web.json_response({"missing": missing, "can_add": not request.get(REMOTE),
+        return web.json_response({"missing": missing, "can_add": True,
                                   "names": claudetrust.LIST_NAMES})
 
     async def session_trust_add(request: web.Request) -> web.Response:
-        """Add what is missing to Claude Code's files. On the machine only: they are the person's own
-        Claude Code settings, not aicleaner's."""
+        """Add what is missing to Claude Code's files - the person's own Claude Code settings, not
+        aicleaner's. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
         from . import claudetrust
-        if request.get(REMOTE):
-            return err(ValueError("adding to Claude Code's trusted folders is done on the machine aicleaner "
-                                  "runs on"), status=403)
         try:
             clean, folders, home, workspace_dirs = await trust_inputs(request)
             missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
@@ -1725,6 +1726,128 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except SessionError as exc:
             return err(exc)
         return web.json_response(state)
+
+    async def conversation_move_preview(request: web.Request) -> web.Response:
+        """What a move would take (J3): the files the conversation made, and where it could go."""
+        from .session import SessionError
+
+        name, conv = request.query.get("name", ""), request.query.get("id", "")
+        try:
+            host = session_host()
+            files = await asyncio.to_thread(host.files_of_conversation, name, conv)
+            here = host.profile(name).name
+        except SessionError as exc:
+            return err(exc)
+        targets = [{"name": p.name, "client": p.label if p.client else "", "home": host.home_of(p).get("folder") or ""}
+                   for p in host.profiles if p.name != here and not getattr(p, "worktree_of", "")]
+        return web.json_response({"files": files, "targets": targets})
+
+    async def conversation_move(request: web.Request) -> web.Response:
+        """A conversation moved to another project session (J3), with its files when asked."""
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            done = await asyncio.to_thread(session_host().move_conversation, str(body.get("name", "")),
+                                           str(body.get("id", "")), str(body.get("to", "")), bool(body.get("files")))
+        except (SessionError, OSError) as exc:
+            return err(exc)
+        return web.json_response(done)
+
+    async def session_agent(request: web.Request) -> web.Response:
+        """The AI service a project session's conversations use (item K), kept with the profile. Running and
+        idle: a new conversation with the chosen service (a conversation cannot change service); busy:
+        refused, saying why."""
+        from .agents import AGENTS
+        from .profiles import ProfileError
+        from .session import SessionError
+
+        body = await request.json()
+        name, wanted = str(body.get("name", "")), str(body.get("agent", "")).strip().lower()
+        if wanted not in AGENTS:
+            return err(ValueError(f"{wanted or 'that'} is not an AI service aicleaner knows"))
+        try:
+            host = session_host()
+            profile = host.profile(name)
+            base = profile.worktree_of or profile.name
+            entries, _problem = proxy.profile_store.load()
+            entry = next((e for e in entries if e["name"] == base), None)
+            if entry is None:
+                return err(ValueError(f"{base} is not a saved project session"))
+            running = host.sessions.get(profile.name)
+            if running is not None and running.running and (entry.get("agent") or "claude") != wanted:
+                from .session import work_in_progress
+                why = work_in_progress(running)
+                if why:
+                    return err(SessionError(f"{profile.name}: {why}"), status=409)
+            entry["agent"] = wanted
+            await asyncio.to_thread(proxy.profile_store.save, entries, set(proxy.client_labels()) or None)
+            proxy.reload_profiles()
+            if running is not None and running.running and running.agent != wanted:
+                await host.switch(name=profile.name, resume="", title="")
+        except (SessionError, ProfileError, ValueError) as exc:
+            return err(exc, status=409 if isinstance(exc, SessionError) else 400)
+        return web.json_response({"ok": True, "name": profile.name, "agent": wanted})
+
+    async def session_switch(request: web.Request) -> web.Response:
+        """Another conversation in a running session (item J), refused while there is work in progress."""
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            state = await session_host().switch(name=str(body.get("name", "")), resume=str(body.get("resume", "")),
+                                                title=str(body.get("title", ""))[:200])
+        except SessionError as exc:
+            return err(exc, status=409)
+        return web.json_response(state)
+
+    # ---- casual chats and Chat now (item J, 2026-10-20) ----------------------------------------
+
+    async def casual_get(request: web.Request) -> web.Response:
+        from . import casual
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        entries, _problem = proxy.profile_store.load()
+        return web.json_response({"folder": proxy.cfg.session_casual_folder,
+                                  "profile": casual.PROFILE if any(e["name"] == casual.PROFILE for e in entries) else "",
+                                  "suggestions": await asyncio.to_thread(casual.suggestions)})
+
+    async def casual_post(request: web.Request) -> web.Response:
+        from .casual import CasualError
+        from .profiles import ProfileError
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        body = await json_or_empty(request)
+        try:
+            done = await asyncio.to_thread(proxy.set_casual_folder, str(body.get("folder", "")))
+        except (CasualError, ProfileError, ValueError, OSError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, **done})
+
+    async def chat_now(request: web.Request) -> web.Response:
+        """Chat now (item J): a new conversation in Casual chats - made if needed, Project Sessions turned
+        on if off, the session started, or switched to a new conversation when running and idle."""
+        from .profiles import ProfileError
+        from .session import SessionError
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        try:
+            name = await asyncio.to_thread(proxy.casual_profile)
+        except (ProfileError, ValueError, OSError) as exc:
+            return err(exc)
+        if not name:
+            # An expected answer, not a failure: the page asks for the folder and tries again.
+            return web.json_response({"ok": False, "needs_folder": True})
+        if not proxy.cfg.session_enabled:
+            proxy.cfg.update_settings({"session.enabled": True})
+            await proxy.apply_session_enabled()
+            proxy.reload_profiles()
+        await proxy.audit_mcp()
+        try:
+            await session_host().switch(name=name, resume="", title="")
+        except SessionError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True, "name": name})
 
     async def session_prompt(request: web.Request) -> web.Response:
         from .session import SessionError
@@ -2039,9 +2162,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                                   "targets": ([GLOBAL_ID] if GLOBAL_ID not in ids else []) + ids})
 
     async def renumber_client(request: web.Request) -> web.Response:
-        """A client's index changed (DECISIONS 67), before it is shared. Local only."""
-        if request.get(REMOTE):
-            return err(ValueError("renumbering works only on this machine"), status=403)
+        """A client's index changed (DECISIONS 67), before it is shared. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
         body = await request.json()
         try:
             await asyncio.to_thread(mf.renumber, request.match_info["cid"], int(body.get("index", 0)))
@@ -2090,11 +2211,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
 
     async def join_client(request: web.Request) -> web.Response:
         """A client a colleague shared, from its synced folder (DECISIONS 67). The folder is held to
-        the allowed folders like any other a page names. Local only: it changes what this PC loads."""
+        the allowed folders like any other a page names. It changes what this PC loads. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
         from .folders import FolderError, check_usable
 
-        if request.get(REMOTE):
-            return err(ValueError("adding a shared client works only on this machine"), status=403)
         body = await request.json()
         folder = str(body.get("folder", "")).strip()
         try:
@@ -2925,8 +3044,28 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if proxy is None:
             return err(ValueError("unavailable"))
         copilot = await asyncio.to_thread(proxy.copilot_summary)
-        tools = await aitools.rows(proxy.cfg, copilot)
-        return web.json_response({"tools": tools, "login": claude_login.view(), "remote": bool(request.get(REMOTE))})
+        tools = await aitools.rows(proxy.cfg, copilot, logins={k: v.state for k, v in device_logins.items()})
+        return web.json_response({"tools": tools, "login": claude_login.view(), "remote": bool(request.get(REMOTE)),
+                                  "devices": {k: v.view() for k, v in device_logins.items()}})
+
+    # Other agents (item K): installed into aicleaner's own folder, signed in with a device code - neither
+    # prompts on the machine, so both work through remote access.
+    device_logins = {"copilot-cli": aitools.DeviceLogin("copilot"), "codex": aitools.DeviceLogin("codex")}
+
+    async def aitools_install(request: web.Request) -> web.Response:
+        body = await json_or_empty(request)
+        return web.json_response(await aitools.install(str(body.get("agent", ""))))
+
+    async def aitools_device(request: web.Request) -> web.Response:
+        """POST {tool, action: start|cancel} or GET ?tool=: an agent's device-code sign-in."""
+        if request.method == "GET":
+            login = device_logins.get(request.query.get("tool", ""))
+            return web.json_response(login.view() if login else {"state": "idle"})
+        body = await json_or_empty(request)
+        login = device_logins.get(str(body.get("tool", "")))
+        if login is None:
+            return err(ValueError("that AI tool signs in another way"))
+        return web.json_response(await (login.cancel() if body.get("action") == "cancel" else login.start()))
 
     async def aitools_login(request: web.Request) -> web.Response:
         """Claude Code's sign-in: start it (POST), or read where it is (GET)."""
@@ -3229,13 +3368,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         return web.json_response({"has_key": key is not None, "key_id": key_id(key) if key else ""})
 
     async def client_key_post(request: web.Request) -> web.Response:
-        """generate (shown once, to send to the engagement's people), enter (pasted), rotate.
-        Local only: a key is the one thing that makes a change to a shared file trusted, and it is
-        not created, shown or replaced through the tunnel."""
+        """generate (shown once, to send to the engagement's people), enter (pasted), rotate. A key is
+        the one thing that makes a change to a shared file trusted. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine. (Brad confirmed it for
+        generate, enter and rotate after the explanation: a generated key crosses the remote
+        connection once - sealed when the encrypted tunnel is on.)"""
         from .keys import KeyError_, generate, key_id
-        if request.get(REMOTE):
-            return err(ValueError("local only: client keys can only be set on the machine aicleaner runs on"),
-                       status=403)
         cid = request.match_info["cid"]
         body = await request.json()
         action = str(body.get("action", ""))
@@ -3263,11 +3400,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(exc)
 
     async def mcp_approve_server(request: web.Request) -> web.Response:
-        """Real names for an MCP server reached over http(s) (H11, DECISIONS 52). Local only: who
-        receives client names is decided on the machine aicleaner runs on."""
-        if request.get(REMOTE):
-            return err(ValueError("local only: MCP servers can only be approved on the machine aicleaner runs on"),
-                       status=403)
+        """Real names for an MCP server reached over http(s) (H11, DECISIONS 52). From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
         if proxy is None:
             return err(ValueError("no proxy"))
         pattern = str((await request.json()).get("pattern", ""))
@@ -3449,6 +3582,13 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/session/worktree/merge", session_worktree_merge)
         app.router.add_post("/api/session/worktree/remove", session_worktree_remove)
         app.router.add_post("/api/session/start", session_start)
+        app.router.add_post("/api/session/switch", session_switch)
+        app.router.add_post("/api/session/agent", session_agent)
+        app.router.add_get("/api/session/conversations/move", conversation_move_preview)
+        app.router.add_post("/api/session/conversations/move", conversation_move)
+        app.router.add_get("/api/session/casual", casual_get)
+        app.router.add_post("/api/session/casual", casual_post)
+        app.router.add_post("/api/session/chat-now", chat_now)
         app.router.add_post("/api/session/prompt", session_prompt)
         app.router.add_post("/api/session/stop", session_stop)
         app.router.add_post("/api/session/interrupt", session_interrupt)
@@ -3550,6 +3690,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/setup/enable", setup_enable)
     app.router.add_post("/api/setup/disable", setup_disable)
     app.router.add_get("/api/aitools", aitools_get)
+    app.router.add_post("/api/aitools/install", aitools_install)
+    app.router.add_route("*", "/api/aitools/device", aitools_device)
     app.router.add_route("*", "/api/aitools/claude-code/login", aitools_login)
     app.router.add_post("/api/aitools/claude-code/login/code", aitools_login_code)
     app.router.add_post("/api/aitools/claude-code/login/cancel", aitools_login_cancel)

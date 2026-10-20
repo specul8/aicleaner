@@ -8,8 +8,9 @@
 import { getJSON, postJSON, sayError } from '../api.js';
 import { h, setChildren } from '../dom.js';
 import { aiToolsTable } from '../aitools.js';
+import { casualFolderField } from '../chatnow.js';
 
-const STEPS = ['What happens', 'Your first client', 'Remote access', 'Your AI tools', 'Done'];
+const STEPS = ['What happens', 'Your first client', 'Remote access', 'Your AI tools', 'Casual chats', 'Done'];
 const view = { step: 0, main: null, ctx: null, dns: null, remote: null };
 
 export async function render(main, ctx) {
@@ -32,7 +33,7 @@ function paint() {
     const button = event.target.closest('button[data-step]');
     if (button) { view.step = Number(button.dataset.step); paint(); }
   });
-  const body = [welcome, firstClient, remote, tools, done][view.step](status);
+  const body = [welcome, firstClient, remote, tools, casualChats, done][view.step](status);
   const back = h('button', { type: 'button', class: 'setup-back', disabled: view.step === 0 }, 'Back');
   const next = h('button', { type: 'button', class: 'primary setup-next' }, view.step === STEPS.length - 1 ? 'Finish' : 'Next');
   back.addEventListener('click', () => { view.step -= 1; paint(); });
@@ -50,7 +51,9 @@ function paint() {
 // Through remote access the wizard is shown whole (E4, Brad 2026-10-19), but what runs this machine's
 // scripts is disabled and says so - as Settings' local-only cards do. A step that draws more buttons
 // later (remote access's stages) is watched, so a button added after the first paint is locked too.
-const LOCAL_ACTIONS = '.setup-enable, .setup-remote-go, .setup-remote-replace';
+// Routing the AI tools (step 4) reaches since J2 (Brad, 2026-10-20); setting up remote access installs
+// cloudflared and a service, which prompt on the machine, so those stay here.
+const LOCAL_ACTIONS = '.setup-remote-go, .setup-remote-replace';
 const LOCAL_ONLY = 'Can only be changed where aicleaner is deployed';
 
 function lockLocalActions(card) {
@@ -442,6 +445,20 @@ function remoteForm(r, domain) {
     tokenSteps,
     h('label', { class: 'field' }, stored ? 'Or a new token (replaces the stored one)' : 'Cloudflare API token', secret),
     h('div', { class: 'form-row' }, go), said, out);
+}
+
+// Casual chats (item J): a folder for chats that belong to no project - OneDrive or Google Drive, so what
+// they make is synced - and the Casual chats project session in it, which Chat now in the menu opens.
+// Reaches remotely as well: choosing a folder prompts nothing on the machine.
+function casualChats() {
+  const field = casualFolderField(null);
+  return [
+    h('h2', {}, 'Casual chats'),
+    h('p', {}, 'Not every chat belongs to a client or a project. Choose a folder for the ones that do not: Chat now in the '
+      + 'menu starts a new conversation there, and anything it makes is kept in that folder. A OneDrive or Google Drive '
+      + 'folder is synced to your other devices.'),
+    field.element,
+  ];
 }
 
 function done(status) {

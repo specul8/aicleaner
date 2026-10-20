@@ -19,8 +19,8 @@ function row(server, remote, after) {
   else if (server.names === 'tokens') names = h('span', { class: 'chip warn' }, 'tokens until approved');
   let action = null;
   if (server.approvable) {
-    action = h('button', { type: 'button', class: 'mcp-approve', disabled: remote,
-      title: remote ? 'MCP servers can only be approved on the local machine' : '' }, 'Allow real names');
+    // From anywhere since J2 (Brad, 2026-10-20): approving prompts nothing on the machine.
+    action = h('button', { type: 'button', class: 'mcp-approve' }, 'Allow real names');
     action.addEventListener('click', async () => {
       try {
         await postJSON('/api/mcp/approve', { pattern: server.pattern });

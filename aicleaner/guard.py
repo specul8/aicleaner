@@ -86,7 +86,12 @@ REMOTE_READS: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/api/secrets"), ("GET", "/api/secrets/mode")})
 # Writes under a refused prefix that reach anyway, each one named (H2): adding a saved secret strengthens
 # redaction; it never weakens it, and the value goes in, never out.
-REMOTE_WRITES: frozenset[tuple[str, str]] = frozenset({("POST", "/api/secrets")})
+REMOTE_WRITES: frozenset[tuple[str, str]] = frozenset({
+    ("POST", "/api/secrets"),
+    # Wizard step 4 (J2, Brad 2026-10-20): routing the AI tools through aicleaner - settings files only,
+    # no prompt on the machine. Taking a tool OFF stays local (J4, Brad 2026-10-20: "it allows the AI
+    # tool to bypass the proxy"), as does the remote-access set-up itself.
+    ("POST", "/api/setup/enable")})
 
 
 def refused_remotely(path: str, method: str = "") -> bool:

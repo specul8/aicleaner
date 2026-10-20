@@ -8,8 +8,8 @@
       - aicleaner-config.json present (seeded from the example, never overwritten) and the configured
         clients folder created when missing (the example mapping is never seeded)
       - the mapping validated with "python -m aicleaner check"
-      - %USERPROFILE%\.claude\settings.json carrying skipWebFetchPreflight, and Claude Code's
-        telemetry and error reporting off (DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING; -KeepTelemetry
+      - %USERPROFILE%\.claude\settings.json carrying skipWebFetchPreflight, Claude Code's error
+        reporting off and tool search on (DISABLE_ERROR_REPORTING, ENABLE_TOOL_SEARCH; -KeepTelemetry
         leaves them). NOT the base URL: Enable-AiCleaner.ps1 routes Claude Code and VS Code through
         the proxy, after its readiness checks - Deploy-AiCleaner.ps1 offers it at the end of a run
       - optionally, VS Code user settings with VS Code's telemetry off (only wanted on a machine
@@ -83,10 +83,10 @@
     update copies files and runs no installer, and this keeps the step in one place.
 
 .PARAMETER KeepTelemetry
-    Leave Claude Code's telemetry and error reporting as they are. By default both are switched off
-    in the env block of the Claude Code settings file (DISABLE_TELEMETRY, DISABLE_ERROR_REPORTING):
-    aicleaner is the remote interface, so Claude Code's own Remote Control - which needed them on -
-    is not wanted.
+    Leave Claude Code's error reporting, telemetry and tool search as they are. By default the env
+    block of the Claude Code settings file gets DISABLE_ERROR_REPORTING=1 and ENABLE_TOOL_SEARCH=true,
+    and a DISABLE_TELEMETRY=1 an earlier install wrote is taken out: with telemetry off Claude Code
+    withholds every tool behind a feature flag, Monitor among them (2026-10-20).
 
 .PARAMETER TelemetryOnly
     Run only the telemetry step and stop. Deploy-AiCleaner.ps1 -Action Update uses it, as it uses
@@ -1076,27 +1076,33 @@ function Install-ScriptAnalyzer {
 function Set-ClaudeTelemetryOff {
     <#
     .SYNOPSIS
-        Switch Claude Code's telemetry and error reporting off in its settings file's env block.
+        Claude Code's error reporting off, its telemetry left on, and tool search on, in its settings
+        file's env block.
     .DESCRIPTION
-        The user, 2026-10-06: "This should be switched off again ... The aicleaner tool IS the remote
-        interface - there's no need for a second one through Claude Code Remote Control any more."
-        Telemetry was turned back on while Remote Control was in use; it is off again by default.
+        Error reporting off (DECISIONS 65, the user 2026-10-06). Telemetry was switched off with it, until
+        2026-10-20: DISABLE_TELEMETRY also stops Claude Code reading its feature flags, so every tool behind
+        one - Monitor, PushNotification - was withheld from every session, found by turning aicleaner's
+        settings on one at a time. Brad chose to allow telemetry again; Claude Code's Remote Control stays
+        off anyway, since aicleaner's base URL already stops Claude Code offering it. So a DISABLE_TELEMETRY
+        of '1' - ours - is taken out. And ENABLE_TOOL_SEARCH=true: Claude Code turns tool search off for a
+        base URL that is not Anthropic's unless told the proxy forwards tool_reference blocks, which
+        aicleaner does (checked live, 2026-10-20); without it every tool is sent up front on each turn.
 
         The settings file rather than user environment variables: every Claude Code launch reads it
         (VS Code, a terminal, the Session page's own sessions) and a running one follows a change,
-        where a variable reaches new terminals only. Two switches, not the umbrella
+        where a variable reaches new terminals only. Not the umbrella
         CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: that one also stops Claude Code updating itself,
         which is what an earlier install's opt-out broke.
 
-        Idempotent: values already '1' are left alone. A value someone else set to something other
-        than '1' is reported and left alone, as step 6 treats variables it did not set.
+        Idempotent. A value someone else set is reported and left alone, as step 6 treats variables it
+        did not set.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)][string]$SettingsPath,
         [switch]$Keep
     )
-    Write-Status 'Claude Code telemetry and error reporting'
+    Write-Status 'Claude Code error reporting, telemetry and tool search'
     if ($Keep) {
         Write-Status 'Left as they are (-KeepTelemetry)' -Level Detail
         return
@@ -1104,19 +1110,34 @@ function Set-ClaudeTelemetryOff {
     $settings = Read-JsonFile -Path $SettingsPath
     if ($null -eq $settings) { $settings = [pscustomobject]@{} }
     if (-not $settings.PSObject.Properties['env']) { Set-JsonProperty -Object $settings -Name 'env' -Value ([pscustomobject]@{}) }
-    $wanted = @()
-    foreach ($name in 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING') {
+    # Each: the value wanted, or $null for "not set" (taken out when it holds the value aicleaner used to write).
+    $want = [ordered]@{ 'DISABLE_ERROR_REPORTING' = '1'; 'ENABLE_TOOL_SEARCH' = 'true'; 'DISABLE_TELEMETRY' = $null }
+    $ours = @{ 'DISABLE_TELEMETRY' = '1' }
+    $changes = @()
+    foreach ($name in $want.Keys) {
         $current = if ($settings.env.PSObject.Properties[$name]) { [string]$settings.env.$name } else { '' }
-        if ($current -eq '1') { Write-Status "$name already 1" -Level Detail }
-        elseif ($current) { Write-Status "$name=$current was not set by us; left alone" -Level Warn }
-        else { $wanted += $name }
+        $target = $want[$name]
+        if ($null -eq $target) {
+            if (-not $current) { continue }
+            if ($current -eq $ours[$name]) { $changes += "-$name" }
+            else { Write-Status "$name=$current was not set by us; left alone" -Level Warn }
+        } elseif ($current -eq $target) {
+            Write-Status "$name already $target" -Level Detail
+        } elseif ($current) {
+            Write-Status "$name=$current was not set by us; left alone" -Level Warn
+        } else {
+            $changes += $name
+        }
     }
-    if ($wanted.Count -eq 0) { return }
-    if (-not $PSCmdlet.ShouldProcess($SettingsPath, "Set env $($wanted -join ', ') = 1")) { return }
+    if ($changes.Count -eq 0) { return }
+    if (-not $PSCmdlet.ShouldProcess($SettingsPath, "Change env: $($changes -join ', ')")) { return }
     Backup-File -Path $SettingsPath | Out-Null
-    foreach ($name in $wanted) { Set-JsonProperty -Object $settings.env -Name $name -Value '1' }
+    foreach ($change in $changes) {
+        if ($change.StartsWith('-')) { $settings.env.PSObject.Properties.Remove($change.Substring(1)) }
+        else { Set-JsonProperty -Object $settings.env -Name $change -Value $want[$change] }
+    }
     Write-JsonFile -Path $SettingsPath -Object $settings
-    Write-Status "Switched off: $($wanted -join ', ') (Claude Code sessions pick it up as they start)" -Level Done
+    Write-Status "Claude Code settings: $(($changes | ForEach-Object { if ($_.StartsWith('-')) { "$($_.Substring(1)) removed" } else { "$_ = $($want[$_])" } }) -join ', ') (sessions pick it up as they start)" -Level Done
 }
 
 # ---------------------------------------------------------------------------

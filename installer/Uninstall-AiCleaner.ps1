@@ -791,7 +791,7 @@ try {
     $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
     $settings = Read-JsonFile -Path $settingsPath
     if ($settings -and $settings.PSObject.Properties['env']) {
-        $ours = @('ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING') | Where-Object { $settings.env.PSObject.Properties[$_] }
+        $ours = @('ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'DISABLE_TELEMETRY', 'DISABLE_ERROR_REPORTING', 'ENABLE_TOOL_SEARCH') | Where-Object { $settings.env.PSObject.Properties[$_] }
         if ($ours -and $PSCmdlet.ShouldProcess($settingsPath, "Remove env $($ours -join ', ')")) {
             Backup-File -Path $settingsPath
             # Pointed home rather than taken away. A session already running follows a value that
