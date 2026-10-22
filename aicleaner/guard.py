@@ -108,7 +108,23 @@ TEXT_API = {"/api/tokenise", "/api/rehydrate"}
 # blob: for images and frames (D168): through the encrypted tunnel a file tab's image or PDF arrives
 # sealed and is shown from an object URL the page made itself - nothing from outside can name one.
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
-       "frame-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+       "frame-src 'self' blob:; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+       "form-action 'self'")
+# The page itself (feature 139): a fresh nonce per load, which the file editor (Monaco) puts on the <style>
+# elements it makes. Inline styles stay forbidden - only an element carrying this load's nonce is allowed.
+STYLE_NONCE = web.RequestKey("style_nonce", str)
+
+
+def csp_for(request: web.Request) -> str:
+    """The page's policy (feature 139, Monaco). <style> elements: only this load's nonce. Style *attributes*
+    allowed - Monaco positions every line of text with one, in HTML it builds, with no hook to avoid it; an
+    attribute cannot fetch anything (images, fonts and connections stay 'self'), so injected markup still could
+    not reach out. Workers from blob: URLs, which is how Monaco starts its worker. Scripts unchanged: 'self'."""
+    nonce = request.get(STYLE_NONCE)
+    if not nonce:
+        return CSP
+    return (CSP.replace("style-src 'self'", f"style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'")
+            .replace("worker-src 'self'", "worker-src 'self' blob:"))
 
 
 def host_name(value: str) -> str:
@@ -197,7 +213,7 @@ def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None) -> 
                 return web.Response(status=415, text="aicleaner: API writes must be application/json")
         response = await handler(request)
         if ui:
-            response.headers["Content-Security-Policy"] = request.get(FILE_CSP) or CSP
+            response.headers["Content-Security-Policy"] = request.get(FILE_CSP) or csp_for(request)
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Referrer-Policy"] = "no-referrer"
             # no-store for the page's own files too, not just the API: through the tunnel, Cloudflare

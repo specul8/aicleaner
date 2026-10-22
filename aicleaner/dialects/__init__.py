@@ -41,6 +41,10 @@ class GenericStreamRewriter:
         # [(spellings, real)]). Called during the stream, because the tool runs as soon as the
         # client has the message - before anything after the stream would see it.
         self.on_collapse = None
+        # Told when a tool call's arguments had real names put back into them (D199): on_restored(
+        # tool_use_id). The after-write hook then tells the model the name is right on disk, since it
+        # sees only the token and was "correcting" correct file names.
+        self.on_restored = None
 
     def _rewrite_data(self, data: str) -> str:
         try:

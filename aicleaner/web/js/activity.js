@@ -10,10 +10,24 @@
 // "Somewhere you are not looking" is the page, not the session: being on the Session page for one
 // session does not count as watching another.
 
-import { say } from './api.js';
+import { postJSON, say } from './api.js';
 
 const notices = new Map();   // key -> { level, text, href } - kept until its page is visited
 let previous = null;
+// Shared between computers (D200, Brad 2026-10-22: "if I respond to one at work, the alert is still there
+// when I get home"): looking at a session tells aicleaner, every page's next poll carries `seen_turns`, and
+// an alert someone has seen anywhere goes everywhere. A question answered anywhere drops `waiting` to 0.
+const reported = new Map();  // session -> the turn count already told to aicleaner as seen
+const heldFinish = new Set(); // sessions whose turn ended while background work still ran (D202)
+
+function drop(key) {
+  const notice = notices.get(key);
+  if (!notice) return;
+  notices.delete(key);
+  for (const toast of document.querySelectorAll('#toasts .toast')) {
+    if (toast.dataset.text === notice.text) toast.remove();
+  }
+}
 
 // The session the notice is about (D118). It was the page alone - "#/session" - so Open went to
 // the page without saying which session, and did nothing at all when that page was already open.
@@ -44,13 +58,27 @@ export function noticeActivity(activity, route, shown) {
     for (const s of now.sessions || []) {
       const was = before.get(s.name) || { turns: 0, waiting: 0 };
       const here = watchingSession(route, shown, s.name);
-      if (s.turns > was.turns && !here) {
-        announce(`turn:${s.name}`, 'green', `${s.name}: Claude has finished`, sessionHref(s.name));
+      const seenElsewhere = (s.seen_turns || 0) >= s.turns;
+      // A turn that ends with work still running in the background is not the end (D202): the task's result
+      // starts the agent again. The alert is held until nothing runs and no turn is in progress.
+      if (s.turns > was.turns) heldFinish.add(s.name);
+      if (heldFinish.has(s.name) && !(s.background > 0) && !s.busy) {
+        heldFinish.delete(s.name);
+        if (!here && !seenElsewhere) {
+          announce(`turn:${s.name}`, 'green', `${s.name}: Claude has finished`, sessionHref(s.name));
+        }
       }
-      if (s.waiting > 0 && s.waiting > was.waiting && !here) {
+      if (s.waiting > 0 && s.waiting > was.waiting && !here && (s.seen_waiting || 0) < s.waiting) {
         announce(`wait:${s.name}`, 'amber', `${s.name} is waiting on you`, sessionHref(s.name));
       }
     }
+  }
+  // Cleared wherever it was dealt with (D200): looked at on any computer, or the question answered.
+  for (const s of now.sessions || []) {
+    if ((s.seen_turns || 0) >= s.turns) drop(`turn:${s.name}`);
+    if (!s.waiting || (s.seen_waiting || 0) >= s.waiting) drop(`wait:${s.name}`);
+  }
+  if (previous) {
     const was = previous.scan;
     const scan = now.scan;
     if (scan && was && scan.id === was.id && was.state === 'running' && scan.state !== 'running'
@@ -71,12 +99,17 @@ export function seen(route, shown) {
     const session = key.startsWith('turn:') || key.startsWith('wait:') ? key.slice(5) : null;
     const looked = (session && watchingSession(route, shown, session))
       || (key.startsWith('scan:') && route && route.name === 'clients' && notice.href.endsWith(`/${route.id || ''}`));
-    if (!looked) continue;
-    notices.delete(key);
-    for (const toast of document.querySelectorAll('#toasts .toast')) {
-      if (toast.dataset.text === notice.text) toast.remove();
-    }
+    if (looked) drop(key);
   }
+  // Told to aicleaner, so the other computers clear it too (D200) - once per new turn or question.
+  const current = ((previous && previous.sessions) || []).find((s) => s.name === shown);
+  if (!current || !watchingSession(route, shown, current.name)) return;
+  const mark = `${current.turns}/${current.waiting}`;
+  if (reported.get(current.name) === mark) return;
+  reported.set(current.name, mark);
+  postJSON('/api/activity/seen', { session: current.name, turns: current.turns }).catch(() => {
+    reported.delete(current.name);           // tried again on the next poll
+  });
 }
 
 // The status-stack entries still waiting to be looked at, newest first.

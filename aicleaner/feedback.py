@@ -178,7 +178,11 @@ def channel_of(repo_url: str) -> str:
 
 
 def recent_log_lines(log_dir: Path, tokenise: Callable[[str], str]) -> list[str]:
-    path = log_dir / "proxy-stderr.log"
+    # Each start writes its own proxy-stderr-<start>.log (D198); the fixed name is an older install's.
+    logs = sorted(log_dir.glob("proxy-stderr*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not logs:
+        return []
+    path = logs[0]
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-LOG_LINES:]
     except OSError:

@@ -89,12 +89,82 @@ export function distance(a, b, limit) {
   return rows[a.length][b.length];
 }
 
+// Keyboard neighbours (feature 142, Word-like): a slip to the next key is likelier than one across the
+// keyboard. QWERTY unless the browser says the layout is AZERTY or QWERTZ.
+const LAYOUTS = {
+  qwerty: ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'],
+  azerty: ['azertyuiop', 'qsdfghjklm', 'wxcvbn'],
+  qwertz: ['qwertzuiop', 'asdfghjkl', 'yxcvbnm'],
+};
+let neighbours = null;
+
+function buildNeighbours(rows) {
+  const map = new Map();
+  rows.forEach((row, r) => [...row].forEach((key, i) => {
+    const near = new Set([row[i - 1], row[i + 1]]);
+    if (rows[r - 1]) { near.add(rows[r - 1][i]); near.add(rows[r - 1][i + 1]); }
+    if (rows[r + 1]) { near.add(rows[r + 1][i - 1]); near.add(rows[r + 1][i]); }
+    near.delete(undefined);
+    map.set(key, near);
+  }));
+  return map;
+}
+
+export function setLayout(name) {
+  neighbours = buildNeighbours(LAYOUTS[name] || LAYOUTS.qwerty);
+}
+
+async function detectLayout() {
+  try {
+    const map = await navigator.keyboard.getLayoutMap();
+    setLayout(map.get('KeyQ') === 'a' ? 'azerty' : map.get('KeyY') === 'z' ? 'qwertz' : 'qwerty');
+  } catch (error) { /* not offered (Firefox, Safari, insecure origin): QWERTY stays */ }
+}
+setLayout('qwerty');
+if (typeof navigator !== 'undefined' && navigator.keyboard && navigator.keyboard.getLayoutMap) detectLayout();
+
+const adjacent = (x, y) => Boolean(x && y && neighbours.get(x) && neighbours.get(x).has(y));
+
+// The edit cost with keyboard distance (feature 142): Damerau-Levenshtein where a next-key substitution or an
+// extra letter beside its neighbour costs 0.6, a swap of neighbouring keys 0.8, anything else 1. Used to rank
+// the candidates `distance` already let in, never to widen that window.
+export function typingCost(typed, word) {
+  const a = typed.toLowerCase();
+  const b = word.toLowerCase();
+  const rows = [];
+  for (let i = 0; i <= a.length; i += 1) rows.push([i]);
+  for (let j = 1; j <= b.length; j += 1) rows[0][j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const sub = a[i - 1] === b[j - 1] ? 0 : (adjacent(a[i - 1], b[j - 1]) ? 0.6 : 1);
+      const extra = adjacent(a[i - 1], a[i - 2]) || adjacent(a[i - 1], a[i]) ? 0.6 : 1;
+      let value = Math.min(rows[i - 1][j] + extra, rows[i][j - 1] + 1, rows[i - 1][j - 1] + sub);
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) {
+        value = Math.min(value, rows[i - 2][j - 2] + (adjacent(a[i - 1], a[i - 2]) ? 0.8 : 1));
+      }
+      rows[i][j] = value;
+    }
+  }
+  return rows[a.length][b.length];
+}
+
 // The typed word's capitalisation on a replacement: Teh -> The, TEH -> THE; an own word keeps its own.
 function shaped(typed, word, own) {
   if (own) return word;
   if (typed.length > 1 && typed === typed.toUpperCase()) return word.toUpperCase();
   if (typed[0] === typed[0].toUpperCase()) return word[0].toUpperCase() + word.slice(1);
   return word;
+}
+
+// Word's "TWo INitial CApitals" and Caps Lock slips (feature 142): THe -> The, WEdnesday -> Wednesday,
+// tHE -> The - only when the word is a dictionary word, and never an acronym's plural (IDs, PCs, VMs).
+export function accidentalCapitals(typed) {
+  if (typed.length < 3 || !words.band) return null;
+  const lower = typed.toLowerCase();
+  if (!words.band.has(lower)) return null;
+  const twoCaps = /^[A-Z]{2}[a-z]+$/.test(typed) && typed.slice(2) !== 's';
+  const capsLock = /^[a-z][A-Z]+$/.test(typed);
+  return twoCaps || capsLock ? lower[0].toUpperCase() + lower.slice(1) : null;
 }
 
 // { best, alternatives } for a typed word, or null when it should be left as it is.
@@ -133,7 +203,10 @@ export function correctionFor(typed, ownWords, ownOnly = false) {
   // the, not tea or ten), the same length, the same last letter.
   const squash = (w) => w.toLowerCase().replace(/(.)\1+/g, '$1');
   const typedSquash = squash(lower);
-  for (const f of found) f.cost = f.d - (squash(f.word) === typedSquash ? 0.5 : 0);
+  for (const f of found) {
+    f.cost = f.d - (squash(f.word) === typedSquash ? 0.5 : 0);
+    f.keys = typingCost(lower, f.word);           // feature 142: keyboard distance, a tie-breaker below
+  }
   const letters = (w) => [...w.toLowerCase()].sort().join('');
   const typedLetters = letters(lower);
   const near = (f) => [letters(f.word) === typedLetters, f.word.length === lower.length,
@@ -143,6 +216,13 @@ export function correctionFor(typed, ownWords, ownOnly = false) {
     if (x.own !== y.own) return x.own ? -1 : 1;
     if (x.cost !== y.cost) return x.cost - y.cost;
     if (sameStart(x) !== sameStart(y)) return sameStart(x) ? -1 : 1;
+    // Word-like (feature 142): a clearly commoner word wins (go oot is "go out", not "opt"); between words of
+    // about the same commonness - the same or the next band - the likelier slip on the keyboard does.
+    if (Math.abs(x.rank - y.rank) >= 10) return x.rank - y.rank;
+    // The same letters in another order is still the likeliest slip of all (teh is the, not ten).
+    const swapped = (f) => letters(f.word) === typedLetters;
+    if (swapped(x) !== swapped(y)) return swapped(x) ? -1 : 1;
+    if (Math.abs(x.keys - y.keys) > 1e-9) return x.keys - y.keys;
     if (x.rank !== y.rank) return x.rank - y.rank;
     const a = near(x);
     const b = near(y);
@@ -207,7 +287,10 @@ export function attachAutocorrect(box, opts = {}) {
     if (shared.on !== was || !shared.onSince) shared.onSince = Date.now();   // never what is already there
     if ('prompt.autocorrect_skip' in s) shared.skip = s['prompt.autocorrect_skip'] || [];
     if ('prompt.autocorrect_words' in s) shared.own = s['prompt.autocorrect_words'] || [];
-    if ('prompt.autocorrect_replace' in s) shared.replace = replacements(s['prompt.autocorrect_replace']);
+    if ('prompt.autocorrect_replace' in s) {
+      shared.replaceLines = s['prompt.autocorrect_replace'] || [];
+      shared.replace = replacements(shared.replaceLines);
+    }
     showState();
     if (shared.on && !was) loadWords().catch(sayError);
   };
@@ -293,6 +376,55 @@ export function attachAutocorrect(box, opts = {}) {
       catch (error) { shared.own = shared.own.filter((w) => w !== word); sayError(error); }
     };
     const ownWordShape = /^[A-Za-z][A-Za-z'-]{0,39}$/;
+    // Feature 140 (Brad, 2026-10-22): your own correction for a word - saved as a replacement ("typed = yours",
+    // the list Settings' Autocorrect card keeps), so the typed form is corrected to it from now on.
+    const addReplacement = async (typed, correction) => {
+      const key = typed.toLowerCase();
+      const before = shared.replaceLines || [];
+      const lines = [...before.filter((line) => String(line).slice(0, String(line).indexOf('=')).trim().toLowerCase() !== key),
+        `${typed} = ${correction}`];
+      shared.replaceLines = lines;
+      shared.replace = replacements(lines);
+      try { await postJSON('/api/config', { settings: { 'prompt.autocorrect_replace': lines } }); }
+      catch (error) { shared.replaceLines = before; shared.replace = replacements(before); sayError(error); }
+    };
+    // "Correct to..." - a box to type the right word; Enter or Save applies it here and saves it.
+    const correctTo = (typed, apply) => {
+      const open = h('button', { type: 'button', class: 'ac-correct-to' }, 'Correct to...');
+      const row = h('div', { class: 'ac-choices ac-correct-row' }, open);
+      open.addEventListener('click', () => {
+        const input = h('input', { type: 'text', class: 'ac-correct-input', value: typed, 'aria-label': `Correct "${typed}" to` });
+        const save = h('button', { type: 'button', class: 'primary ac-correct-save' }, 'Save');
+        const note = h('div', { class: 'hint ac-correct-note' }, '');
+        const commit = () => {
+          const correction = input.value.trim();
+          if (!correction || correction === typed) { note.textContent = 'Type the right spelling.'; input.focus(); return; }
+          closeBubble();
+          apply(correction);
+          addReplacement(typed, correction);
+          box.focus();
+        };
+        save.addEventListener('click', commit);
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') { event.preventDefault(); commit(); }
+          if (event.key === 'Escape') { event.preventDefault(); closeBubble(); box.focus(); }
+        });
+        row.replaceChildren(input, save, note);
+        input.focus();
+        input.select();
+      });
+      return row;
+    };
+    // The word at start..end replaced (one undo step), later marks moved with the text.
+    const replaceAt = (start, end, text, dropIndex = -1) => {
+      state.ours = true;
+      insertText(box, start, end, text);
+      state.ours = false;
+      if (dropIndex >= 0) state.fixes.splice(dropIndex, 1);
+      const delta = text.length - (end - start);
+      for (const other of state.fixes) if (other.start > start) { other.start += delta; other.end += delta; }
+      paint();
+    };
     const openBubble = (index) => {
       const fix = state.fixes[index];
       const span = layer.querySelector(`[data-fix="${index}"]`);
@@ -304,7 +436,8 @@ export function attachAutocorrect(box, opts = {}) {
         const add = h('button', { type: 'button', class: 'ac-add' }, `Add "${fix.word}" to my words`);
         add.addEventListener('click', () => { closeBubble(); addOwnWord(fix.word); box.focus(); });
         bubble = h('div', { class: 'ac-bubble', role: 'dialog', dataset: { fix: String(index) } },
-          h('div', { class: 'hint' }, `"${fix.word}" is not a word autocorrect knows`), h('div', { class: 'ac-choices' }, add));
+          h('div', { class: 'hint' }, `"${fix.word}" is not a word autocorrect knows`), h('div', { class: 'ac-choices' }, add),
+          correctTo(fix.word, (text) => replaceAt(fix.start, fix.end, text, index)));
         placeBubble(span.getBoundingClientRect());
         return;
       }
@@ -330,7 +463,8 @@ export function attachAutocorrect(box, opts = {}) {
       if (keep) keep.addEventListener('click', () => { choose(fix.original); addOwnWord(fix.original); });
       bubble = h('div', { class: 'ac-bubble', role: 'dialog', dataset: { fix: String(index) } },
         h('div', { class: 'hint' }, `Corrected from "${fix.original}"`), h('div', { class: 'ac-choices' }, revert, ...others),
-        keep ? h('div', { class: 'ac-choices' }, keep) : null);
+        keep ? h('div', { class: 'ac-choices' }, keep) : null,
+        correctTo(fix.original, (text) => replaceAt(fix.start, fix.end, text, index)));
       placeBubble(span.getBoundingClientRect());
     };
     // Opened by a click or a tap on a corrected word - never by the pointer passing over it (D156,
@@ -373,6 +507,7 @@ export function attachAutocorrect(box, opts = {}) {
       bubble = h('div', { class: 'ac-bubble', role: 'dialog' },
         h('div', { class: 'hint' }, `"${word}" is not a word autocorrect knows`),
         h('div', { class: 'ac-choices' }, add),
+        correctTo(word, (text) => replaceAt(start, end, text)),
         h('div', { class: 'hint' }, 'Shift+right-click for the browser\'s menu'));
       placeBubble({ left: event.clientX, bottom: event.clientY });
     });
@@ -417,7 +552,10 @@ export function attachAutocorrect(box, opts = {}) {
       // All capitals is mostly an acronym (NTFS, VNET); it is corrected only to the same letters in a
       // common word's order - TEH is THE (D162) - and never underlined.
       const allCaps = typed.length > 2 && typed === typed.toUpperCase();
-      if (!allCaps && /[A-Z]/.test(typed.slice(1))) return;
+      // A capital after the first letter is mostly code (getElementById, myVar) and is left alone - unless the
+      // word's spelling is known, whatever its case (feature 141: oneDrive is OneDrive), or it is an accidental
+      // capital (feature 142: THe, tHE), both decided below.
+      const mixed = !allCaps && /[A-Z]/.test(typed.slice(1));
       if ((text.slice(0, start).match(/`/g) || []).length % 2 === 1) return;
       // A replacement the person set up is asked for by name, so the skip options do not apply to it.
       const swap = state.replace.get(typed.toLowerCase());
@@ -431,7 +569,12 @@ export function attachAutocorrect(box, opts = {}) {
       if (!swap) {
         try { await loadWords(); } catch (error) { /* own words still apply */ }
       }
-      const known = swap ? null : correctionFor(typed, ownish, true);
+      let known = swap ? null : correctionFor(typed, ownish, true);
+      if (mixed && !swap && !known) {
+        const slip = accidentalCapitals(typed);
+        if (!slip) return;                                                   // code, as before
+        known = { best: slip, alternatives: [] };
+      }
       if (typed.length < 2 && !known) return;                                // a, x: never guessed at
       if (!swap && !known && knownSpelling(typed, ownish)) return;          // already spelt that way
       if (!swap && !known && state.skip.includes('capitalised') && typed[0] !== typed[0].toLowerCase()) return;

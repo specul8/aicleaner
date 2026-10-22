@@ -1653,7 +1653,7 @@ function Update-Runtime {
     }
     Invoke-AppScript -Path (Get-AppFile -AppRoot $AppRoot -Name 'Start-AiCleaner.ps1') -Arguments @('-Detach')
     if (Wait-ProxyHealth -Port $port -Seconds 5) { Write-Status 'Proxy started' -Level Detail }
-    else { Write-Status "The proxy is not answering on port $port; see logs\proxy-stderr.log" -Level Warn }
+    else { Write-Status "The proxy is not answering on port $port; see the newest logs\proxy-stderr-*.log" -Level Warn }
 }
 
 function Test-ProxyProcess {

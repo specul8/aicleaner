@@ -753,7 +753,7 @@ function bypassCard(s) {
 function failOpenCard(s) {
   const on = checkbox('fail-open', 'EMERGENCY: send requests the canary would refuse', s['canary.fail_open']);
   const section = card('fail-open', 'Emergency: canary fail open',
-    'Only for getting past a false 403 ("a real client identifier survived tokenisation"). While this is on, a request the canary would refuse is sent anyway - if the match was real, that client name reaches the AI provider. Every such request is written to the evidence log as FAIL-OPEN, and each match - with the text around it - goes to logs/proxy-stderr.log and the Log page. It can be turned on from the phone, because a false positive stays in the conversation and would otherwise refuse every request until you are back at this machine. Turn it off as soon as you are past the problem.',
+    'Only for getting past a false 403 ("a real client identifier survived tokenisation"). While this is on, a request the canary would refuse is sent anyway - if the match was real, that client name reaches the AI provider. Every such request is written to the evidence log as FAIL-OPEN, and each match - with the text around it - goes to the newest logs/proxy-stderr-*.log and the Log page. It can be turned on from the phone, because a false positive stays in the conversation and would otherwise refuse every request until you are back at this machine. Turn it off as soon as you are past the problem.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'canary.fail_open': on.querySelector('input').checked }));
   return danger(section, s['canary.fail_open'], 'FAIL-OPEN IS ON: THE CANARY IS NOT STOPPING ANYTHING');

@@ -12,7 +12,7 @@
 import { getJSON, postJSON, say, sayError } from './api.js';
 import { h } from './dom.js';
 import { renderMarkdown } from './markdown.js';
-import { conflictBar, editorFor, saveChip, saveNow, unsaved } from './fileedit.js';
+import { conflictBar, dropEditor, editorFor, elementOf, focusedEditor, saveChip, saveNow, unsaved } from './fileedit.js';
 import { colourable, colourInto } from './editor/highlight.js';
 import { languageOf } from './editor/languages.js';
 import { attachPreviewJump } from './previewjump.js';
@@ -109,6 +109,7 @@ function loadSealed(root) {
 function selectInSource(tab, start, end) {
   const box = tab.editor;
   if (!box) return;
+  if (box.revealOffsets) { box.focus(); box.revealOffsets(start, end); return; }      // Monaco (feature 139)
   box.focus({ preventScroll: true });
   box.setSelectionRange(start, end);
   const line = box.value.slice(0, start).split('\n').length - 1;
@@ -251,7 +252,7 @@ export function fileTabs(ctx) {
     }
     head.append(...[saveChip(tab)].filter(Boolean));
     // The editor is reused, so moving it into the new pane must not lose the caret or fire a save.
-    const editing = tab.editor && document.activeElement === tab.editor;
+    const editing = tab.editor && focusedEditor(tab.editor);
     const caret = editing ? [tab.editor.selectionStart, tab.editor.selectionEnd, tab.editor.scrollTop] : null;
     tab.repainting = true;
     try {
@@ -289,7 +290,7 @@ export function fileTabs(ctx) {
     if (!scroller || scroller.dataset.followed) return;
     scroller.dataset.followed = '1';
     const record = () => {
-      if (activeTab() !== tab || tab.repainting || !ctx.pane.contains(scroller)) return;
+      if (activeTab() !== tab || tab.repainting || !ctx.pane.contains(elementOf(scroller))) return;
       tab.place = tab.place || {};
       const box = tab.editor && scroller === tab.editor ? tab.editor : null;
       tab.place[placeKey(tab)] = { top: scroller.scrollTop, left: scroller.scrollLeft,
@@ -329,7 +330,7 @@ export function fileTabs(ctx) {
 
   async function load(tab) {
     tab.error = '';
-    tab.editor = null;                  // a fresh read starts a fresh editor
+    dropEditor(tab);                    // a fresh read starts a fresh editor
     tab.saveState = 'saved';
     try {
       tab.data = await getJSON(`/api/session/file?${fileQuery(ctx.name(), tab)}`);
@@ -405,7 +406,7 @@ export function fileTabs(ctx) {
   // A fresh read that leaves the reader where they were: the scroll position, and in the editor
   // the caret and the focus, as near as the new text allows.
   function scrollerOf(tab) {
-    if (tab.editor && ctx.pane.contains(tab.editor)) return tab.editor;
+    if (tab.editor && ctx.pane.contains(elementOf(tab.editor))) return tab.editor;
     return ctx.pane.querySelector('.file-scroll') || ctx.pane.querySelector('.file-body');
   }
 
@@ -415,7 +416,7 @@ export function fileTabs(ctx) {
     const keep = shown ? {
       top: shown.scrollTop,
       caret: box ? [box.selectionStart, box.selectionEnd] : null,
-      focused: Boolean(box) && document.activeElement === box,
+      focused: Boolean(box) && focusedEditor(box),
     } : null;
     await load(tab);
     if (!keep || activeTab() !== tab) return;
@@ -464,7 +465,7 @@ export function fileTabs(ctx) {
     if (!tab || !ctx.discuss || !tab.data || typeof tab.data.text !== 'string') return null;
     let text = '';
     let before = '';
-    const box = tab.editor && ctx.pane.contains(tab.editor) ? tab.editor : null;
+    const box = tab.editor && ctx.pane.contains(elementOf(tab.editor)) ? tab.editor : null;
     if (box && box.selectionStart !== box.selectionEnd) {
       text = box.value.slice(box.selectionStart, box.selectionEnd);
       before = box.value.slice(0, box.selectionStart);

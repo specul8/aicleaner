@@ -153,6 +153,10 @@ function newTab(dialog, refreshCounts) {
   return view;
 }
 
+// An update being typed, by ticket number: kept when the list is drawn again (D196, 2026-10-20 - a second
+// load straight after Send replaced the list and threw away what had just been typed).
+const typedUpdates = new Map();
+
 function ticketCard(ticket, open, reload) {
   const replies = (ticket.replies || []).map((r) => h('div', { class: `fb-reply fb-from-${r.from === 'you' ? 'you' : 'team'}` },
     h('div', { class: 'hint' }, `${r.from} - ${when(r.at)}`), h('div', { class: 'fb-text' }, r.body)));
@@ -163,12 +167,19 @@ function ticketCard(ticket, open, reload) {
   ];
   if (open) {
     const update = h('textarea', { class: 'fb-update', rows: '3', 'aria-label': 'Add an update' });
+    update.value = typedUpdates.get(ticket.number) || '';
+    update.addEventListener('input', () => { typedUpdates.set(ticket.number, update.value); });
     const add = h('button', { type: 'button', class: 'fb-add' }, 'Add update');
     const close = h('button', { type: 'button', class: 'fb-close-ticket' }, 'Close ticket');
     add.addEventListener('click', async () => {
       if (!update.value.trim()) return;
       add.disabled = true;
-      try { await postJSON(`/api/feedback/tickets/${ticket.number}/comments`, { body: update.value }); say('Update added.', 'ok'); reload(); }
+      try {
+        await postJSON(`/api/feedback/tickets/${ticket.number}/comments`, { body: update.value });
+        typedUpdates.delete(ticket.number);
+        say('Update added.', 'ok');
+        reload();
+      }
       catch (error) { sayError(error); add.disabled = false; }
     });
     close.addEventListener('click', async () => {
@@ -184,10 +195,13 @@ function ticketCard(ticket, open, reload) {
 function listTab(state) {
   const list = h('ul', { class: 'fb-tickets' });
   const status = h('p', { class: 'hint' }, 'Loading...');
+  let latest = 0;
   const load = async () => {
+    const mine = ++latest;
     status.textContent = 'Loading...';
     try {
       const answer = await getJSON(`/api/feedback/tickets?state=${state}`);
+      if (mine !== latest) return;                 // a newer load is on its way: this one is stale
       const tickets = answer.tickets || [];
       list.replaceChildren(...tickets.map((t) => ticketCard(t, state === 'open', load)));
       status.textContent = tickets.length ? '' : (state === 'open' ? 'No open tickets.' : 'No closed tickets.');

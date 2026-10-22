@@ -67,6 +67,9 @@
 .ac-choices { display: flex; flex-wrap: wrap; gap: .3rem; }
 .ac-choices button { font-size: 12px; padding: .15rem .5rem; }
 .ac-choices + .ac-choices { margin-top: .35rem; }
+.ac-correct-row { align-items: center; }
+.ac-correct-input { font-size: 12px; padding: .15rem .4rem; width: 12rem; }
+.ac-correct-note { flex-basis: 100%; margin: .2rem 0 0; }
 .ac-bubble .hint + .hint, .ac-choices + .hint { margin: .35rem 0 0; }
 
 /* The suggestion list, placed under the word from script (CSSOM left/top, which the policy allows). */

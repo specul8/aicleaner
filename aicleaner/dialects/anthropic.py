@@ -74,6 +74,10 @@ class AnthropicStreamRewriter(GenericStreamRewriter):
             found = self.mapper.collapses("".join(written))
             if found:
                 self.on_collapse(call_id, found)
+        if written and call_id and self.on_restored is not None:
+            as_written = "".join(written)
+            if self.mapper.rehydrate(as_written) != as_written:
+                self.on_restored(call_id)      # real names went into this call (D199)
         if not rest:
             return []
         payload = {

@@ -43,6 +43,19 @@ local command first, then Read the text output.
 Write conversions next to the source with a `.md` or `.txt` extension. Read only those.
 <!-- aicleaner:reading:end -->
 
+## Making documents
+
+The document tools aicleaner installs make Word, Excel, PowerPoint and PDF files locally; no extra
+install is needed. pandoc has no PDF engine here, so do not ask it for a PDF directly.
+
+| Make    | With                                                                                    |
+|---------|------------------------------------------------------------------------------------------|
+| .docx   | `pandoc "<file>.md" -o "<file>.docx"` (or python-docx for exact layout)                  |
+| .pdf    | `pandoc "<file>.md" -s -o "<file>.html"`, then Edge prints it: `& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" --headless=new --no-pdf-header-footer --print-to-pdf="<full path>.pdf" "<full path>.html"` |
+| .pdf (simple) | PyMuPDF: `import pymupdf; d = pymupdf.open(); p = d.new_page(); p.insert_htmlbox(p.rect + (72, 72, -72, -72), html); d.save(path)` |
+| .xlsx   | openpyxl or xlsxwriter                                                                   |
+| .pptx   | python-pptx                                                                              |
+
 ## Identifiers
 
 Use client identifiers exactly as they appear in the context. Do not reformat, abbreviate,
@@ -52,4 +65,9 @@ This includes names you make up for things you create - app registrations, certi
 folders, resource names, tags. Build them from the whole identifier as written (for example
 `<identifier>-BuildTeam-Reader`), never from a shortened form made of its first letter and its
 number. If a shorter prefix is needed, ask for the real one.
+
+A token you see in something you wrote - a file name, a path, code, a command, a document - is
+correct: the proxy put the real name in when you wrote it, and it is on disk with the real name. You
+see the token only because your context is filtered. Never rename, rewrite or "correct" anything
+because it shows a token, and never swap a token for a generic or made-up name.
 <!-- aicleaner:end -->

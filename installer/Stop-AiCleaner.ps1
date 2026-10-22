@@ -120,8 +120,43 @@ if ($StopSessions) {
     Write-Host "==> $($brokers.Count) session broker(s) stopped" -ForegroundColor Green
 }
 
+function Stop-UnlistenedProxy {
+    <#
+    .SYNOPSIS
+        Stops aicleaner proxies started from this install that no longer hold the port (D198).
+    .DESCRIPTION
+        A proxy whose listener asyncio closed keeps running with nothing on the port, so finding it by the
+        port alone missed it - and a restart then started a second proxy beside it (2026-10-21: three ran
+        at once, sharing one log). Matched by its command line: `-m aicleaner run` with this install's
+        config. The venv launcher in front of each goes with it.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([int]$ProxyPort = 8787, [int]$KeepPid = 0)
+    $config = Join-Path $script:AppFolder 'aicleaner-config.json'
+    # The proxy that does hold the port, and the venv launcher in front of it, are left to the stop below.
+    $keep = @($KeepPid)
+    if ($KeepPid) {
+        $holder = Get-CimInstance Win32_Process -Filter "ProcessId=$KeepPid" -ErrorAction SilentlyContinue
+        if ($holder) { $keep += $holder.ParentProcessId }
+    }
+    $stale = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'python*' -and $_.CommandLine -and $_.CommandLine -match '\s-m\s+aicleaner\s+run(\s|$)' -and
+                       $_.CommandLine.IndexOf($config, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+                       $keep -notcontains $_.ProcessId })
+    foreach ($process in $stale) {
+        if ($PSCmdlet.ShouldProcess("pid $($process.ProcessId)", 'Stop an aicleaner proxy that no longer holds the port')) {
+            Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($stale.Count) { Write-Host "==> $($stale.Count) aicleaner process(es) no longer holding port $ProxyPort stopped" -ForegroundColor Green }
+}
+
 $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $conn) { Write-Host "==> Nothing is listening on port $Port; aicleaner is not running" -ForegroundColor Green; Remove-CopilotProxy; exit 0 }
+if (-not $conn) {
+    Stop-UnlistenedProxy -ProxyPort $Port
+    Write-Host "==> Nothing is listening on port $Port; aicleaner is not running" -ForegroundColor Green; Remove-CopilotProxy; exit 0
+}
+Stop-UnlistenedProxy -ProxyPort $Port -KeepPid $conn.OwningProcess
 $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
 if (-not $proc) { Write-Host "==> Port $Port is held by pid $($conn.OwningProcess), which is no longer running" -ForegroundColor Yellow; Remove-CopilotProxy; exit 0 }
 if ($proc.ProcessName -notlike 'python*') {

@@ -18,7 +18,7 @@ const COMMENT_MARK = { powershell: '#', python: '#', yaml: '#', terraform: '#' }
 
 const machine = { tag: '', names: null, lower: null, source: '', count: 0, loading: null, parameters: new Map() };
 
-async function loadMachineCommands() {
+export async function loadMachineCommands() {
   if (machine.loading) return machine.loading;
   machine.loading = (async () => {
     try {
@@ -38,7 +38,7 @@ async function loadMachineCommands() {
   return machine.loading;
 }
 
-async function parametersOf(command) {
+export async function parametersOf(command) {
   const key = command.toLowerCase();
   if (machine.parameters.has(key)) return machine.parameters.get(key);
   machine.parameters.set(key, []);                          // asked once, whatever the answer
@@ -49,6 +49,9 @@ async function parametersOf(command) {
   } catch (error) { /* no parameters offered */ }
   return machine.parameters.get(key);
 }
+
+// This machine's PowerShell command names, once loaded (null until then) - for Monaco's provider (feature 139).
+export const machineNames = () => machine.names;
 
 export function powershellSource() {
   return machine.count ? `PowerShell commands: ${machine.count.toLocaleString()} from this machine`

@@ -8,12 +8,13 @@
 // The editor lives on the tab object and is reused across repaints: the pane is rebuilt every time
 // anything about the tab changes, and a rebuilt textarea would lose the caret mid-word.
 
-import { say, sayError } from './api.js';
+import { postJSON, say, sayError } from './api.js';
 import { h } from './dom.js';
 import { attachCompletion } from './editor/complete.js';
 import { layerFor } from './editor/highlight.js';
 import { attachKeys } from './editor/keys.js';
 import { languageOf } from './editor/languages.js';
+import { loadMonaco, monacoLanguage, monacoReady, MonacoBox } from './monacoedit.js';
 
 const AUTOSAVE_MS = 1500;
 const STATE_TEXT = { saved: 'Saved', saving: 'Saving...', unsaved: 'Unsaved changes', conflict: 'Not saved: changed on disk' };
@@ -38,10 +39,83 @@ function numberLines(gutter, box) {
   gutter.textContent = Array.from({ length: count }, (_, i) => String(i + 1)).join('\n');
 }
 
+// The element an editor lives in: a textarea is its own; Monaco's lives in its host (feature 139).
+export const elementOf = (editor) => (editor && editor.host ? editor.host : editor);
+
+export function focusedEditor(editor) {
+  if (!editor) return false;
+  return editor.hasFocus ? editor.hasFocus() : document.activeElement === editor;
+}
+
+// A tab's editor let go of (a reload, a refused save dropped): Monaco's model and view are freed.
+export function dropEditor(tab) {
+  if (tab.editor && tab.editor.dispose) tab.editor.dispose();
+  tab.editor = null;
+}
+
+// What both editors do on a change, a blur and Ctrl+S.
+function wire(tab, hooks, box, changed) {
+  box.addEventListener('input', () => {
+    if (changed) changed();
+    tab.saveState = tab.saveState === 'conflict' ? 'conflict' : 'unsaved';
+    hooks.paint();
+    if (tab.saveState !== 'conflict') schedule(tab, hooks);
+  });
+  // A real blur saves. The one a repaint causes - it moves the box - does not: saving then would
+  // repaint inside the repaint.
+  box.addEventListener('blur', () => { if (!tab.repainting) saveNow(tab, hooks); });
+}
+
+// Feature 139: code for the cursor from the file's own project session - whichever AI service it runs -
+// shown as grey text there (Tab takes it). Through aicleaner like every prompt, so filtered.
+async function suggest(tab, hooks, box, button, instruction = '') {
+  if (button.disabled) return;
+  const { position, line, before, after } = box.cursorContext();
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Asking...';
+  try {
+    const answer = await postJSON('/api/session/suggest', { name: hooks.name(), path: tab.path || tab.name,
+      language: monacoLanguage(tab.name), line, before, after, instruction });
+    box.offer(position, answer.code);
+  } catch (error) {
+    sayError(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
+}
+
+// The Suggest control over the editor: the button asks at once; the box beside it says what to write.
+function suggestBar(tab, hooks, box) {
+  const button = h('button', { type: 'button', class: 'editor-suggest', title: 'Ask the session\'s AI for code at the cursor (Alt+\\)' }, 'Suggest');
+  const what = h('input', { type: 'text', class: 'editor-suggest-what', placeholder: 'What it should do (optional)',
+    'aria-label': 'What the suggested code should do' });
+  button.addEventListener('click', () => suggest(tab, hooks, box, button, what.value));
+  what.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); suggest(tab, hooks, box, button, what.value); }
+  });
+  box.bindSuggest(() => suggest(tab, hooks, box, button, what.value));
+  return h('div', { class: 'editor-suggest-bar' }, what, button);
+}
+
+// Feature 139: Monaco, the editor VS Code is built on - its colouring, completion, keys and line numbers.
+function monacoFrame(tab, hooks, text) {
+  const host = h('div', { class: 'file-editor', 'aria-label': `Edit ${tab.name}` });
+  const box = new MonacoBox(host, text, tab.name);
+  wire(tab, hooks, box);
+  box.bindSave(() => saveNow(tab, hooks));
+  tab.editor = box;
+  tab.editorFrame = h('div', { class: 'file-editor-frame monaco' }, suggestBar(tab, hooks, box), host);
+  tab.saveState = 'saved';
+  return tab.editorFrame;
+}
+
 // hooks: { name(), paint(), reload(tab) }
 // Returns the frame (gutter and box); the box itself stays on tab.editor.
 export function editorFor(tab, hooks) {
   if (tab.editor) return tab.editorFrame;
+  if (monacoReady()) return monacoFrame(tab, hooks, tab.data.text || '');
   const box = h('textarea', { class: 'file-editor', spellcheck: 'false', wrap: 'off', 'aria-label': `Edit ${tab.name}` });
   box.value = tab.data.text || '';
   const gutter = h('pre', { class: 'file-gutter', 'aria-hidden': 'true' });
@@ -58,16 +132,7 @@ export function editorFor(tab, hooks) {
   }
   tab.editorFrame = h('div', { class: 'file-editor-frame' }, gutter, body);
   tab.saveState = 'saved';
-  box.addEventListener('input', () => {
-    numberLines(gutter, box);
-    gutter.scrollTop = box.scrollTop;
-    tab.saveState = tab.saveState === 'conflict' ? 'conflict' : 'unsaved';
-    hooks.paint();
-    if (tab.saveState !== 'conflict') schedule(tab, hooks);
-  });
-  // A real blur saves. The one a repaint causes - it moves the box - does not: saving then would
-  // repaint inside the repaint.
-  box.addEventListener('blur', () => { if (!tab.repainting) saveNow(tab, hooks); });
+  wire(tab, hooks, box, () => { numberLines(gutter, box); gutter.scrollTop = box.scrollTop; });
   box.addEventListener('keydown', (event) => {
     if (event.key === 's' && (event.ctrlKey || event.metaKey) && !event.altKey) {
       event.preventDefault();
@@ -75,6 +140,14 @@ export function editorFor(tab, hooks) {
     }
   });
   tab.editor = box;
+  // Monaco still loading (the first tab of a page load): it takes over once it arrives - but only while
+  // nobody has started on the plain editor, so nothing typed is ever moved under the caret.
+  loadMonaco().then((ready) => {
+    if (!ready || tab.editor !== box || tab.saveState !== 'saved' || document.activeElement === box) return;
+    const old = tab.editorFrame;
+    const fresh = monacoFrame(tab, hooks, box.value);
+    if (old.isConnected) old.replaceWith(fresh);
+  });
   return tab.editorFrame;
 }
 
@@ -105,7 +178,7 @@ export async function saveNow(tab, hooks, overwrite = false) {
       tab.modified = data.modified;
       tab.stale = false;
       // Typed while the save was in flight: still unsaved, and it goes on the next timer.
-      tab.saveState = tab.editor.value === text ? 'saved' : 'unsaved';
+      tab.saveState = tab.editor && tab.editor.value !== text ? 'unsaved' : 'saved';
       if (tab.saveState === 'unsaved') schedule(tab, hooks);
     }
   } catch (error) {
@@ -126,7 +199,7 @@ export function saveChip(tab) {
 // Shown only while a save is refused: what happened and the three ways out.
 export function conflictBar(tab, hooks) {
   if (tab.saveState !== 'conflict') return null;
-  const drop = () => { tab.editor = null; hooks.reload(tab); };
+  const drop = () => { dropEditor(tab); hooks.reload(tab); };
   const reload = h('button', { type: 'button', class: 'conflict-reload' }, 'Reload (drop my edits)');
   const overwrite = h('button', { type: 'button', class: 'conflict-overwrite' }, 'Overwrite with mine');
   const copy = h('button', { type: 'button', class: 'conflict-copy' }, 'Copy mine, then reload');

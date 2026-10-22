@@ -22,6 +22,9 @@ API (JSON; writes need Content-Type application/json):
   POST /api/session/queue/cancel           {name, id} drop a waiting prompt (D176)
   POST /api/session/deliver                {session_id} waiting prompts for the PostToolUse hook (feature 119; this machine only)
   POST /api/tool/check                     {tool_use_id} stop a call whose spellings collapse to one name (PreToolUse hook; this machine only)
+  POST /api/tool/names                     {tool_use_id} whether real names went into a call (PostToolUse hook, D199; this machine only)
+  POST /api/activity/seen                  {session, turns} a session was looked at: its alerts clear on every page (D200)
+  POST /api/session/suggest                {name, path, language, line, before, after, instruction} code for the editor's cursor (feature 139)
   POST /api/session/permission-mode        {name, mode} how it asks before it acts
   POST /api/session/permission             {id, allow} answer a waiting permission request
   POST /api/session/permission/request     the approval host asking; waits for the answer
@@ -89,7 +92,7 @@ from aiohttp import web
 from .config import Config
 from .contact import ContactSource
 from .detect import CandidateStore, extra_words
-from .guard import FILE_CSP, REMOTE, is_loopback_listen
+from .guard import FILE_CSP, REMOTE, STYLE_NONCE, is_loopback_listen
 
 # What may be changed through the tunnel: the ones that alter how you are TOLD about things, not
 # what is done about them (H3). Everything else is set on the machine, which keeps proxy.bypass,
@@ -156,7 +159,10 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # Reading text out of images and scanned PDFs (J2, Brad 2026-10-20): its own card.
                    "attachments.ocr", "attachments.ocr_max_pages", "attachments.ocr_timeout_s",
                    # The casual-chats folder (item J): it prompts nothing on the machine.
-                   "session.casual_folder")
+                   "session.casual_folder",
+                   # Settings review rows 13, 14 and 42 (Brad, 2026-10-20, "as proposed"): none prompts on the
+                   # machine. The rename-collapse guard and remote.enabled stay local.
+                   "claude.bash_guard", "codetab.enabled", "codetab.port", "claude.deliver_between_tools")
 LOCAL_ONLY_SETTINGS = tuple(k for k in Config.EDITABLE if k not in REMOTE_SETTINGS)
 from .mapping import (GLOBAL_ID, SOURCE_MANUAL, SOURCE_REVIEW, MappingError)
 from . import bashguard, rules
@@ -1923,6 +1929,92 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         reason = proxy.take_collapse(str(body.get("tool_use_id", ""))) if proxy is not None else ""
         return web.json_response({"ok": True, "deny": bool(reason), "reason": reason})
 
+    async def session_suggest(request: web.Request) -> web.Response:
+        """Feature 139: code to insert at the editor's cursor, from the file's own project session - whichever AI
+        service it runs (Claude, Copilot CLI, Codex). Sent as a prompt like any other, so it is filtered and it
+        is in the conversation; this waits for that prompt's own turn (behind any running or queued one) and
+        answers with the code from the reply's first fenced block."""
+        from .origin import page_note
+        from .session import SessionError
+
+        body = await request.json()
+        name = str(body.get("name", ""))
+        path = str(body.get("path", ""))[:400]
+        language = re.sub(r"[^\w+-]", "", str(body.get("language", "")))[:30]
+        before = str(body.get("before", ""))[-6000:]
+        after = str(body.get("after", ""))[:2000]
+        line = int(body.get("line") or 0)
+        instruction = str(body.get("instruction", "")).strip()[:500]
+        text = (f"Code suggestion for {path or 'the open file'}, line {line} (from aicleaner's editor). "
+                "Reply with ONLY the code to insert at <CURSOR> - nothing before or after it, no explanation - "
+                f"in one fenced code block.{(' What it should do: ' + instruction) if instruction else ''}\n\n"
+                f"```{language}\n{before}<CURSOR>{after}\n```")
+        host = session_host()
+        try:
+            session = host._session(name)
+        except SessionError as exc:
+            return err(exc, status=409)
+        if not session.running:
+            return err(ValueError("the session is not running - start it to get suggestions"), status=409)
+        queue = session.watch()
+        try:
+            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""))
+            await host.prompt(text, name=name, origin=note)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 300
+            ours = False
+            said: list[str] = []
+            while True:
+                event = await asyncio.wait_for(queue.get(), max(1.0, deadline - loop.time()))
+                kind = event.get("type")
+                if kind == "prompt" and text in str(event.get("text", "")):
+                    ours = True                       # our prompt has gone; its turn starts now
+                elif ours and kind == "assistant":
+                    for block in (event.get("message") or {}).get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            said.append(str(block.get("text", "")))
+                elif ours and kind in ("result", "exited", "stopped", "interrupted"):
+                    break
+        except asyncio.TimeoutError:
+            return err(ValueError("no suggestion within 5 minutes"), status=504)
+        except SessionError as exc:
+            return err(exc, status=409)
+        finally:
+            session.unwatch(queue)
+        reply = "\n".join(said)
+        fenced = re.search(r"```[^\n]*\n(.*?)```", reply, re.S)
+        code = (fenced.group(1) if fenced else reply).rstrip("\n")
+        code = code.replace("<CURSOR>", "")
+        if not code.strip():
+            return err(ValueError("the reply held no code"), status=502)
+        return web.json_response({"ok": True, "code": code})
+
+    async def activity_seen(request: web.Request) -> web.Response:
+        """A page looked at a session (D200): its "has finished" alerts up to that turn are cleared on every
+        page, here and through remote access. Nothing secret moves - a name and a count."""
+        body = await json_or_empty(request)
+        host = getattr(proxy, "session", None) if proxy is not None else None
+        target = host.sessions.get(str(body.get("session", ""))) if host is not None else None
+        if target is not None:
+            try:
+                target.mark_seen(int(body.get("turns", 0)))
+            except (TypeError, ValueError):
+                return err(ValueError("turns must be a number"))
+        return web.json_response({"ok": True, "seen_turns": target.seen_turns if target is not None else 0})
+
+    async def tool_names(request: web.Request) -> web.Response:
+        """Asked by the PostToolUse hook after every tool call, with its id: whether real names were put
+        into its arguments, so the model can be told that what it sees as a token was written correctly
+        (D199). This machine only, like the hook."""
+        if request.get(REMOTE):
+            return web.json_response({"ok": False, "error": "this machine only"}, status=403)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        restored = proxy.take_restored(str(body.get("tool_use_id", ""))) if proxy is not None else False
+        return web.json_response({"ok": True, "restored": restored})
+
     async def session_stop(request: web.Request) -> web.Response:
         from .session import SessionError
 
@@ -2799,9 +2891,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                     rules_said = f"the setting was saved, but {exc}"
                     log.warning("rules block not updated: %s", exc)
             # The Bash guard (feature 98) is a hook in Claude Code's settings, kept in step with its
-            # switch here - on this machine only, for the same reason as the rules block.
-            # Waiting messages between tool calls (feature 119): the same kind of hook, the same care.
-            if "claude.deliver_between_tools" in changes and not request.get(REMOTE):
+            # switch here. Waiting messages between tool calls (feature 119): the same kind of hook.
+            # Both reach remotely since item L - neither prompts on the machine; the collapse guard
+            # stays local, since off is a safety check off.
+            if "claude.deliver_between_tools" in changes:          # remote too since L (2026-10-20)
                 from . import deliver
                 try:
                     said = deliver.apply(proxy.cfg.claude_deliver_between_tools, proxy.cfg.port)
@@ -2817,19 +2910,19 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                     said = f"the setting was saved, but {exc}"
                     log.warning("collapse guard not updated: %s", exc)
                 rules_said = " ".join(s for s in (rules_said, said) if s)
-            if "claude.bash_guard" in changes and not request.get(REMOTE):
+            if "claude.bash_guard" in changes:                     # remote too since L (2026-10-20)
                 try:
                     said = bashguard.apply(proxy.cfg.claude_bash_guard)
                 except bashguard.GuardError as exc:
                     said = f"the setting was saved, but {exc}"
                     log.warning("bash guard not updated: %s", exc)
                 rules_said = " ".join(s for s in (rules_said, said) if s)
-            # The Code tab switch (feature 117), this machine only, and Copilot's (2026-10-18): the forward
-            # proxy's readers, Claude Code's settings and VS Code's. Copilot's acts remotely too; its
+            # The Code tab switch (feature 117) and Copilot's (2026-10-18): the forward proxy's readers,
+            # Claude Code's settings and VS Code's. Both act remotely (the Code tab since item L); the
             # certificate is only added from here (trust), where Windows can ask the person.
             switches = ("codetab.enabled", "codetab.port")
             remote = bool(request.get(REMOTE))
-            if (any(key in changes for key in switches) and not remote) or "copilot.enabled" in changes:
+            if any(key in changes for key in switches) or "copilot.enabled" in changes:   # remote too since L
                 try:
                     said = await proxy.apply_codetab(trust=not remote)
                 except Exception as exc:  # noqa: BLE001 - saved; the reason is the answer
@@ -3543,7 +3636,15 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                                   "total": len(matched), "skipped_old": old})
 
     async def shell(request: web.Request) -> web.StreamResponse:
-        return web.FileResponse(WEB / "index.html")
+        """The page, with a fresh style nonce (feature 139): the policy header allows <style> elements carrying it,
+        and the file editor (Monaco) puts it on the ones it makes. A new one each load."""
+        import secrets
+        nonce = secrets.token_urlsafe(18)
+        request[STYLE_NONCE] = nonce
+        page = (WEB / "index.html").read_text(encoding="utf-8")
+        page = page.replace('<meta charset="utf-8">',
+                            f'<meta charset="utf-8">\n<meta name="aicleaner-style-nonce" content="{nonce}">', 1)
+        return web.Response(text=page, content_type="text/html", charset="utf-8")
 
     async def old_page(request: web.Request) -> web.Response:
         raise web.HTTPFound(REDIRECTS[request.path])
@@ -3599,6 +3700,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/session/queue/cancel", session_queue_cancel)
         app.router.add_post("/api/session/deliver", session_deliver)
         app.router.add_post("/api/tool/check", tool_check)
+        app.router.add_post("/api/tool/names", tool_names)
+        app.router.add_post("/api/activity/seen", activity_seen)
+        app.router.add_post("/api/session/suggest", session_suggest)
         app.router.add_post("/api/session/permission-mode", session_permission_mode)
         app.router.add_post("/api/session/permission", session_permission)
         app.router.add_post("/api/session/permission/request", session_permission_request)

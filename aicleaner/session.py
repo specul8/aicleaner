@@ -678,6 +678,11 @@ class Session:
         # For the status poll (feature 44): turns finished so far, which only counts up, and
         # whether one is in progress. A page compares one poll with the next to say "it is done".
         self.turns = 0
+        # The finished-turn count somebody has looked at, on any page (D200): a "Claude has finished"
+        # alert up to here is cleared on every computer, not only the one it was opened on.
+        self.seen_turns = 0
+        self.seen_waiting = 0       # questions waiting when it was last looked at; reported capped at what waits now
+        self.background = 0         # background tasks still running (D202), from the CLI's live list
         self.busy = False
         # What Claude is doing now ("thinking...", a tool's name), from the fragments the buffer
         # drops (D29). The stream shows it as it comes; a page polling through the tunnel has no
@@ -720,7 +725,15 @@ class Session:
     def activity(self) -> dict[str, Any]:
         """The few numbers the status poll carries for this session (feature 44)."""
         return {"name": self.profile.name if self.profile else "", "running": self.running,
-                "busy": self.busy, "turns": self.turns, "waiting": len(self.pending)}
+                "busy": self.busy, "turns": self.turns, "waiting": len(self.pending),
+                "seen_turns": self.seen_turns, "seen_waiting": min(self.seen_waiting, len(self.pending)),
+                "background": self.background if self.running else 0}
+
+    def mark_seen(self, turns: int) -> None:
+        """A page looked at this session with `turns` finished (D200). Only moves forward, and never
+        past what has actually finished; the questions waiting now count as seen too."""
+        self.seen_turns = max(self.seen_turns, min(int(turns), self.turns))
+        self.seen_waiting = len(self.pending)
 
     def _new_epoch(self) -> None:
         """The buffer was emptied (a start, a reattach): numbers the page holds no longer apply."""
@@ -914,6 +927,7 @@ class Session:
                 log.warning("could not refile conversation %s under %s: %s", resume, folder, exc)
             await self._seed(folder, resume)
         self.pending.clear()
+        self.seen_waiting = 0
         self.approve_token = secrets_module.token_urlsafe(24)
         self.session_id = ""
         self.last_error = ""
@@ -1004,6 +1018,7 @@ class Session:
         self.events.clear()
         self._new_epoch()
         self.pending.clear()
+        self.seen_waiting = 0
         self.last_error = ""
         self._briefed = True           # the brief went with the first prompt, before the restart
         self._load_queue()
@@ -1554,6 +1569,7 @@ class Session:
             if waiting.answer is not None and not waiting.answer.done():
                 waiting.answer.set_result(False)
         self.pending.clear()
+        self.seen_waiting = 0
         self._emit({"type": "stopped"})
 
     # ---- reading the child ------------------------------------------------------------
@@ -1634,6 +1650,11 @@ class Session:
         # An event that already knows when it happened keeps it - a replayed message was said
         # when the transcript says, not now (feature 66).
         event = {**event, "seq": self._sequence, "at": event.get("at") or time.time()}
+        # What runs in the background (D202): the CLI's own live list. A turn that ends with one running
+        # is not "finished" - its result starts the agent again - so the alert waits for the list to empty.
+        if event.get("type") == "system" and event.get("subtype") == "background_tasks_changed" \
+                and isinstance(event.get("tasks"), list) and not self._replaying:
+            self.background = len(event["tasks"])
         # The CLI's `result` closes a turn; an exit ends one without finishing it.
         if event.get("type") == "result":
             self.turns += 1
@@ -1687,6 +1708,8 @@ class Session:
             return False
         finally:
             self.pending.pop(request_id, None)
+            if not self.pending:
+                self.seen_waiting = 0       # the next question is new to every page (D200)
 
     def answer_permission(self, request_id: str, allow: bool, answers: Any = None) -> bool:
         """Answer a waiting request; False when there is nothing by that id.

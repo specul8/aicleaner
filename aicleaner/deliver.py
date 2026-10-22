@@ -31,6 +31,10 @@ MARKER = "deliver_queued.py"
 # The rename-collapse guard (bug report 2026-10-14): a PreToolUse hook, written with the same care.
 COLLAPSE_SCRIPT = Path(__file__).resolve().parent / "hooks" / "check_collapse.py"
 COLLAPSE_MARKER = "check_collapse.py"
+# Its partner after the call (D199, 2026-10-21): tells the model that real names went into what it just
+# wrote, so it stops "correcting" correct file names it sees as tokens. Installed and removed with it.
+NAMES_SCRIPT = Path(__file__).resolve().parent / "hooks" / "names_restored.py"
+NAMES_MARKER = "names_restored.py"
 
 
 class DeliverError(RuntimeError):
@@ -73,11 +77,16 @@ def updated(doc: dict, on: bool, port: int, python: str | Path | None = None, ev
 
 
 def apply_collapse_guard(on: bool, port: int, home: Path | None = None, python: str | Path | None = None) -> str:
-    """The PreToolUse hook that stops a call whose spellings collapse to one real name - for every
-    Claude Code session on the machine, since the proxy sees them all. As `apply`."""
-    return apply(on, port, home, python, event="PreToolUse", marker=COLLAPSE_MARKER, script=COLLAPSE_SCRIPT,
-                 said=("tool calls that would write two names as one are stopped before they run",
-                       "the rename-collapse guard is off"))
+    """The PreToolUse hook that stops a call whose spellings collapse to one real name, and its
+    PostToolUse partner that says a name the model sees as a token was written correctly (D199) - for
+    every Claude Code session on the machine, since the proxy sees them all. As `apply`."""
+    before = apply(on, port, home, python, event="PreToolUse", marker=COLLAPSE_MARKER, script=COLLAPSE_SCRIPT,
+                   said=("tool calls that would write two names as one are stopped before they run",
+                         "the rename-collapse guard is off"))
+    after = apply(on, port, home, python, event="PostToolUse", marker=NAMES_MARKER, script=NAMES_SCRIPT,
+                  said=("Claude is told when a name it sees as a token was written correctly",
+                        "Claude is no longer told when a name it sees as a token was written correctly"))
+    return " ".join(s for s in (before, after) if s)
 
 
 def apply(on: bool, port: int, home: Path | None = None, python: str | Path | None = None,

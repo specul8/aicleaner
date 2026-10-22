@@ -174,11 +174,17 @@ try {
 
     if ($Detach) {
         Move-ProxyLog -LogDir $logDir
+        # Each start writes to its own logs, named for when it started (D198, Brad 2026-10-21): a restart -
+        # or a second proxy left running beside the new one - can never overwrite or rename the log that
+        # explains why the restart was needed. Move-ProxyLog still moves an old fixed-name log aside.
+        $startStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $stderrLog = Join-Path $logDir "proxy-stderr-$startStamp.log"
+        $stdoutLog = Join-Path $logDir "proxy-stdout-$startStamp.log"
         Write-Status "Starting aicleaner hidden on port $Port (usually a few seconds; gives up after 15)"
         $proc = Start-Process -FilePath $venvPython -ArgumentList @('-m', 'aicleaner', 'run', '--config', "`"$ConfigPath`"") `
             -WorkingDirectory $root -WindowStyle Hidden -PassThru `
-            -RedirectStandardError (Join-Path $logDir 'proxy-stderr.log') `
-            -RedirectStandardOutput (Join-Path $logDir 'proxy-stdout.log')
+            -RedirectStandardError $stderrLog `
+            -RedirectStandardOutput $stdoutLog
         Write-Status "Process $($proc.Id) started; waiting for http://127.0.0.1:$Port/healthz to answer" -Level Detail
         # Poll rather than sleep a fixed time; the venv start-up varies with disk cache state. Say
         # so every few seconds, so a slow start does not look like a hang.
@@ -200,10 +206,10 @@ try {
                 Write-Status 'The mapping is empty: nothing is being tokenised. Check the clients folder in aicleaner-config.json.' -Level Warn
             }
         } elseif ($proc.HasExited) {
-            Write-Status "aicleaner exited straight away (code $($proc.ExitCode)); see $(Join-Path $logDir 'proxy-stderr.log')" -Level Error
+            Write-Status "aicleaner exited straight away (code $($proc.ExitCode)); see $stderrLog" -Level Error
             exit 1
         } else {
-            Write-Status "aicleaner did not answer /healthz within 15s; see $(Join-Path $logDir 'proxy-stderr.log')" -Level Error
+            Write-Status "aicleaner did not answer /healthz within 15s; see $stderrLog" -Level Error
             exit 1
         }
     } else {

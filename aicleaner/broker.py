@@ -101,6 +101,8 @@ class Broker:
         app.router.add_get("/state", self.state)
         runner = web.AppRunner(app)
         await runner.setup()
+        from . import acceptguard
+        acceptguard.install()                # a dropped connection must not close the broker's port (D198)
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]      # type: ignore[union-attr]

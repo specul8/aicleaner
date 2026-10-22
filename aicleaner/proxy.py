@@ -217,6 +217,43 @@ def _without_our_marks(body: bytes, content_type: str, dialect: str) -> bytes:
     return body if cleaned == obj else dumps(cleaned)
 
 
+# D199 (Brad, 2026-10-21): Claude saw a file name it had written with the client's name in it as a token,
+# decided it had "invented a made-up form of the client's name", and renamed a correct file. Said to every
+# routed Claude, at the end of its system prompt (after any cache breakpoint, so caching is unchanged),
+# whenever names were replaced in the request.
+TOKEN_NOTE = (
+    "Note from aicleaner, the local filter in front of this conversation: client names are replaced with "
+    "tokens before they reach you, and the real names are put back in everything you produce - file names, "
+    "paths, code, commands, documents and tool input. So a token you see in something you wrote means it was "
+    "written correctly with the real name. Never rename, rewrite or 'correct' a file, path, identifier or text "
+    "because it shows a token, and never invent a substitute name for one. Use tokens exactly as you see them.")
+
+
+def _with_token_note(body: bytes) -> bytes:
+    """The Messages request with TOKEN_NOTE as the last block of its system prompt (once)."""
+    try:
+        obj = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    if not isinstance(obj, dict):
+        return body
+    system = obj.get("system")
+    note = {"type": "text", "text": TOKEN_NOTE}
+    if system is None or system == "":
+        obj["system"] = [note]
+    elif isinstance(system, str):
+        if TOKEN_NOTE in system:
+            return body
+        obj["system"] = [{"type": "text", "text": system}, note]
+    elif isinstance(system, list):
+        if any(isinstance(block, dict) and block.get("text") == TOKEN_NOTE for block in system):
+            return body
+        obj["system"] = [*system, note]
+    else:
+        return body
+    return dumps(obj)
+
+
 @dataclass
 class _Filtering:
     """What Proxy._filter_body reads and writes back for one request (or one WebSocket frame)."""
@@ -333,6 +370,8 @@ class Proxy:
         self._open: dict[str, dict[str, Any]] = {}
         # Tool calls to stop before they run (the rename collapse): id -> (when, reason).
         self.collapsed: dict[str, tuple[float, str]] = {}
+        # Tool calls real names were put back into (D199): id -> when.
+        self.restored: dict[str, float] = {}
         self._pdf_to_text = pdftotext_converter(cfg.pdftotext or None)
         # Probed once at startup, like pdftotext: the shared reader (Snipping Tool's engine when the
         # user has it, feature 113; otherwise Windows', with Tesseract where installed), otherwise
@@ -781,6 +820,9 @@ class Proxy:
         # engagement this is. Registered first: /session/ACME/anthropic/... is not a dialect.
         app.router.add_route("*", "/session/{profile}/{dialect}/{tail:.*}", self.handle)
         app.router.add_route("*", "/{dialect}/{tail:.*}", self.handle)
+        # Before any listener starts (D198): a dropped connection must not close one - this one, the Code
+        # tab's forward proxy, or anything else on this loop.
+        app.on_startup.append(_guard_accepts)
         app.on_startup.append(self._start)
         app.on_cleanup.append(self._stop)
         return app
@@ -1190,9 +1232,24 @@ class Proxy:
         for block in blocks if isinstance(blocks, list) else []:
             if (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id")
                     and not tool_is_kept(block.get("name"), self.keep_tools())):
-                found = mapper.collapses(json.dumps(block.get("input"), ensure_ascii=False))
+                written = json.dumps(block.get("input"), ensure_ascii=False)
+                found = mapper.collapses(written)
                 if found:
                     self.note_collapse(str(block["id"]), found)
+                if mapper.rehydrate(written) != written:
+                    self.note_restored(str(block["id"]))
+
+    def note_restored(self, call_id: str) -> None:
+        """Real names were put back into this tool call's arguments (D199): kept until the after-write
+        hook asks (hooks/names_restored.py), which tells the model that what it wrote is right on disk."""
+        now = time.time()
+        self.restored = {k: v for k, v in self.restored.items() if now - v < self.COLLAPSE_KEEP_S}
+        self.restored[call_id] = now
+
+    def take_restored(self, call_id: str) -> bool:
+        """Whether real names went into this call, once."""
+        when = self.restored.pop(call_id, None)
+        return when is not None and time.time() - when < self.COLLAPSE_KEEP_S
 
     def reads_images(self) -> bool:
         """True when an image in a request is read on this machine and replaced by its text (local
@@ -1819,6 +1876,9 @@ class Proxy:
         held_back, attach, near_miss = filtering.held_back, filtering.attach, filtering.near_miss
 
         mapper = reply_mapper if body and _is_json(content_type) else mapper
+        if dialect == "anthropic" and tail.rstrip("/").endswith("v1/messages") and sum(outbound.values()) \
+                and not request.get(_BYPASS) and _is_json(content_type):
+            body = _with_token_note(body)         # D199: names it sees as tokens are right where it wrote them
         headers = {k: v for k, v in request.headers.items() if _forwardable(k)}
         auth_mode = self._apply_credential(dialect, headers)
         assert self._session is not None
@@ -1894,6 +1954,7 @@ class Proxy:
         rewriter = get_stream_rewriter(dialect, mapper, inbound, self.keep_tools(),
                                        mark=self._marks_for(request))
         rewriter.on_collapse = self.note_collapse
+        rewriter.on_restored = self.note_restored
         max_index = -1
         footer_done = False
         # D97: the footer goes INTO the reply's last text block, not a block after it - a ralph loop's
@@ -2086,5 +2147,59 @@ def run(cfg: Config) -> None:
                     "no names replaced, no identifiers detected, nothing held back, no canary. "
                     "Remove it from allow_non_json_paths unless you are working around a "
                     "specific refusal right now.", path)
-    web.run_app(proxy.build_app(), host=cfg.listen, port=cfg.port, print=None,
-                access_log=None)
+    app = proxy.build_app()
+    app.on_startup.append(lambda _app: _start_watchdog(cfg.listen, cfg.port, lambda: _restart_self(cfg)))
+    web.run_app(app, host=cfg.listen, port=cfg.port, print=None, access_log=None)
+
+
+def _restart_self(cfg: Config) -> None:
+    """What the Restart button does: Stop and Start in a detached PowerShell, which stops this process."""
+    from .restart import restart
+    if cfg.path is None:
+        raise RuntimeError("not started from an installed config")
+    log_path = restart(cfg.path.parent, cfg.port, Path(cfg.log_dir))
+    log.critical("restart handed to PowerShell (log %s)", log_path)
+
+
+async def _guard_accepts(app: web.Application) -> None:
+    from . import acceptguard
+    acceptguard.install()
+
+
+WATCHDOG_EVERY_S = 30
+WATCHDOG_MISSES = 3
+
+
+async def _start_watchdog(host: str, port: int, on_dead=None) -> None:
+    """The second line behind D198: if this proxy's own port stops answering - whatever closed it - after
+    three checks in a row it restarts aicleaner (`on_dead`, the Restart button's Stop and Start). Exiting
+    alone would not do: the scheduled task starts the proxy detached and is finished by then, so its
+    restart-on-failure never sees this process end. Exit is the last resort, when the restart cannot even be
+    handed over. Only for the installed proxy (`run`), never a test server on another port."""
+    async def watch() -> None:
+        misses = 0
+        target = "127.0.0.1" if host in ("0.0.0.0", "") else host
+        while True:
+            await asyncio.sleep(WATCHDOG_EVERY_S)
+            try:
+                _reader, writer = await asyncio.wait_for(asyncio.open_connection(target, port), 5)
+                writer.close()
+                misses = 0
+            except (OSError, asyncio.TimeoutError) as exc:
+                misses += 1
+                log.error("port %d did not answer this proxy's own check (%d of %d): %s",
+                          port, misses, WATCHDOG_MISSES, exc)
+                if misses >= WATCHDOG_MISSES:
+                    log.critical("port %d has stopped listening; restarting aicleaner", port)
+                    try:
+                        if on_dead is None:
+                            raise RuntimeError("no restart given")
+                        on_dead()
+                        return
+                    except Exception as exc:  # noqa: BLE001 - the last resort follows
+                        log.critical("could not restart (%s); exiting", exc)
+                        os._exit(3)
+    _WATCHDOG.append(asyncio.get_running_loop().create_task(watch()))   # held, so it is not collected
+
+
+_WATCHDOG: list[asyncio.Task] = []

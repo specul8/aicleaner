@@ -26,6 +26,8 @@ import { codeEditor } from '../codeeditor.js';
 import { openConversationSearch } from '../convsearch.js';
 import { openClaudeImport } from '../claudeimport.js';
 import { attachFileDrop } from '../filedrop.js';
+import { attachTreeDrag } from '../treedrag.js';
+import { loadMonaco } from '../monacoedit.js';
 import { watchTitles } from '../titleprogress.js';
 import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetTitle, splitPrompt } from '../snippets.js';
 import { promptParts } from '../promptparts.js';
@@ -868,7 +870,7 @@ function entryRow(listing, entry, depth) {
   // its `parent`, which is what a Shift range stays within.
   const about = { full, root: listing.root, path: relative, name: entry.name, parent: `${listing.root}|${listing.path || ''}`,
     kind: entry.dir ? 'dir' : 'file', view: entry.dir ? '' : (entry.view || 'download') };
-  const label = h('button', { type: 'button', class: `tree-name ${entry.dir ? 'dir' : 'file'}`, dataset: about },
+  const label = h('button', { type: 'button', class: `tree-name ${entry.dir ? 'dir' : 'file'}`, dataset: about, draggable: blocked ? 'false' : 'true' },
     mark, h('span', { class: 'tree-text' }, entry.name));
   if (isSelected(full)) label.classList.add('selected');
   if (blocked) {
@@ -2362,6 +2364,7 @@ function setLink(state) {
 }
 
 export async function render(main, context = {}) {
+  loadMonaco();                        // feature 139: the file editor's module, ready before the first tab
   // `#/session/<name>` opens on that session (D118): a notice's Open, and a status-stack entry,
   // name the session they are about. The name goes to the server, which answers for it when it is
   // a profile and falls back to its own choice when it is not.
@@ -2644,6 +2647,20 @@ export async function render(main, context = {}) {
       run.textContent = session.running ? 'Stop' : 'Start';
       run.classList.toggle('primary', !session.running);
       run.classList.toggle('danger', session.running);
+      // D201 (Brad, 2026-10-22): Start waits for the conversation list, so it starts the conversation the
+      // person meant rather than whatever was chosen before the list arrived. Stop never waits.
+      // Only its own lock is lifted: a start or stop in flight disables the button too, and the poll must
+      // not hand it back mid-way.
+      const waiting = !session.running && Boolean(view.pastLoading);
+      if (waiting) {
+        run.disabled = true;
+        run.dataset.waitingForList = '1';
+        run.title = 'Loading conversations...';
+      } else if (run.dataset.waitingForList) {
+        delete run.dataset.waitingForList;
+        run.disabled = false;
+        run.title = '';
+      }
     }
     // Start chatting only means something while the session is running (DECISIONS 35).
     chat.disabled = !session.running;
@@ -3213,7 +3230,7 @@ export async function render(main, context = {}) {
   // while the selected session is running; there is nothing to chat to otherwise.
   const chat = h('button', { type: 'button', id: 'session-chat', disabled: true }, 'Start chatting');
   chat.addEventListener('click', () => {
-    document.getElementById('session-band').scrollIntoView({ block: 'start', behavior: 'smooth' });
+    document.getElementById('session-band')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     box.focus({ preventScroll: true });
   });
   // Nothing picked: the card says what the picker says, instead of controls for no project (the
@@ -3707,7 +3724,7 @@ export async function render(main, context = {}) {
   if (view.name) noteAddress(`#/session/${encodeURIComponent(view.name)}`);
   if (toChat && view.name) {
     requestAnimationFrame(() => {
-      document.getElementById('session-band').scrollIntoView({ block: 'start', behavior: 'smooth' });
+      document.getElementById('session-band')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
       if (!box.disabled) box.focus({ preventScroll: true });
     });
   }
@@ -3795,7 +3812,7 @@ export async function render(main, context = {}) {
     const add = document.getElementById('profile-add');
     if (add) {
       add.click();
-      document.getElementById('session-profiles').scrollIntoView({ block: 'start' });
+      document.getElementById('session-profiles')?.scrollIntoView({ block: 'start' });
     }
   };
   if (!view.addSessionHooked) {
@@ -3901,7 +3918,7 @@ export async function render(main, context = {}) {
         // Start, and only Start, brings the working band into view (DECISIONS 35). Arriving on
         // the page with a session running does not scroll: whoever came to stop it would be
         // chasing the Stop button up the screen.
-        document.getElementById('session-band').scrollIntoView({ block: 'start', behavior: 'smooth' });
+        document.getElementById('session-band')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
         box.focus({ preventScroll: true });
       }
     } catch (error) {
@@ -3968,6 +3985,14 @@ export async function render(main, context = {}) {
     if (skipped) say(`${skipped} cannot be shown in a tab - left out.`);
     if (window.matchMedia(PHONE).matches && band.classList.contains('rail-open')) setFilesOpen(false, false);
   };
+  // Feature 120: Files panel rows dragged onto the conversation open in tabs; onto the prompt, their paths go in.
+  attachTreeDrag({
+    source: panel,
+    area: band,
+    conversation: (target) => target.closest && target.closest('#session-log, #file-tabs, #file-pane'),
+    prompt: (target) => target.closest && target.closest('#prompt-pane textarea'),
+    open: (items) => viewMany(items),
+  });
   // A few files one by one; more, or any folder, as one zip that keeps each file under its folders.
   const downloadMany = async (items) => {
     // Through the tunnel the links below are caught and fetched sealed, and fetch() is sealed (D168).
