@@ -150,6 +150,8 @@ if ($LogPath) {
 try {
     $root = $script:AppFolder
     if (-not $ConfigPath) { $ConfigPath = Join-Path $root 'aicleaner-config.json' }
+    # Started again: route B's watchdog may restart it from now on (Stop-AiCleaner left the marker).
+    Remove-Item -LiteralPath (Join-Path $env:USERPROFILE '.aicleaner\stopped-on-purpose') -ErrorAction SilentlyContinue
     # Shared venv lives outside synced folders; a repo-local .venv from an earlier install still works.
     $sharedPython = Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'
     $venvPython = $sharedPython

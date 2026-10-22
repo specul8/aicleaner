@@ -642,6 +642,42 @@ def cmd_copilot_off(cfg: Config, keep_switch: bool, remove_cert: bool) -> int:
     return 0
 
 
+def cmd_claudeai_off(cfg: Config, keep_switch: bool, remove_cert: bool) -> int:
+    """Route B put back: the Windows proxy setting as it was before (claudeai_settings' ledger). Disable turns the
+    switch off; Uninstall also takes the claude.ai certificate out of the Windows store (Windows asks to confirm)
+    and its files."""
+    from . import claudeai_settings, claudeai_tasks, copilot_settings
+    from .codetab_ca import Authority
+
+    state = Path(cfg.state_dir) if cfg.state_dir else Path(cfg.mapping).parent / "state"
+    try:
+        if cfg.claudeai_enabled and not keep_switch:
+            cfg.update_settings({"claudeai.enabled": False})
+        said = claudeai_settings.apply(False, state, f"http://127.0.0.1:{cfg.port}/claudeai.pac")
+        # The PAC service and the watchdog (B4) go with it, unless the switch stays on.
+        root = cfg.path.parent if cfg.path else None
+        if not keep_switch and root is not None and claudeai_tasks.applies(root) \
+                and (state / claudeai_tasks.PAC_FILE).exists():
+            claudeai_tasks.uninstall(root)
+            (state / claudeai_tasks.PAC_FILE).unlink(missing_ok=True)
+            said = "; ".join(s for s in (said, "the watchdog and PAC service removed") if s)
+        if remove_cert:
+            authority = Authority(state, kind="claudeai")
+            if authority.ca_path.exists():
+                thumb = copilot_settings.thumbprint(authority.ca_path)
+                store = copilot_settings.cert_store()
+                if store.has(thumb):
+                    store.remove(thumb)
+                    said = "; ".join(s for s in (said, "the claude.ai certificate removed from your Windows certificates") if s)
+            authority.remove()
+    except (claudeai_settings.SettingsError, copilot_settings.SettingsError, claudeai_tasks.TaskError,
+            ValueError, OSError) as exc:
+        print(f"Claude Desktop's chat: {exc}", file=sys.stderr)
+        return 1
+    print(said or "Claude Desktop's chat: the Windows proxy setting was not pointed at aicleaner")
+    return 0
+
+
 def _covers(existing: str, pattern: str) -> bool:
     """True when a pattern already in the config covers this one."""
     import fnmatch
@@ -653,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="aicleaner")
     parser.add_argument("command", choices=["run", "check", "tokenise", "rehydrate", "scan", "preflight",
                                             "scan-tokens", "set-key", "seed", "split", "prune", "detail",
-                                            "mcp-audit", "unwire-claude", "codetab-off", "copilot-off"])
+                                            "mcp-audit", "unwire-claude", "codetab-off", "copilot-off", "claudeai-off"])
     parser.add_argument("path", nargs="?", default=".",
                         help="scan / preflight / scan-tokens: folder; set-key: dialect; seed and prune: client id")
     parser.add_argument("--index", type=int, default=None, help="seed: numeric client index (default: digits in the id)")
@@ -661,7 +697,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--keep-switch", action="store_true",
                         help="copilot-off: leave copilot.enabled on (Stop-AiCleaner; the next start points VS Code here)")
     parser.add_argument("--remove-cert", action="store_true",
-                        help="copilot-off: also remove the Copilot certificate from your Windows store (uninstall)")
+                        help="copilot-off / claudeai-off: also remove the certificate from your Windows store (uninstall)")
     parser.add_argument("--apply", action="store_true",
                         help="prune: actually remove what the dry run listed")
     parser.add_argument("--config", default=_default_config(), help="path to aicleaner-config.json")
@@ -731,6 +767,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_codetab_off(cfg)
     if args.command == "copilot-off":
         return cmd_copilot_off(cfg, args.keep_switch, args.remove_cert)
+    if args.command == "claudeai-off":
+        return cmd_claudeai_off(cfg, args.keep_switch, args.remove_cert)
 
     from .proxy import run
 

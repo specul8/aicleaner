@@ -52,6 +52,10 @@ KINDS = {
     "openai": {"cert": "openai-ca.pem", "key": "openai-ca.key.dpapi", "label": "OpenAI",
                "permitted": ["chatgpt.com", "api.openai.com"],
                "names": ["chatgpt.com", "api.openai.com"]},
+    # Route B (2026-10-22): Claude Desktop's chat, signed in to claude.ai. Trusted in the user's Windows store
+    # (Desktop's window uses it; probed 2026-10-21), so the constraint to claude.ai is what keeps it narrow.
+    "claudeai": {"cert": "claudeai-ca.pem", "key": "claudeai-ca.key.dpapi", "label": "claude.ai",
+                 "permitted": ["claude.ai"], "names": ["claude.ai", "*.claude.ai"]},
 }
 
 

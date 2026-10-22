@@ -881,6 +881,25 @@ try {
         }
     }
 
+    # --- 1a-v. Claude Desktop's chat (route B) -----------------------------------------
+    # The Windows proxy setting put back from the proxy's own record, the claude.ai certificate taken out of the
+    # Windows certificates (Windows asks to confirm), and its files removed: `aicleaner claudeai-off
+    # --remove-cert`. Left behind, claude.ai would point at a PAC file that is gone.
+    if ((Test-Path -LiteralPath $venvPython) -and (Test-Path -LiteralPath $configFile) -and
+        $PSCmdlet.ShouldProcess('the Windows proxy setting and the claude.ai certificate', 'Remove what route B added')) {
+        $savedEap = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        Push-Location -LiteralPath $root
+        try {
+            Write-Status 'If Windows asks whether to delete the "aicleaner claude.ai" certificate, choose Yes.' -Level Detail
+            & $venvPython -m aicleaner claudeai-off --remove-cert --config $configFile 2>&1 | ForEach-Object { Write-Status "Claude Desktop's chat: $_" -Level Detail }
+            if ($LASTEXITCODE -ne 0) { Write-Status 'The Windows proxy setting could not be put back; see the lines above' -Level Warn }
+        } finally {
+            Pop-Location
+            $ErrorActionPreference = $savedEap
+        }
+    }
+
     # --- 1b. VS Code environmentVariables ---------------------------------------------
     # Every settings file the installer can write: the locally installed VS Code, and the servers a
     # Remote-SSH session runs from. Missing the server ones left Claude Code pointed at a proxy that

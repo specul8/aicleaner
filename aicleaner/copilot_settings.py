@@ -341,14 +341,14 @@ class CertStore:
         return any(encoding == "x509_asn" and hashlib.sha1(der).hexdigest().upper() == wanted  # noqa: S324 - a thumbprint
                    for der, encoding, _trust in ssl.enum_certificates("ROOT"))
 
-    def add(self, ca_path: Path) -> None:
+    def add(self, ca_path: Path, label: str = "Copilot") -> None:
         try:
             done = subprocess.run(["certutil", "-user", "-addstore", "Root", str(ca_path)], capture_output=True,
                                   text=True, timeout=ADD_TIMEOUT_S)
         except subprocess.TimeoutExpired as exc:
-            raise SettingsError("Windows' confirmation was not answered, so the Copilot certificate was not added") from exc
+            raise SettingsError(f"Windows' confirmation was not answered, so the {label} certificate was not added") from exc
         if done.returncode != 0:
-            raise SettingsError("the Copilot certificate was not added to your Windows certificates "
+            raise SettingsError(f"the {label} certificate was not added to your Windows certificates "
                                 f"(declined, or certutil failed: {(done.stdout or done.stderr).strip()[-200:]})")
 
     def remove(self, thumb: str) -> None:
@@ -373,7 +373,7 @@ class FileStore:
     def has(self, thumb: str) -> bool:
         return thumb in self._read()
 
-    def add(self, ca_path: Path) -> None:
+    def add(self, ca_path: Path, label: str = "Copilot") -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(sorted(set(self._read()) | {thumbprint(ca_path)})), encoding="utf-8")
 

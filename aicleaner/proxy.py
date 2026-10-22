@@ -75,6 +75,8 @@ _STRIP_REQUEST = {
     # The body is sent decoded (aiohttp inflated it), so its old encoding would make it unreadable;
     # and a browser's cookies are this machine's business, not the provider's (H30).
     "content-encoding", "cookie",
+    # Feature 143: aicleaner's own mark on the file editor's suggestions, read here and never sent on.
+    "x-aicleaner-purpose",
     # The client asks for br, gzip. Passing that on has the provider answer in Brotli, which
     # aiohttp cannot decode without a package that is not installed - so every reply came back
     # "Can not decode content-encoding: brotli (br)" and every request failed. Dropped here so
@@ -141,6 +143,12 @@ def _outside_body(request: web.Request, tail: str) -> str:
     parts += [value for name, value in request.headers.items()
               if _forwardable(name) and name.lower() not in _CREDENTIAL_HEADERS]
     return "\n".join(p for p in parts if p)
+
+
+def _completion(request: web.Request) -> bool:
+    """A file editor suggestion (feature 143): aicleaner's own worker, marked by the header it sends."""
+    from .completion import HEADER, PURPOSE
+    return request.headers.get(HEADER, "").strip().lower() == PURPOSE
 
 
 def _forwardable(name: str) -> bool:
@@ -307,6 +315,14 @@ class Proxy:
         self.copilot_error = ""
         self.copilot_last_at = 0.0
         self.copilot_since = 0.0
+        # Route B (claudeai.py): Claude Desktop's chat through claude.ai's reader. What keeps the Windows proxy
+        # setting from pointing here (the certificate not trusted yet), and the last failure.
+        from .claudeai import ClaudeAI
+        self.claudeai = ClaudeAI(self)
+        self.claudeai_waiting = ""
+        self.claudeai_error = ""
+        # Feature 143: the file editor's suggestions, a warm Claude Code worker started on the first one.
+        self._completions: Any = None
         # Readers a Project session's agent needs (item K), started on demand: {"copilot"}.
         self.agent_readers: set[str] = set()
         # Candidates are per host: the folder may be OneDrive-synced between machines.
@@ -807,6 +823,7 @@ class Proxy:
                                            # after the guard, which decides what is remote (feature 21)
                                            make_tunnel_gate(self), self._audit(), self._timing()])
         app.router.add_get("/healthz", self.healthz)
+        app.router.add_get("/claudeai.pac", self.claudeai_pac)
         app.router.add_post("/api/tokenise", self.api_tokenise)
         app.router.add_post("/api/rehydrate", self.api_rehydrate)
         if self.store is not None:
@@ -1060,7 +1077,8 @@ class Proxy:
             # The forward proxy runs while either reader is wanted: the Code tab's (api.anthropic.com)
             # or Copilot's (2026-10-18). A change of which one rebuilds it; the port is shared.
             # Or a Project session driving GitHub Copilot CLI (item K), which needs Copilot's reader.
-            wanted = self.cfg.codetab_enabled or self.cfg.copilot_enabled or bool(self.agent_readers)
+            wanted = (self.cfg.codetab_enabled or self.cfg.copilot_enabled or self.cfg.claudeai_enabled
+                      or bool(self.agent_readers))
             authority = self.codetab_authority() if self.cfg.codetab_enabled else None
             if authority is not None:
                 await asyncio.to_thread(authority.ensure)
@@ -1092,6 +1110,7 @@ class Proxy:
                     await self.codetab.set_openai(openai_authority, self.openai_handle)
                 else:
                     await self.codetab.set_openai(None)
+            claudeai_said = await self._apply_claudeai(trust)
             if not self.cfg.copilot_enabled:
                 copilot_said = await self._apply_copilot_vscode(None, url, False)
             if self.cfg.codetab_enabled:
@@ -1105,10 +1124,116 @@ class Proxy:
             self.codetab_error = str(exc)
             raise
         self.codetab_error = ""
-        said = "; ".join(s for s in (said, copilot_said) if s)
+        said = "; ".join(s for s in (said, copilot_said, claudeai_said) if s)
         if said:
             log.info(said)
         return said
+
+    def completions(self) -> Any:
+        """The file editor's suggestion worker (feature 143), made on first use."""
+        if self._completions is None:
+            from .completion import Completions
+            from .session import resolve_cli
+            claude = self.session.claude if self.session is not None else resolve_cli("claude")
+            self._completions = Completions(claude, f"http://127.0.0.1:{self.cfg.port}/anthropic",
+                                            self.cfg.editor_inline_model)
+        self._completions.model = self.cfg.editor_inline_model
+        return self._completions
+
+    def claudeai_service(self) -> bool:
+        """Whether route B's PAC comes from the PAC service and the watchdog runs (B4): an installed aicleaner on
+        Windows. Elsewhere (tests, a development run) aicleaner serves the PAC itself."""
+        from . import claudeai_tasks
+        root = self.install_root()
+        return root is not None and claudeai_tasks.applies(root)
+
+    def claudeai_pac_url(self) -> str:
+        from . import claudeai_tasks
+        if self.claudeai_service():
+            return claudeai_tasks.pac_url()
+        return f"http://127.0.0.1:{self.cfg.port}/claudeai.pac"
+
+    def _claudeai_pac_text(self) -> str:
+        from . import claudeai_settings
+        kept = claudeai_settings.kept(self._state_path())
+        return claudeai_settings.pac(self.cfg.codetab_port, kept.get("before") or {}, kept.get("before_script") or "")
+
+    async def _apply_claudeai(self, trust: bool) -> str:
+        """Route B made to match its switch: claude.ai's reader running and the Windows proxy setting pointed at
+        aicleaner's PAC file while it is on and its certificate is trusted; put back otherwise. Trusting the
+        certificate needs someone at this machine (Windows asks them), so remotely and at a start it waits, with
+        what is waiting said - the Copilot rule."""
+        from . import claudeai_settings, claudeai_tasks, copilot_settings
+
+        state = self._state_path()
+        pac = self.claudeai_pac_url()
+        service = self.claudeai_service()
+        self.claudeai_waiting = ""
+        try:
+            if not self.cfg.claudeai_enabled or self.codetab is None:
+                if self.codetab is not None:
+                    await self.codetab.set_claudeai(None)
+                said = await asyncio.to_thread(claudeai_settings.apply, False, state, pac)
+                # The PAC file is there exactly while the service and the watchdog are registered: a cheap test,
+                # where asking Task Scheduler at every start would cost a PowerShell each time.
+                if service and (state / claudeai_tasks.PAC_FILE).exists():
+                    await asyncio.to_thread(claudeai_tasks.uninstall, self.install_root())
+                    (state / claudeai_tasks.PAC_FILE).unlink(missing_ok=True)
+                self.claudeai_error = ""
+                return said
+            authority = Authority(state, kind="claudeai")
+            await asyncio.to_thread(authority.ensure)
+            store = self.copilot_store()
+            thumb = await asyncio.to_thread(copilot_settings.thumbprint, authority.ca_path)
+            if not await asyncio.to_thread(store.has, thumb):
+                if not trust:
+                    await self.codetab.set_claudeai(None)
+                    await asyncio.to_thread(claudeai_settings.apply, False, state, pac)
+                    self.claudeai_waiting = ("the claude.ai certificate is not trusted yet - turn this on in Settings "
+                                             "at this machine, where Windows asks you to confirm it")
+                    self.claudeai_error = ""
+                    return f"Claude Desktop's chat: {self.claudeai_waiting}"
+                await asyncio.to_thread(store.add, authority.ca_path, "claude.ai")
+            await self.codetab.set_claudeai(authority, self.claudeai.handle)
+            if service:
+                # B4: the PAC written where the PAC service reads it, and the service and the watchdog registered,
+                # before the setting points at it - so there is never a moment it would answer "not found".
+                await asyncio.to_thread(claudeai_settings.record, state)
+                await asyncio.to_thread(claudeai_tasks.write_pac, state, self._claudeai_pac_text())
+                await asyncio.to_thread(claudeai_tasks.install, self.install_root(), state, self.cfg.port)
+            said = await asyncio.to_thread(claudeai_settings.apply, True, state, pac)
+        except (claudeai_settings.SettingsError, copilot_settings.SettingsError, claudeai_tasks.TaskError) as exc:
+            self.claudeai_error = str(exc)
+            raise codetab_settings.SettingsError(str(exc)) from exc
+        self.claudeai_error = ""
+        return said
+
+    def claudeai_summary(self) -> dict[str, Any]:
+        """Route B's switch and what is in place, for the Settings card and the Overview."""
+        from . import claudeai_settings, copilot_settings
+
+        out: dict[str, Any] = {"enabled": self.cfg.claudeai_enabled, "waiting": self.claudeai_waiting,
+                               "error": self.claudeai_error, "pac": self.claudeai_pac_url(),
+                               "listening": bool(self.codetab is not None and self.codetab.claudeai_port),
+                               "structure_log": self.cfg.claudeai_structure_log,
+                               "safeguards": self.claudeai_service()}
+        try:
+            out["windows"] = claudeai_settings.state(self._state_path(), self.claudeai_pac_url())
+        except Exception as exc:  # noqa: BLE001 - a summary never fails the page
+            out["windows"] = {"error": str(exc), "pointed": False}
+        try:
+            ca = Authority(self._state_path(), kind="claudeai").ca_path
+            out["trusted"] = ca.exists() and self.copilot_store().has(copilot_settings.thumbprint(ca))
+        except Exception:  # noqa: BLE001 - unknown is shown as not trusted
+            out["trusted"] = False
+        out.update(self.claudeai.summary())
+        return out
+
+    async def claudeai_pac(self, request: web.Request) -> web.Response:
+        """The PAC file the Windows proxy setting points at while route B is on (claudeai_settings.pac)."""
+        text = self._claudeai_pac_text()
+        return web.Response(text=text, content_type="application/x-ns-proxy-autoconfig",
+                            headers={"Cache-Control": "no-store"})
 
     async def _apply_copilot_vscode(self, authority: Any, url: str, trust: bool) -> str:
         """VS Code pointed at the forward proxy while Copilot's switch is on and its certificate is
@@ -1510,6 +1635,9 @@ class Proxy:
             await self._copilot_forwarder.close()
         if getattr(self, "_openai_forwarder", None) is not None:
             await self._openai_forwarder.close()
+        await self.claudeai.close()
+        if self._completions is not None:
+            await self._completions.close()
         if self.session is not None:
             # A session lives in its own broker (DECISIONS 49): this proxy lets go and the next one
             # re-attaches. Its model requests fail while no proxy answers, and Claude Code retries.
@@ -1589,6 +1717,7 @@ class Proxy:
                     # session (its note is added as the prompt is sent) and not a program (sdk).
                     agent = request.headers.get("User-Agent", "")
                     if (self.cfg.origin_note and isinstance(obj, dict) and agent.startswith(CLAUDE_CODE_AGENT)
+                            and not _completion(request)
                             and "sdk" not in agent and not request.match_info.get("profile")
                             and "messages" in tail and "count_tokens" not in tail):
                         from .origin import VSCODE_NOTE, add_to_typed
@@ -1832,6 +1961,8 @@ class Proxy:
         driver = await self._driver(session_name)
         if request.get(CODETAB):
             driver = {**driver, "app": "Claude Desktop Code tab"}
+        elif _completion(request):
+            driver = {**driver, "app": "file editor suggestion"}
         elif copilot_to:
             driver = {**driver, "app": request.get(AGENT_APP) or "GitHub Copilot"}
         request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver,
@@ -2051,6 +2182,8 @@ class Proxy:
         """
         if request.match_info.get("profile"):
             return self.cfg.highlight_session
+        if _completion(request):
+            return False             # code going into a file: never a mark
         agent = request.headers.get("User-Agent", "")
         return self.cfg.highlight_terminal and agent.startswith(CLAUDE_CODE_AGENT)
 
@@ -2095,7 +2228,7 @@ class Proxy:
         """
         if self.store is None or dialect != "anthropic" or "messages" not in tail or "count_tokens" in tail:
             return None
-        if request.match_info.get("profile") or request.get(_BYPASS):
+        if request.match_info.get("profile") or request.get(_BYPASS) or _completion(request):
             return None
         return self.notifier.footer_text(self.store.pending_count(), self.store.version,
                                          restored=restored, marked=self._marks_for(request))

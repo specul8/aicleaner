@@ -154,9 +154,11 @@ async def rows(cfg: Any, copilot: dict[str, Any] | None = None, base: Path | Non
     policy = desktop_policy(base)
     gateway = policy.get("inferenceGatewayBaseUrl", "")
     desktop_routed = bool(gateway) and routing._is_ours(gateway, port)
-    out.append(_row("claude-desktop", "Claude Desktop (chat)", desktop_found(base), desktop_routed,
+    signed_in = bool(getattr(cfg, "claudeai_enabled", False))          # route B: the claude.ai sign-in, filtered
+    out.append(_row("claude-desktop", "Claude Desktop (chat)", desktop_found(base), desktop_routed or signed_in,
                     "routed through aicleaner (its gateway setting)" if desktop_routed else
-                    "not routed - set up with the installer at the machine (it needs administrator)",
+                    "filtered (Settings > Claude Desktop's chat)" if signed_in else
+                    "not filtered - Settings > Claude Desktop's chat",
                     None, {"kind": "steps", "steps": "Claude Desktop signs in in its own window, on the machine."}))
     out.append(_row("codetab", "Claude Desktop's Code tab", desktop_found(base), bool(cfg.codetab_enabled),
                     "filtered (Settings > the Code tab)" if cfg.codetab_enabled else "not filtered - Settings > the Code tab",

@@ -9,9 +9,25 @@
 // The page's policy allows no inline styles. Monaco makes <style> elements; each page load carries a fresh nonce
 // (a meta tag the server writes) that the policy allows, and every style element made after this loads gets it.
 
+import { getJSON, postJSON } from './api.js';
+
 const BASE = '/web/vendor/monaco';
 let loading = null;
 let monaco = null;
+
+// Feature 143: code suggested as you pause, by Claude Haiku through aicleaner. After this long with no typing the
+// editor asks; the answer (a second or two later) shows as grey text if the cursor has not moved on.
+const PAUSE_MS = 600;
+let autoSuggest = false;
+const boxes = new Map();           // model uri -> the MonacoBox showing it (its file name, for the prompt)
+
+export function setAutoSuggest(on) { autoSuggest = Boolean(on); }
+
+function followSetting() {
+  const apply = (s) => { if ('editor.inline_suggest' in s) setAutoSuggest(s['editor.inline_suggest']); };
+  getJSON('/api/config').then((config) => apply(config.settings || {})).catch(() => {});
+  window.addEventListener('aicleaner:settings', (event) => apply(event.detail || {}));
+}
 
 export function styleNonce() {
   const meta = document.querySelector('meta[name="aicleaner-style-nonce"]');
@@ -49,6 +65,7 @@ export function loadMonaco() {
     const { registerCompletions } = await import('./editor/monacocomplete.js');
     registerCompletions(module);
     registerOffers(module);
+    followSetting();
     return module;
   }).catch((error) => {
     console.warn('The VS Code editor could not load; the plain editor stays.', error);
@@ -63,13 +80,40 @@ export const monacoReady = () => monaco;
 // at the position it was asked for. Tab takes it, Escape (or typing on, or moving away) leaves it.
 const offers = new Map();          // model uri -> { text, lineNumber, column }
 
+const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+// Feature 143: what Claude Haiku suggests for the cursor after a pause - nothing when the setting is off, the
+// text is selected, or the file moved on while it was asked (the answer belongs to text that is gone).
+async function suggestOnPause(m, model, position, token) {
+  const box = boxes.get(model.uri.toString());
+  if (!autoSuggest || !box || !box.alive) return null;
+  if (!box.editor.getSelection().isEmpty() || box.editor.getOption(m.editor.EditorOption.readOnly)) return null;
+  await sleep(PAUSE_MS);
+  if (token.isCancellationRequested || model.isDisposed()) return null;
+  const version = model.getVersionId();
+  const at = model.getOffsetAt(position);
+  const text = model.getValue();
+  let answer;
+  try {
+    answer = await postJSON('/api/editor/complete', { path: box.name, language: model.getLanguageId(),
+      before: text.slice(0, at), after: text.slice(at) });
+  } catch {
+    return null;                   // a suggestion that fails is simply not shown
+  }
+  if (token.isCancellationRequested || model.isDisposed() || model.getVersionId() !== version || !answer.text) return null;
+  return answer.text;
+}
+
 function registerOffers(m) {
   m.languages.registerInlineCompletionsProvider('*', {
-    provideInlineCompletions(model, position) {
+    async provideInlineCompletions(model, position, _context, token) {
+      const here = new m.Range(position.lineNumber, position.column, position.lineNumber, position.column);
       const offer = offers.get(model.uri.toString());
-      if (!offer || offer.lineNumber !== position.lineNumber || offer.column !== position.column) return { items: [] };
-      return { items: [{ insertText: offer.text,
-        range: new m.Range(position.lineNumber, position.column, position.lineNumber, position.column) }] };
+      if (offer && offer.lineNumber === position.lineNumber && offer.column === position.column) {
+        return { items: [{ insertText: offer.text, range: here }] };
+      }
+      const text = await suggestOnPause(m, model, position, token);
+      return { items: text ? [{ insertText: text, range: here }] : [] };
     },
     disposeInlineCompletions() {},
     freeInlineCompletions() {},
@@ -110,6 +154,8 @@ export class MonacoBox {
       ariaLabel: `Edit ${name}`, fixedOverflowWidgets: true,
     });
     this.model = this.editor.getModel();
+    this.name = name;
+    boxes.set(this.model.uri.toString(), this);
     const self = this;
     // What older code and the tests use on the element: a textarea's value, selection and focus.
     Object.defineProperty(host, 'value', { configurable: true, get: () => self.value, set: (v) => { self.value = v; } });
@@ -226,6 +272,7 @@ export class MonacoBox {
 
   dispose() {
     if (!this.alive) return;
+    boxes.delete(this.model.uri.toString());
     this.editor.dispose();
     this.model.dispose();
     // The element stays until the pane is drawn again, as the textarea did: its value reads empty meanwhile.

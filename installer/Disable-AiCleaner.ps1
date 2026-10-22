@@ -22,7 +22,8 @@
 
 .PARAMETER Only
     One tool only (item H, the AI tools page): ClaudeCode (Claude Code's and VS Code's routing),
-    CodeTab, or Copilot. Default All - everything, as before. A switch never touches another tool.
+    CodeTab, Copilot, or ClaudeDesktop (route B, its chat). Default All - everything, as before. A switch
+    never touches another tool.
 
 .PARAMETER LogPath
     Transcript log path. Pass '' to disable.
@@ -44,7 +45,7 @@
 
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [ValidateSet('All', 'ClaudeCode', 'CodeTab', 'Copilot')][string]$Only = 'All',
+    [ValidateSet('All', 'ClaudeCode', 'CodeTab', 'Copilot', 'ClaudeDesktop')][string]$Only = 'All',
     [AllowEmptyString()][string]$LogPath = $(
         $dir = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
         Join-Path $dir 'Disable-AiCleaner.log'
@@ -240,6 +241,49 @@ function Set-CopilotOff {
     }
 }
 
+function Set-ClaudeAiOff {
+    <#
+    .SYNOPSIS
+        Route B off: Claude Desktop's chat no longer filtered. Returns $true when something changed.
+    .DESCRIPTION
+        As Set-CopilotOff: through the running proxy when it answers, otherwise `aicleaner claudeai-off`, which
+        records the switch as off too. The Windows proxy setting is put back as it was before route B. The
+        claude.ai certificate stays (this is temporary); the uninstaller removes it.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    [OutputType([bool])]
+    param()
+    $configFile = Join-Path $script:AppFolder 'aicleaner-config.json'
+    $config = Read-JsonFile -Path $configFile
+    if (-not $config -or -not $config.PSObject.Properties['claudeai'] -or -not $config.claudeai.enabled) { return $false }
+    if (-not $PSCmdlet.ShouldProcess('Claude Desktop''s chat', 'Stop filtering it')) { return $false }
+    $port = if ($config.PSObject.Properties['port']) { [int]$config.port } else { 8787 }
+    try {
+        Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 3 -ErrorAction Stop | Out-Null
+        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
+            -Body '{"settings":{"claudeai.enabled":false}}' -TimeoutSec 30 -ErrorAction Stop
+        Write-Status "Claude Desktop's chat: $([string]$answer.rules)" -Level Detail
+        return $true
+    } catch {
+        Write-Verbose "proxy not answering: $($_.Exception.Message)"
+    }
+    $venvPython = Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $venvPython)) {
+        Write-Status "Claude Desktop's chat: the Python environment ($venvPython) is missing, so it could not be switched off" -Level Warn
+        return $false
+    }
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    Push-Location -LiteralPath $script:AppFolder
+    try {
+        & $venvPython -m aicleaner claudeai-off --config $configFile 2>&1 | ForEach-Object { Write-Status "Claude Desktop's chat: $_" -Level Detail }
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Pop-Location
+        $ErrorActionPreference = $savedEap
+    }
+}
+
 $transcriptStarted = $false
 if ($LogPath) { try { Start-Transcript -Path $LogPath -Append | Out-Null; $transcriptStarted = $true } catch { } }
 
@@ -254,6 +298,10 @@ try {
     if (($Only -in 'All', 'Copilot') -and (Set-CopilotOff)) {
         $changed++
         Write-Status 'GitHub Copilot in VS Code is no longer filtered; reload VS Code. Switch it back on in Settings.' -Level Detail
+    }
+    if (($Only -in 'All', 'ClaudeDesktop') -and (Set-ClaudeAiOff)) {
+        $changed++
+        Write-Status 'Claude Desktop''s chat is no longer filtered; restart Claude Desktop. Switch it back on in Settings.' -Level Detail
     }
     if ($changed -gt 0) {
         Write-Status "Routing is off ($changed file(s) changed). Sessions follow a value that changes, so they should reach the API again without restarting." -Level Done

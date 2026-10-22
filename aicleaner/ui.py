@@ -145,14 +145,19 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # The user, 2026-10-07: on needs a code made on the machine; off arrives only
                    # sealed (with it on, the tunnel takes nothing else under /api/).
                    "remote.encrypt",
-                   # A display preference (feature 92).
-                   "editor.preview_dblclick",
+                   # A display preference (feature 92), and suggestions as you pause (feature 143): neither
+                   # prompts on the machine.
+                   "editor.preview_dblclick", "editor.inline_suggest",
                    # Prompt autocorrect (feature 94): a typing aid.
                    "prompt.autocorrect", "prompt.autocorrect_skip", "prompt.autocorrect_words",
                    "prompt.autocorrect_replace",
                    # Copilot in VS Code (Brad, 2026-10-19): on or off from anywhere; only adding its
                    # certificate needs someone at the machine, so remotely it waits for that.
                    "copilot.enabled",
+                   # Claude Desktop's chat through aicleaner (route B, 2026-10-22): the Copilot rule - on and off
+                   # from anywhere; trusting its certificate waits for someone at the machine. The structure log
+                   # writes paths and kinds only.
+                   "claudeai.enabled", "claudeai.structure_log",
                    # Where this browser keeps the tunnel key (H2, Brad 2026-10-19): "more about the
                    # storage than the code itself, is protected either way".
                    "remote.key_storage",
@@ -2827,6 +2832,26 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                                   "windows": bashguard.applies(),
                                   "config_path": str(proxy.cfg.path or ""), "contact_file": contact.get().source, "clients": [c["id"] for c in mf.load_tolerant(record=False)[0].data["clients"]]})
 
+    async def editor_complete(request: web.Request) -> web.Response:
+        """Feature 143: code for the cursor, from the warm suggestion worker - '' when a newer request took its
+        place, the setting is off, or nothing fits."""
+        from pathlib import PureWindowsPath
+        from .completion import clean, prompt_for
+        if proxy is None or not proxy.cfg.editor_inline_suggest:
+            return web.json_response({"text": ""})
+        body = await request.json()
+        before, after = str(body.get("before") or ""), str(body.get("after") or "")
+        if len(before.strip()) < 3:
+            return web.json_response({"text": ""})
+        name = PureWindowsPath(str(body.get("path") or "")).name
+        answer = await proxy.completions().complete(prompt_for(name, str(body.get("language") or ""), before, after))
+        return web.json_response({"text": clean(answer, before, after)})
+
+    async def claudeai_get(request: web.Request) -> web.Response:
+        if proxy is None:
+            return web.json_response({"enabled": False})
+        return web.json_response(await asyncio.to_thread(proxy.claudeai_summary))
+
     async def copilot_get(request: web.Request) -> web.Response:
         """The Copilot card (release 6): the switch's state, the certificate, VS Code's files, traffic."""
         if proxy is None:
@@ -2922,7 +2947,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # certificate is only added from here (trust), where Windows can ask the person.
             switches = ("codetab.enabled", "codetab.port")
             remote = bool(request.get(REMOTE))
-            if any(key in changes for key in switches) or "copilot.enabled" in changes:   # remote too since L
+            if any(key in changes for key in switches + ("copilot.enabled", "claudeai.enabled")):   # remote too
                 try:
                     said = await proxy.apply_codetab(trust=not remote)
                 except Exception as exc:  # noqa: BLE001 - saved; the reason is the answer
@@ -3782,6 +3807,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/config", config_get)
     app.router.add_get("/api/codetab", codetab_get)
     app.router.add_get("/api/copilot", copilot_get)
+    app.router.add_get("/api/claudeai", claudeai_get)
+    app.router.add_post("/api/editor/complete", editor_complete)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
     app.router.add_get("/api/feedback/state", feedback_get_state)

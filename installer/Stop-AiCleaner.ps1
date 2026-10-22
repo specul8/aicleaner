@@ -103,6 +103,15 @@ function Remove-CopilotProxy {
 
 Write-ContactAttribution
 
+# A deliberate stop (route B's watchdog, Watch-AiCleaner.ps1, leaves aicleaner stopped while this is here).
+# Start-AiCleaner removes it. Claude Desktop's chat stays failing closed meanwhile: Disable is the way to send it
+# out unfiltered on purpose.
+$stoppedMarker = Join-Path $env:USERPROFILE '.aicleaner\stopped-on-purpose'
+if ($PSCmdlet.ShouldProcess($stoppedMarker, 'Mark aicleaner as stopped on purpose')) {
+    try { Set-Content -LiteralPath $stoppedMarker -Value (Get-Date -Format o) -ErrorAction Stop }
+    catch { Write-Verbose "could not mark the stop: $($_.Exception.Message)" }
+}
+
 if ($StopSessions) {
     # Only a Python started as `-m aicleaner.broker`: a looser match once stopped a shell whose
     # command line merely mentioned the name.

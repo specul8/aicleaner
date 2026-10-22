@@ -163,6 +163,9 @@ class Config:
     # Double-click in a Markdown preview (feature 92): ask the first time, jump to the source with
     # the word selected, or leave double-click to select text.
     editor_preview_dblclick: str = "ask"
+    # Feature 143: code suggested as you pause in the file editor, by a warm Claude Code worker through aicleaner.
+    editor_inline_suggest: bool = True
+    editor_inline_model: str = "haiku"
     # Autocorrect in the Session page's prompt (feature 94): off by default; code and paths are
     # always left alone, `prompt_autocorrect_skip` adds "clients", "used", "capitalised"; the user's
     # own words carry their casing (powershell -> PowerShell).
@@ -210,6 +213,12 @@ class Config:
     codetab_port: int = 8788
     # GitHub Copilot in VS Code through the same forward proxy (2026-10-18, copilot.py): off until chosen.
     copilot_enabled: bool = False
+    # Route B (spec 2026-10-21-desktop-chat-route-b.md, claudeai*.py): Claude Desktop's chat, signed in to
+    # claude.ai, through the same forward proxy by the Windows proxy setting. Off until chosen.
+    claudeai_enabled: bool = False
+    # The paths and kinds of claude.ai's protobuf messages written to the log (never their content), to grow
+    # the field map from a synthetic session. Off.
+    claudeai_structure_log: bool = False
     # EMERGENCY ONLY. When the canary finds a real name after tokenising, send the request anyway
     # (logged, and flagged in the evidence log) instead of refusing it. It exists so a false
     # positive cannot lock you out of the assistant you would use to fix it; off is the only safe
@@ -289,10 +298,13 @@ class Config:
         "update.auto": ("update_auto", bool),
         "codetab.port": ("codetab_port", int),
         "copilot.enabled": ("copilot_enabled", bool),
+        "claudeai.enabled": ("claudeai_enabled", bool),
+        "claudeai.structure_log": ("claudeai_structure_log", bool),
         "canary.fail_open": ("canary_fail_open", bool),
         "proxy.bypass": ("proxy_bypass", bool),
         "debug.timings": ("debug_timings", bool),
         "editor.preview_dblclick": ("editor_preview_dblclick", str),
+        "editor.inline_suggest": ("editor_inline_suggest", bool),
         "prompt.autocorrect": ("prompt_autocorrect", bool),
         "prompt.autocorrect_skip": ("prompt_autocorrect_skip", list),
         "prompt.autocorrect_words": ("prompt_autocorrect_words", list),
@@ -447,6 +459,8 @@ class Config:
                                               "editor.compile_powershell")
         dbl = str((data.get("editor") or {}).get("preview_dblclick", "ask"))
         cfg.editor_preview_dblclick = dbl if dbl in PREVIEW_DBLCLICK else "ask"
+        cfg.editor_inline_suggest = _flag(data.get("editor") or {}, "inline_suggest", True, "editor.inline_suggest")
+        cfg.editor_inline_model = str((data.get("editor") or {}).get("inline_model") or "haiku")
         prompt_cfg = data.get("prompt") or {}
         cfg.prompt_autocorrect = _flag(prompt_cfg, "autocorrect", False, "prompt.autocorrect")
         # Every skip on until a person changes them (the user, 2026-10-16: out of the box it was too
@@ -491,6 +505,9 @@ class Config:
         cfg.codetab_enabled = _flag(codetab, "enabled", False, "codetab.enabled")
         cfg.codetab_port = int(codetab.get("port", 8788))
         cfg.copilot_enabled = _flag(data.get("copilot") or {}, "enabled", False, "copilot.enabled")
+        claudeai = data.get("claudeai") or {}
+        cfg.claudeai_enabled = _flag(claudeai, "enabled", False, "claudeai.enabled")
+        cfg.claudeai_structure_log = _flag(claudeai, "structure_log", False, "claudeai.structure_log")
         cfg.update_auto = _flag(data.get("update") or {}, "auto", False, "update.auto")
         cfg.feedback_relay = str((data.get("feedback") or {}).get("relay") or cfg.feedback_relay).rstrip("/")
         cfg.canary_fail_open = _flag(data.get("canary") or {}, "fail_open", False, "canary.fail_open")

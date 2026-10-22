@@ -100,6 +100,7 @@ function paintCards() {
     view.config.windows ? bashGuardCard(s) : null,
     view.config.windows ? codeTabCard(s) : null,   // remotely: shown, locked by its keys (E4)
     view.config.windows ? copilotCard(s) : null,   // remotely too; its certificate waits for the machine
+    view.config.windows ? claudeaiCard(s) : null,  // route B: the Copilot rule
     toolsCard(s), routingCard(), restartCard(), updatesCard(s), feedbackCard(),
     foldersCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
@@ -657,6 +658,52 @@ function copilotCard(s) {
     () => ({ 'copilot.enabled': on.querySelector('input').checked }));
 }
 
+// Claude Desktop's chat, signed in to claude.ai, through aicleaner (route B, 2026-10-22). The Copilot rule: on
+// and off from anywhere, the certificate added only at the machine. What claude.ai keeps is said before it is on.
+function claudeaiStatus(info) {
+  if (!info.enabled) return 'Off. Claude Desktop\'s chat goes to claude.ai directly, unfiltered.';
+  const lines = [];
+  if (info.error) lines.push(info.error);
+  if (info.broken) lines.push(`Refusing the chat: ${info.broken}.`);
+  if (info.waiting) lines.push(`Waiting: ${info.waiting}.`);
+  else lines.push(info.trusted ? 'Certificate trusted.' : 'Certificate not trusted.');
+  const windows = info.windows || {};
+  lines.push(windows.pointed ? 'The Windows proxy setting points at aicleaner.' : 'The Windows proxy setting does not point at aicleaner.');
+  if (windows.had_pac) lines.push('Your earlier proxy script still decides every other site.');
+  else if (windows.had_proxy) lines.push('Your earlier proxy still carries every other site.');
+  if (info.safeguards && windows.pointed) {
+    lines.push('If aicleaner stops, the chat fails rather than going out unfiltered, and the watchdog starts aicleaner again within 5 minutes and tells you.');
+  }
+  lines.push(info.last_at ? `claude.ai traffic last seen ${timeAgo(info.last_at * 1000)}.` : 'No claude.ai traffic since aicleaner started.');
+  const refused = Object.values(info.refused || {}).reduce((a, b) => a + b, 0);
+  if (refused) lines.push(`${refused} request(s) refused (see the Log page).`);
+  return lines.join(' ');
+}
+
+function claudeaiCard(s) {
+  const wasOn = Boolean(s['claudeai.enabled']);
+  const on = checkbox('claudeai', 'Filter Claude Desktop\'s chat (signed in to claude.ai)', wasOn);
+  const understood = checkbox('claudeai_understood', 'I understand: claude.ai keeps my conversations with tokens in place of client names', false);
+  // Said before it can be turned on (spec, section 5): the switch stays greyed until this is ticked.
+  const warning = h('div', { class: 'hint claudeai-warning', hidden: wasOn },
+    'Before you turn this on: your conversations, project files, titles and memory are stored on claude.ai with tokens in place of client names. On this machine they read with the real names; in claude.ai in another browser, on your phone or on another computer they show the tokens, and claude.ai\'s own search works on the tokens.',
+    h('div', { class: 'form-row' }, understood));
+  const box = on.querySelector('input');
+  const agreed = understood.querySelector('input');
+  box.disabled = !wasOn;
+  agreed.addEventListener('change', () => {
+    box.disabled = !agreed.checked;
+    if (!agreed.checked) box.checked = false;
+  });
+  const status = h('div', { class: 'hint claudeai-status' }, 'Checking...');
+  getJSON('/api/claudeai').then((info) => { status.textContent = claudeaiStatus(info); })
+    .catch(() => { status.textContent = ''; });
+  return card('claudeai', 'Claude Desktop\'s chat',
+    'With this on, the Windows proxy setting sends claude.ai - and only claude.ai - to aicleaner: what you type, project instructions and knowledge, and the files you attach (read on this machine and sent as filtered text) go out with client names replaced, and replies come back with them restored. claude.ai in Edge on this machine is filtered too. Every other site goes where it went before, through your own proxy if you have one. aicleaner\'s claude.ai certificate, which can only vouch for claude.ai, is added to your Windows certificates the first time this is turned on here, and Windows asks you to confirm; after that it can be turned on or off from anywhere. While aicleaner\'s forward proxy is down, Claude Desktop\'s chat fails rather than going out unfiltered. Restart Claude Desktop after changing it. No API key or credit is needed: it is your own claude.ai sign-in.',
+    [h('div', { class: 'form-row' }, on), warning, status],
+    () => ({ 'claudeai.enabled': box.checked }));
+}
+
 // Reading text out of images and scanned PDFs (J2, Brad 2026-10-20: these had no card). Remote or local.
 function ocrCard(s) {
   const on = checkbox('ocr', 'Read the text in images and scanned PDFs (so it is filtered as text)', s['attachments.ocr']);
@@ -684,11 +731,17 @@ function editorCard(s) {
   ];
   const pick = h('select', { name: 'preview_dblclick', 'aria-label': 'Double-click in a Markdown preview' },
     ...choices.map(([value, label]) => h('option', { value, selected: s['editor.preview_dblclick'] === value ? true : null }, label)));
+  // Feature 143: Claude Haiku suggests code when you pause typing in a file tab.
+  const inline = checkbox('inline_suggest', 'Suggest code as you pause (Claude Haiku, through aicleaner)',
+    s['editor.inline_suggest'] !== false);
   return card('editor', 'File editor',
     'Double-clicking a word in a Markdown preview can take you to the same word in the source, selected '
-    + 'and ready to edit - handy for reading in the preview and then changing what you read.',
-    [h('label', { class: 'field' }, 'Double-click in a Markdown preview', pick)],
-    () => ({ 'editor.preview_dblclick': pick.value }),
+    + 'and ready to edit - handy for reading in the preview and then changing what you read. With suggestions '
+    + 'on, a pause in typing in a file tab asks Claude Haiku for the code that comes next: it appears in grey '
+    + 'a second or two later, Tab takes it and typing on leaves it. Each answered pause is one small Haiku '
+    + 'turn on your Claude plan, filtered like everything else; Alt+\\ still asks the session\'s AI on purpose.',
+    [h('label', { class: 'field' }, 'Double-click in a Markdown preview', pick), h('div', { class: 'form-row' }, inline)],
+    () => ({ 'editor.preview_dblclick': pick.value, 'editor.inline_suggest': inline.querySelector('input').checked }),
     () => forgetPreviewChoice());
 }
 
