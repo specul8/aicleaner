@@ -157,6 +157,19 @@ try {
     $venvPython = $sharedPython
     if (-not (Test-Path -LiteralPath $venvPython)) { $venvPython = Join-Path $root '.venv\Scripts\python.exe' }
 
+    # Feature 107: run as SYSTEM from start-up, its launcher starts it (again 5 seconds after a stop): wait for that
+    # rather than starting a second copy as you.
+    $serviceTask = Get-ScheduledTask -TaskName 'aicleaner-service' -ErrorAction SilentlyContinue
+    if ($serviceTask -and $serviceTask.State -ne 'Disabled') {
+        $until = (Get-Date).AddSeconds(30)
+        while (-not (Test-Proxy -ProxyPort $Port) -and (Get-Date) -lt $until) { Start-Sleep -Seconds 2 }
+        if (Test-Proxy -ProxyPort $Port) {
+            Write-Status "aicleaner is running as a service (SYSTEM) on port $Port" -Level Done
+            exit 0
+        }
+        Write-Status 'aicleaner runs as a service but is not answering; its launcher restarts it within a minute (Task Scheduler: aicleaner-service)' -Level Warn
+        exit 1
+    }
     $health = Test-Proxy -ProxyPort $Port
     if ($health) {
         Write-Status "aicleaner already running on port $Port (clients=$($health.clients -join ','))" -Level Done

@@ -147,7 +147,8 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "remote.encrypt",
                    # A display preference (feature 92), and suggestions as you pause (feature 143): neither
                    # prompts on the machine.
-                   "editor.preview_dblclick", "editor.inline_suggest",
+                   "editor.preview_dblclick", "editor.inline_suggest", "editor.minimap",
+                   "editor.inline_service",
                    # Prompt autocorrect (feature 94): a typing aid.
                    "prompt.autocorrect", "prompt.autocorrect_skip", "prompt.autocorrect_words",
                    "prompt.autocorrect_replace",
@@ -157,7 +158,7 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # Claude Desktop's chat through aicleaner (route B, 2026-10-22): the Copilot rule - on and off
                    # from anywhere; trusting its certificate waits for someone at the machine. The structure log
                    # writes paths and kinds only.
-                   "claudeai.enabled", "claudeai.structure_log",
+                   "claudeai.enabled", "claudeai.structure_log", "claudeai.mark_role",
                    # Where this browser keeps the tunnel key (H2, Brad 2026-10-19): "more about the
                    # storage than the code itself, is protected either way".
                    "remote.key_storage",
@@ -2459,8 +2460,21 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         body = await request.json()
         try:
             cid, real = str(body["client"]), str(body["real"])
-            tok = mf.add_form(cid, real, body.get("token"), source=SOURCE_MANUAL)
+            # The type chosen on the add row (2026-10-23); none or "auto" leaves it to the guess.
+            kind = str(body.get("kind") or "").strip() or None
+            tok = mf.add_form(cid, real, body.get("token"), source=SOURCE_MANUAL, kind=None if kind == "auto" else kind)
             _record_provenance(mf, cid, real, SOURCE_MANUAL, note="typed in on the Clients page")
+            return web.json_response({"ok": True, "token": tok})
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+
+    async def preview_form_token(request: web.Request) -> web.Response:
+        """The token a name would get if added now, with the type chosen on the add row - nothing is written."""
+        body = await request.json()
+        try:
+            kind = str(body.get("kind") or "").strip()
+            tok = await asyncio.to_thread(mf.preview_token, str(body["client"]), str(body["real"]),
+                                          None if kind in ("", "auto") else kind)
             return web.json_response({"ok": True, "token": tok})
         except (MappingError, KeyError, ValueError) as exc:
             return err(exc)
@@ -2844,8 +2858,21 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if len(before.strip()) < 3:
             return web.json_response({"text": ""})
         name = PureWindowsPath(str(body.get("path") or "")).name
-        answer = await proxy.completions().complete(prompt_for(name, str(body.get("language") or ""), before, after))
+        worker = await proxy.completions()
+        if worker is None:
+            return web.json_response({"text": ""})
+        answer = await worker.complete(prompt_for(name, str(body.get("language") or ""), before, after))
         return web.json_response({"text": clean(answer, before, after)})
+
+    async def editor_services(request: web.Request) -> web.Response:
+        """The File editor card's list: each service, whether it can answer here, and which one answers now."""
+        if proxy is None:
+            return web.json_response({"choice": "off", "active": "", "services": {}})
+        services = await asyncio.to_thread(proxy.editor_services)
+        worker = proxy._completions
+        return web.json_response({"choice": proxy.cfg.editor_inline_service, "services": services,
+                                  "active": proxy.editor_service(services),
+                                  "worker": worker.summary() if worker is not None else None})
 
     async def claudeai_get(request: web.Request) -> web.Response:
         if proxy is None:
@@ -2961,6 +2988,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     async def restart_proxy(request: web.Request) -> web.Response:
         if proxy is None or proxy.cfg.path is None:
             return err(ValueError("this proxy was not started from an installed config; restart it by hand"))
+        if getattr(proxy, "service", "") == "system":
+            # Feature 107: run as SYSTEM by its launcher, which starts it again 5 seconds after it stops - so a restart
+            # (and an update's) is this process ending. Nothing running as you could stop a SYSTEM process.
+            asyncio.get_running_loop().call_later(0.5, lambda: os._exit(0))
+            return web.json_response({"ok": True, "log": "", "service": True})
         try:
             log_path = restart(proxy.cfg.path.parent, proxy.cfg.port, Path(proxy.cfg.log_dir))
         except RestartError as exc:
@@ -3792,6 +3824,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/wiki/{page}", wiki_page)
     app.router.add_post("/api/additions", answer_addition)
     app.router.add_post("/api/mapping/form", add_form)
+    app.router.add_post("/api/mapping/form/preview", preview_form_token)
     app.router.add_post("/api/mapping/form/delete", delete_form)
     app.router.add_post("/api/mapping/forms/delete", delete_forms)
     app.router.add_post("/api/mapping/forms/restore", restore_forms)
@@ -3809,6 +3842,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/copilot", copilot_get)
     app.router.add_get("/api/claudeai", claudeai_get)
     app.router.add_post("/api/editor/complete", editor_complete)
+    app.router.add_get("/api/editor/services", editor_services)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
     app.router.add_get("/api/feedback/state", feedback_get_state)

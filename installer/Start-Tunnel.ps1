@@ -22,7 +22,11 @@
 #>
 [CmdletBinding()]
 param(
-    [AllowEmptyString()][string]$LogPath = ''
+    [AllowEmptyString()][string]$LogPath = '',
+    # Feature 107: run as SYSTEM by the service task - the token is the machine-scoped copy Set-AiCleanerService.ps1
+    # made (readable by SYSTEM and administrators only), not the one encrypted to the user's account.
+    [string]$TokenPath = '',
+    [ValidateSet('CurrentUser', 'LocalMachine')][string]$TokenScope = 'CurrentUser'
 )
 
 Set-StrictMode -Version Latest
@@ -35,9 +39,9 @@ if (-not $LogPath) { $LogPath = Join-Path $script:AppFolder 'logs\cloudflared.lo
 function Read-TunnelToken {
     <# The run token Enable-RemoteControl.ps1 stored, as plain text for the child's environment only. #>
     [OutputType([string])]
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [string]$Scope = 'CurrentUser')
     Add-Type -AssemblyName System.Security
-    $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($Path), $null, 'CurrentUser')
+    $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($Path), $null, $Scope)
     try { return [Text.Encoding]::UTF8.GetString($bytes) }
     finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 }
@@ -57,7 +61,7 @@ function Find-Cloudflared {
     return ''
 }
 
-$tokenPath = Join-Path $env:USERPROFILE '.aicleaner\cloudflare-tunnel.dpapi'
+$tokenPath = if ($TokenPath) { $TokenPath } else { Join-Path $env:USERPROFILE '.aicleaner\cloudflare-tunnel.dpapi' }
 if (-not (Test-Path -LiteralPath $tokenPath)) {
     Write-Error "No tunnel token at ${tokenPath}: run Enable-RemoteControl.ps1 to set remote access up."
     exit 1
@@ -70,7 +74,7 @@ if (-not $exe) {
 $folder = Split-Path -Parent $LogPath
 if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
 
-$env:TUNNEL_TOKEN = Read-TunnelToken -Path $tokenPath
+$env:TUNNEL_TOKEN = Read-TunnelToken -Path $tokenPath -Scope $TokenScope
 try {
     # cloudflared reads TUNNEL_TOKEN for `tunnel run`; the token never appears in the process list.
     & $exe tunnel --no-autoupdate --logfile $LogPath run

@@ -193,6 +193,12 @@ def structure(body: bytes, field_map: dict[str, str] | None = None, prefix: str 
     out = []
     for number, wire, _start, value_at, end in _fields(body):
         path = f"{prefix}.{number}" if prefix else str(number)
+        if wire == VARINT:
+            # Small numbers are kinds and roles, never what was said: shown, so the field map can name them (a
+            # reply's sender, 2026-10-23). Large ones - times, sizes, ids - stay a bare type.
+            value = read_varint(body, value_at)[0]
+            out.append(f"{path}:varint={value}" if value < 1000 else f"{path}:varint")
+            continue
         if wire != LEN:
             out.append(f"{path}:{('varint', 'i64', '', '', '', 'i32')[wire]}")
             continue
@@ -201,6 +207,22 @@ def structure(body: bytes, field_map: dict[str, str] | None = None, prefix: str 
         out.append(f"{path}:{kind}({len(value)})")
         if kind == "message":
             out += structure(value, field_map, path, depth + 1)
+    return out
+
+
+def varints(body: bytes, path: str, prefix: str = "", depth: int = 0) -> list[int]:
+    """The values of the varint fields at `path` (field numbers joined by dots), in order - a sibling of a text field
+    says what the text is (who wrote it). Messages along the way are followed whatever the guess; ProtoError when
+    `body` is not a message."""
+    if depth > MAX_DEPTH:
+        return []
+    out: list[int] = []
+    for number, wire, _start, value_at, end in _fields(body):
+        here = f"{prefix}.{number}" if prefix else str(number)
+        if here == path and wire == VARINT:
+            out.append(read_varint(body, value_at)[0])
+        elif wire == LEN and path.startswith(here + ".") and is_message(body[value_at:end]):
+            out += varints(body[value_at:end], path, here, depth + 1)
     return out
 
 

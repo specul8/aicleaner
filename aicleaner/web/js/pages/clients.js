@@ -522,10 +522,31 @@ function entryRow(cid, form, reason, readOnly) {
 // The add half of the box at the top of the entries (the user, 2026-10-15): `real` is the filter.
 // Add is offered only for something not already an entry, so a name found is never added twice.
 function addEntryForm(cid, real, table) {
+  // The type chosen as it is added (Brad, 2026-10-23: "add CT, select name as the format type, and have it prepopulate
+  // the token field"): Auto guesses from the text, as before; the token box shows what it will be.
+  const kind = h('select', { name: 'kind', class: 'add-kind', 'aria-label': 'Type' },
+    h('option', { value: 'auto' }, 'Auto'),
+    ...TOKEN_SHAPES.map((k) => h('option', { value: k }, kindLabel(k))));
   const token = h('input', { type: 'text', name: 'token', class: 'add-token', placeholder: 'token (blank = automatic)', 'aria-label': 'Token' });
   const submit = h('button', { type: 'submit', class: 'primary' }, icon('plus'), 'Add');
   const message = h('span', { class: 'error-text' });
-  const form = h('form', { class: 'add-entry form-row' }, real, token, submit, message);
+  const form = h('form', { class: 'add-entry form-row' }, real, kind, token, submit, message);
+  let asked = 0;
+  const preview = async () => {
+    const typed = real.value.trim();
+    const mine = ++asked;
+    if (!typed) { token.placeholder = 'token (blank = automatic)'; return; }
+    try {
+      const answer = await postJSON('/api/mapping/form/preview', { client: cid, real: typed, kind: kind.value });
+      if (mine === asked) token.placeholder = `${answer.token} (automatic - or type your own)`;
+    } catch (error) {
+      if (mine === asked) token.placeholder = 'token (blank = automatic)';
+    }
+  };
+  let timer = null;
+  const soon = () => { clearTimeout(timer); timer = setTimeout(preview, 300); };
+  real.addEventListener('input', soon);
+  kind.addEventListener('change', preview);
   const check = () => {
     if (!validity([real, token], message, submit)) return false;
     const typed = real.value.trim().toLowerCase();
@@ -544,7 +565,8 @@ function addEntryForm(cid, real, table) {
     event.preventDefault();
     if (!check()) return;
     try {
-      await postJSON('/api/mapping/form', { client: cid, real: real.value.trim(), token: token.value.trim() || null });
+      await postJSON('/api/mapping/form', { client: cid, real: real.value.trim(), token: token.value.trim() || null,
+        kind: kind.value });
       const added = real.value.trim();
       await reloadClient(cid, { saved: added });
       // Back to the box, ready for the next one: entering a list of identifiers should feel like

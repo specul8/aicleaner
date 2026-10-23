@@ -145,8 +145,11 @@ class CodeTab:
         try:
             self._server = await asyncio.start_server(self._client, "127.0.0.1", self.port, limit=HEAD_LIMIT)
         except OSError:
-            await self._runner.cleanup()
-            self._runner = None
+            # The reader exists only with the Code tab on; with only Copilot's or claude.ai's reader wanted there is
+            # none to clean up (2026-10-23: a port still held by the stopping proxy crashed the start here).
+            if self._runner is not None:
+                await self._runner.cleanup()
+                self._runner = None
             raise
         self._renewer = asyncio.create_task(self._renew())
         self.started_at = time.time()

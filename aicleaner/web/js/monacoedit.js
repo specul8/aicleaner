@@ -23,8 +23,19 @@ const boxes = new Map();           // model uri -> the MonacoBox showing it (its
 
 export function setAutoSuggest(on) { autoSuggest = Boolean(on); }
 
+// The minimap (Brad, 2026-10-23): off unless Settings > File editor turns it on; every open editor follows.
+let minimap = false;
+
+export function setMinimap(on) {
+  minimap = Boolean(on);
+  for (const box of boxes.values()) if (box.alive && !box.compact) box.editor.updateOptions({ minimap: { enabled: minimap } });
+}
+
 function followSetting() {
-  const apply = (s) => { if ('editor.inline_suggest' in s) setAutoSuggest(s['editor.inline_suggest']); };
+  const apply = (s) => {
+    if ('editor.inline_suggest' in s) setAutoSuggest(s['editor.inline_suggest']);
+    if ('editor.minimap' in s) setMinimap(s['editor.minimap']);
+  };
   getJSON('/api/config').then((config) => apply(config.settings || {})).catch(() => {});
   window.addEventListener('aicleaner:settings', (event) => apply(event.detail || {}));
 }
@@ -142,19 +153,23 @@ const theme = () => (document.documentElement.dataset.theme === 'light' ? 'vs' :
 
 // A textarea's surface over a Monaco editor.
 export class MonacoBox {
-  constructor(host, text, name, { compact = false } = {}) {
+  constructor(host, text, name, { compact = false, language = '', firstLine = 1 } = {}) {
     this.host = host;
     this.dataset = host.dataset;
+    const first = Number(firstLine) > 1 ? Number(firstLine) : 1;
     // Newlines only, as the textarea had them: offsets count one character per line end, and the server puts the
     // file's own line endings (CRLF or LF) back on save, as it always has.
     this.editor = monaco.editor.create(host, {
-      value: String(text || '').replace(/\r\n?/g, '\n'), language: monacoLanguage(name), theme: theme(), automaticLayout: true,
-      minimap: { enabled: !compact }, scrollBeyondLastLine: false, fontSize: 13, tabSize: 4,
+      value: String(text || '').replace(/\r\n?/g, '\n'), language: language || monacoLanguage(name), theme: theme(), automaticLayout: true,
+      // A snippet from line 40 of a file numbers from 40 (feature 116's gutter did).
+      lineNumbers: first > 1 ? (n) => String(n + first - 1) : 'on',
+      minimap: { enabled: minimap && !compact }, scrollBeyondLastLine: false, fontSize: 13, tabSize: 4,
       renderWhitespace: 'selection', wordWrap: 'off', 'semanticHighlighting.enabled': false,
       ariaLabel: `Edit ${name}`, fixedOverflowWidgets: true,
     });
     this.model = this.editor.getModel();
     this.name = name;
+    this.compact = compact;
     boxes.set(this.model.uri.toString(), this);
     const self = this;
     // What older code and the tests use on the element: a textarea's value, selection and focus.
@@ -241,6 +256,15 @@ export class MonacoBox {
     this.editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, run);
   }
 
+  // Any key chord bound to a command, as Monaco binds keys: `chord(KeyMod, KeyCode)` gives the number.
+  bindKey(chord, run) {
+    this.editor.addCommand(chord(monaco.KeyMod, monaco.KeyCode), run);
+  }
+
+  setLanguage(language) {
+    if (this.alive) monaco.editor.setModelLanguage(this.model, language || 'plaintext');
+  }
+
   // Alt+\ asks for a suggestion, as VS Code's "trigger inline suggestion" does.
   bindSuggest(run) {
     this.editor.addCommand(monaco.KeyMod.Alt | monaco.KeyCode.Backslash, run);
@@ -277,6 +301,18 @@ export class MonacoBox {
     this.model.dispose();
     // The element stays until the pane is drawn again, as the textarea did: its value reads empty meanwhile.
   }
+}
+
+// 139 part 3: the file on disk beside yours, VS Code's diff view (read-only), shown before Overwrite or Reload.
+// Returns a dispose function.
+export function showDiff(host, onDisk, mine, name) {
+  const language = monacoLanguage(name);
+  const original = monaco.editor.createModel(String(onDisk || '').replace(/\r\n?/g, '\n'), language);
+  const modified = monaco.editor.createModel(String(mine || '').replace(/\r\n?/g, '\n'), language);
+  const diff = monaco.editor.createDiffEditor(host, { readOnly: true, originalEditable: false, automaticLayout: true,
+    renderSideBySide: true, theme: theme(), minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13 });
+  diff.setModel({ original, modified });
+  return () => { diff.dispose(); original.dispose(); modified.dispose(); };
 }
 
 // The light/dark switch (app.js sets data-theme on the page) reaches every open editor.

@@ -1341,6 +1341,9 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
 .editor-suggest { font-size: 12px; padding: .15rem .6rem; }
 .file-conflict { margin-bottom: .4rem; }
 .file-conflict button { margin: .2rem .2rem 0 0; }
+/* 139 part 3: the file on disk beside yours, before Overwrite or Reload. */
+.file-conflict-diff { height: 22rem; margin-top: .5rem; border: 1px solid var(--line, #444); }
+.file-conflict-diff[hidden] { display: none; }
 .file-media { flex: 1 1 auto; min-height: 0; overflow: auto; padding: .5rem; display: flex; flex-direction: column; }
 .file-media img { max-width: 100%; height: auto; align-self: flex-start; }
 .file-media.pdf .file-pdf { flex: 1 1 auto; min-height: 300px; width: 100%; border: 0; background: #fff; }

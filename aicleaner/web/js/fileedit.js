@@ -14,7 +14,7 @@ import { attachCompletion } from './editor/complete.js';
 import { layerFor } from './editor/highlight.js';
 import { attachKeys } from './editor/keys.js';
 import { languageOf } from './editor/languages.js';
-import { loadMonaco, monacoLanguage, monacoReady, MonacoBox } from './monacoedit.js';
+import { loadMonaco, monacoLanguage, monacoReady, MonacoBox, showDiff } from './monacoedit.js';
 
 const AUTOSAVE_MS = 1500;
 const STATE_TEXT = { saved: 'Saved', saving: 'Saving...', unsaved: 'Unsaved changes', conflict: 'Not saved: changed on disk' };
@@ -51,6 +51,9 @@ export function focusedEditor(editor) {
 export function dropEditor(tab) {
   if (tab.editor && tab.editor.dispose) tab.editor.dispose();
   tab.editor = null;
+  if (tab.diffDispose) tab.diffDispose();          // the conflict's comparison (139 part 3) goes with it
+  tab.diffDispose = null;
+  tab.diffHost = null;
 }
 
 // What both editors do on a change, a blur and Ctrl+S.
@@ -205,6 +208,27 @@ export function conflictBar(tab, hooks) {
   const copy = h('button', { type: 'button', class: 'conflict-copy' }, 'Copy mine, then reload');
   reload.addEventListener('click', drop);
   overwrite.addEventListener('click', () => saveNow(tab, hooks, true));
+  // 139 part 3: see what changed on disk before choosing - VS Code's diff, on disk on the left and yours on the right.
+  // The comparison's box is kept on the tab: the bar is rebuilt at every repaint, the diff must survive it.
+  const diffHost = tab.diffHost || (tab.diffHost = h('div', { class: 'file-conflict-diff', hidden: true }));
+  const compare = h('button', { type: 'button', class: 'conflict-compare' },
+    diffHost.hidden ? 'Compare with the file on disk' : 'Hide the comparison');
+  compare.addEventListener('click', async () => {
+    if (!diffHost.hidden) {
+      if (tab.diffDispose) tab.diffDispose();
+      tab.diffDispose = null;
+      diffHost.hidden = true;
+      compare.textContent = 'Compare with the file on disk';
+      return;
+    }
+    try {
+      const onDisk = await hooks.diskText(tab);
+      diffHost.hidden = false;
+      tab.diffDispose = showDiff(diffHost, onDisk, tab.editor.value, tab.name);
+      compare.textContent = 'Hide the comparison';
+    } catch (error) { sayError(error); }
+  });
+  if (!monacoReady()) compare.hidden = true;
   copy.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(tab.editor.value);
@@ -214,7 +238,7 @@ export function conflictBar(tab, hooks) {
   });
   return h('div', { class: 'callout bad file-conflict' },
     h('b', {}, `${tab.name} changed on disk since you opened it - Claude may have edited it. `),
-    'Your edits are not saved. ', reload, ' ', overwrite, ' ', copy);
+    'Your edits are not saved. ', compare, ' ', reload, ' ', overwrite, ' ', copy, diffHost);
 }
 
 export function unsaved(tabs) {

@@ -16,6 +16,7 @@ log = logging.getLogger("aicleaner")
 
 
 # Double-click in a Markdown preview (feature 92).
+INLINE_SERVICES = ("auto", "off", "claude", "copilot", "copilot_filtered", "codex")   # completion.SERVICES
 PREVIEW_DBLCLICK = ("ask", "source", "off")
 # What prompt autocorrect may also leave alone (feature 94); code and paths always are.
 AUTOCORRECT_SKIPS = ("clients", "used", "capitalised")
@@ -166,6 +167,10 @@ class Config:
     # Feature 143: code suggested as you pause in the file editor, by a warm Claude Code worker through aicleaner.
     editor_inline_suggest: bool = True
     editor_inline_model: str = "haiku"
+    editor_minimap: bool = False
+    # Which service suggests code as you pause (spec 2026-10-23-editor-suggestion-services.md): auto, off, claude,
+    # copilot (unfiltered), copilot_filtered (unsupported), codex.
+    editor_inline_service: str = "auto"         # the file editor's minimap (Brad, 2026-10-23: off by default)
     # Autocorrect in the Session page's prompt (feature 94): off by default; code and paths are
     # always left alone, `prompt_autocorrect_skip` adds "clients", "used", "capitalised"; the user's
     # own words carry their casing (powershell -> PowerShell).
@@ -219,6 +224,9 @@ class Config:
     # The paths and kinds of claude.ai's protobuf messages written to the log (never their content), to grow
     # the field map from a synthetic session. Off.
     claudeai_structure_log: bool = False
+    # The value of a reply's sender field that means Claude wrote it (claudeai.py REPLY_SENDER): the filtered mark is
+    # added to those replies only. 1, read from a synthetic chat 2026-10-23 (every finished reply carried it); 0 = no mark.
+    claudeai_mark_role: int = 1
     # EMERGENCY ONLY. When the canary finds a real name after tokenising, send the request anyway
     # (logged, and flagged in the evidence log) instead of refusing it. It exists so a false
     # positive cannot lock you out of the assistant you would use to fix it; off is the only safe
@@ -243,6 +251,9 @@ class Config:
     remote_key_storage: str = "tab"
     placeholder_kinds: list[str] = field(default_factory=lambda: list(DEFAULT_PLACEHOLDER_KINDS))
     allow_images: bool = False  # images are withheld unless this is on (then sent unfiltered)
+    # Feature 114: pictures sent with client names blacked out (and their text), instead of text only. Local only: it
+    # lets pictures leave the machine. allow_images (as is) wins when both are on.
+    redact_images: bool = False
     pdftotext: str = ""         # path to Poppler's pdftotext; default: found on PATH
     # Reading an image is a different question from sending one: OCR decides whether its text can
     # be filtered, allow_images decides whether the picture itself goes. OCR runs in the request
@@ -281,6 +292,7 @@ class Config:
         "session.auto_titles": ("session_auto_titles", bool),
         "detect.placeholder_kinds": ("placeholder_kinds", list),
         "attachments.allow_images": ("allow_images", bool),
+        "attachments.redact_images": ("redact_images", bool),
         "attachments.ocr": ("ocr", bool),
         "attachments.ocr_max_pages": ("ocr_max_pages", int),
         "attachments.ocr_timeout_s": ("ocr_timeout_s", int),
@@ -300,11 +312,14 @@ class Config:
         "copilot.enabled": ("copilot_enabled", bool),
         "claudeai.enabled": ("claudeai_enabled", bool),
         "claudeai.structure_log": ("claudeai_structure_log", bool),
+        "claudeai.mark_role": ("claudeai_mark_role", int),
         "canary.fail_open": ("canary_fail_open", bool),
         "proxy.bypass": ("proxy_bypass", bool),
         "debug.timings": ("debug_timings", bool),
         "editor.preview_dblclick": ("editor_preview_dblclick", str),
         "editor.inline_suggest": ("editor_inline_suggest", bool),
+        "editor.minimap": ("editor_minimap", bool),
+        "editor.inline_service": ("editor_inline_service", str),
         "prompt.autocorrect": ("prompt_autocorrect", bool),
         "prompt.autocorrect_skip": ("prompt_autocorrect_skip", list),
         "prompt.autocorrect_words": ("prompt_autocorrect_words", list),
@@ -352,6 +367,8 @@ class Config:
                 if odd:
                     raise ValueError("a replacement is 'typed = replacement': one word typed, then up to 60 "
                                      f"characters on one line: {', '.join(odd[:3])}")
+            if key == "editor.inline_service" and value not in INLINE_SERVICES:
+                raise ValueError(f"editor.inline_service must be one of: {', '.join(INLINE_SERVICES)}")
             if key == "editor.preview_dblclick" and value not in PREVIEW_DBLCLICK:
                 raise ValueError(f"editor.preview_dblclick must be one of: {', '.join(PREVIEW_DBLCLICK)}")
             if key == "session.permission_mode":
@@ -461,6 +478,9 @@ class Config:
         cfg.editor_preview_dblclick = dbl if dbl in PREVIEW_DBLCLICK else "ask"
         cfg.editor_inline_suggest = _flag(data.get("editor") or {}, "inline_suggest", True, "editor.inline_suggest")
         cfg.editor_inline_model = str((data.get("editor") or {}).get("inline_model") or "haiku")
+        cfg.editor_minimap = _flag(data.get("editor") or {}, "minimap", False, "editor.minimap")
+        service = str((data.get("editor") or {}).get("inline_service") or "auto")
+        cfg.editor_inline_service = service if service in INLINE_SERVICES else "auto"
         prompt_cfg = data.get("prompt") or {}
         cfg.prompt_autocorrect = _flag(prompt_cfg, "autocorrect", False, "prompt.autocorrect")
         # Every skip on until a person changes them (the user, 2026-10-16: out of the box it was too
@@ -508,6 +528,7 @@ class Config:
         claudeai = data.get("claudeai") or {}
         cfg.claudeai_enabled = _flag(claudeai, "enabled", False, "claudeai.enabled")
         cfg.claudeai_structure_log = _flag(claudeai, "structure_log", False, "claudeai.structure_log")
+        cfg.claudeai_mark_role = int(claudeai.get("mark_role", 1) or 0)
         cfg.update_auto = _flag(data.get("update") or {}, "auto", False, "update.auto")
         cfg.feedback_relay = str((data.get("feedback") or {}).get("relay") or cfg.feedback_relay).rstrip("/")
         cfg.canary_fail_open = _flag(data.get("canary") or {}, "fail_open", False, "canary.fail_open")
@@ -523,6 +544,7 @@ class Config:
         cfg.remote_key_storage = storage if storage in ("tab", "device") else "tab"
         att = data.get("attachments") or {}
         cfg.allow_images = _flag(att, "allow_images", False, "attachments.allow_images")
+        cfg.redact_images = _flag(att, "redact_images", False, "attachments.redact_images")
         cfg.pdftotext = os.path.expandvars(str(att.get("pdftotext", "")))
         cfg.ocr = _flag(att, "ocr", True, "attachments.ocr")
         cfg.ocr_max_pages = int(att.get("ocr_max_pages", 10))

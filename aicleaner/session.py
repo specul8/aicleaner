@@ -626,10 +626,40 @@ def resolve_cli(name: str) -> str:
     found = shutil.which(name)
     if found:
         return found
+    if name == "claude":
+        # Claude Code's native installer puts it here (D204): found even when this process's PATH, read when it
+        # started, does not yet name the folder.
+        native = Path.home() / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude")
+        if native.exists():
+            return str(native)
     return name          # an explicit path that which cannot see: let the launch report it
 
 
-class Session:
+class _FindsClaude:
+    """The Claude Code CLI's path, looked up again when the one found earlier has gone (D204, 2026-10-23): moving
+    Claude Code to its native installer removed the npm copy aicleaner had found at its start, and every new
+    session said "The Claude Code CLI was not found" until aicleaner was restarted."""
+
+    _claude = "claude"
+    _claude_asked = "claude"
+
+    @property
+    def claude(self) -> str:
+        found = self._claude
+        if not Path(found).exists() and not shutil.which(found):
+            again = resolve_cli(self._claude_asked)
+            if again != found:
+                log.info("the Claude Code CLI moved: %s -> %s", found, again)
+                self._claude = again
+        return self._claude
+
+    @claude.setter
+    def claude(self, value: str) -> None:
+        self._claude_asked = value or "claude"
+        self._claude = resolve_cli(self._claude_asked)
+
+
+class Session(_FindsClaude):
     """Runs one Claude Code session and fans its events out to whoever is watching.
 
     One of these per profile. What used to be global to the proxy - the process, the transcript,
@@ -651,7 +681,7 @@ class Session:
         # this process as it always was - which a proxy restart orphans.
         self.sessions_dir = Path(sessions_dir) if sessions_dir else None
         self.folder: Path | None = None
-        self.claude = resolve_cli(claude or "claude")
+        self.claude = claude or "claude"
         self.base_url = base_url
         # Where the approval host sends its questions, and the secret it must present. The token is
         # new for every session, so a stale process cannot answer for the current one.
@@ -807,6 +837,8 @@ class Session:
             "pending": [{"id": p.id, "tool": p.tool, "detail": p.detail, "asked_at": p.asked_at}
                         for p in self.pending.values()],
             "busy": self.busy,
+            # Background tasks still running (D202); stopping the turn would stop them too (D205).
+            "background": self.background if self.running else 0,
             # Why the conversation cannot be switched now (item J); "" when it can, or not running.
             "switch_blocked": work_in_progress(self) if self.running else "",
             "doing": self.doing,
@@ -1344,6 +1376,13 @@ class Session:
             await self._send(item["text"])
             return "sent"
         self._queue_changed()
+        if self.background:
+            # D205 (Brad, 2026-10-23): the CLI's interrupt ends the whole turn, background agents with it - a
+            # force-push cancelled a client's long-running subagents. With background work running, the prompt goes
+            # first in line and reaches Claude at its next tool call (feature 119's between-tools delivery, or the
+            # turn's end); nothing is interrupted.
+            self._emit({"type": "send_now_waits", "background": self.background})
+            return "next_tool_call"
         await self.interrupt(cancel_queued=True)
         return "interrupting"
 
@@ -1776,7 +1815,7 @@ def _agent_history(method: Callable) -> Callable:
     return wrapper
 
 
-class SessionHost:
+class SessionHost(_FindsClaude):
     """Every profile, and the sessions running for them.
 
     Work is organised by engagement, so the sessions are too: one per profile, several at once,
@@ -1790,7 +1829,7 @@ class SessionHost:
                  thinking_display: str = "summarized") -> None:
         self.sessions_dir = Path(sessions_dir) if sessions_dir else None
         self.thinking_display = thinking_display
-        self.claude = resolve_cli(claude or "claude")
+        self.claude = claude or "claude"
         self.base_url = base_url
         self.permission_mode = permission_mode
         self.approve_timeout_s = approve_timeout_s
@@ -1800,6 +1839,9 @@ class SessionHost:
         # Another AI service's filtering, made ready by the proxy before such a session starts (item K):
         # async (agent) -> the environment its process needs - the forward proxy, its certificate.
         self.prepare_agent: Any = None
+        # D197: how many names a client holds to filter (set by the proxy from its mapping); a session whose client
+        # has none is saved but not started. None: not known here (tests, no mapping) - nothing is held back.
+        self.client_names: Any = None
         # Where agents other than Claude Code file their conversations: under the proxy's state folder.
         self.agents_dir: Path | None = None
         self.profiles: list[Profile] = list(profiles or [])
@@ -1959,6 +2001,8 @@ class SessionHost:
             "running": running,
             "max_running": self.max_running,
             "available": self.available(),
+            # D197: why the selected profile cannot start yet ("" when it can) - its client has no names to filter.
+            "start_blocked": self._start_blocked_of(selected),
             "approvals": bool(self.approve_url),
             "permission_mode": self.permission_mode,
             **{k: v for k, v in current.items() if k not in host_owned},
@@ -2058,6 +2102,28 @@ class SessionHost:
         except SessionError:
             return []
 
+    def _start_blocked_of(self, name: str) -> str:
+        if not name or name in [n for n, x in self.sessions.items() if x.running]:
+            return ""
+        try:
+            return self.start_blocked(self.profile(name))
+        except SessionError:
+            return ""
+
+    def start_blocked(self, profile: Profile) -> str:
+        """Why this profile's session cannot start yet, or '' (D197): its client exists only as a placeholder, with no
+        names to filter - started now, the session would send that client's work out unfiltered."""
+        if not profile.client or self.client_names is None:
+            return ""
+        try:
+            count = self.client_names(profile.client)
+        except Exception:  # noqa: BLE001 - unknown is never a reason to refuse
+            return ""
+        if count is None or count > 0:
+            return ""
+        return (f"{profile.client} has no names to filter yet - add at least one on its page "
+                f"(#/clients/{profile.client}), then start")
+
     async def start(self, name: str = "", project: str = "", resume: str = "", model: str = "",
                     title: str = "") -> dict[str, Any]:
         profile = self.profile(name)
@@ -2074,6 +2140,9 @@ class SessionHost:
             raise SessionError(
                 f"{running} sessions are already running and the limit is {self.max_running} "
                 "(session.max_running - Settings, Session page card); stop one first")
+        blocked = self.start_blocked(profile)
+        if blocked:
+            raise SessionError(blocked)
         session = self._session(profile.name, create=True)
         # A session object outlives its process, so it may still hold the profile as it was at its
         # first start. Every start uses the profile as it is now: an edited brief, folder list or

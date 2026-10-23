@@ -31,7 +31,7 @@ from . import fileio
 from . import stamp
 from .provenance import Provenance
 from .mapping import (FOUND_ORIGINS, GLOBAL_ID, JOINED_SUFFIX_RE, ORIGIN_SCAN, SAFE_TOKEN_RE, SHAPED_TOKEN_CEILING,
-                      SPACED_SUFFIX_RE,
+                      SPACED_SUFFIX_RE, SPACED_NAME_RE, JOINED_NAME_RE,
                       SOURCE_MANUAL, TOKEN_SHAPES, Mapper, MappingError, classify, client_index,
                       client_tokens, email_rule_for, email_rules_of, embedded_token, parse_match,
                       rule_email_token)
@@ -1250,7 +1250,7 @@ class MappingStore:
         return idx, added
 
     def _append_form(self, cid: str, client: dict[str, Any], real: str, token: str | None = None,
-                     origin: str = "", source: str = "") -> str:
+                     origin: str = "", source: str = "", kind: str | None = None) -> str:
         """Derive one form's token and append it to the client document IN MEMORY.
 
         The one place the derivation order lives, so a form added on its own and the same form added
@@ -1265,9 +1265,10 @@ class MappingStore:
             # whatever order the addresses are met in (feature 96).
             taken = client_tokens({**client, "id": cid}).values()
             token = rule_email_token(real, client_index(cid, client.get("index")), taken=taken)
-        tok = token.strip() if token else (self._embedded_token(cid, client, real) or
-                                           client_tokens({**client, "id": cid, "forms": forms + [{"real": real}]})[real])
+        tok = token.strip() if token else self._derived_token(cid, client, real, kind)
         entry: dict[str, Any] = {"real": real, "token": tok}
+        if kind:
+            entry["kind"] = kind               # chosen when it was added (2026-10-23); re-derives from it later too
         # Recorded so the detector can tell what NAMES a client from what was merely found near
         # one: only the former is watched for inside longer words (D1, mapping.FOUND_ORIGINS).
         if origin:
@@ -1285,8 +1286,29 @@ class MappingStore:
             client["removed"] = [r for r in client["removed"] if r.get("real") != real]
         return tok
 
+    def _derived_token(self, cid: str, client: dict[str, Any], real: str, kind: str | None = None) -> str:
+        """The token a new form would get: a resource name carrying one of the client's forms keeps its shape, the
+        rest comes from the shape - guessed, or `kind` when one was chosen."""
+        if not kind:
+            embedded = self._embedded_token(cid, client, real)
+            if embedded:
+                return embedded
+        new = {"real": real, **({"kind": kind} if kind else {})}
+        return client_tokens({**client, "id": cid, "forms": list(client.get("forms") or []) + [new]})[real]
+
+    def preview_token(self, cid: str, real: str, kind: str | None = None) -> str:
+        """What adding `real` would give it, without writing anything (the Type list on the add row, 2026-10-23)."""
+        _path, _doc, client = self._client_doc(cid)
+        real = real.strip()
+        existing = next((f for f in client.get("forms") or [] if f.get("real") == real), None)
+        if existing is not None:
+            return str(existing.get("token") or client_tokens({**client, "id": cid}).get(real, ""))
+        if kind and kind not in TOKEN_SHAPES:
+            raise MappingError(f"unknown type {kind!r}")
+        return self._derived_token(cid, client, real, kind)
+
     def add_form(self, cid: str, real: str, token: str | None = None, origin: str = "",
-                 source: str = "") -> str:
+                 source: str = "", kind: str | None = None) -> str:
         # Global is where the things that belong to nobody in particular go, so it has to be there
         # the first time something needs it. On a fresh install pointed at an empty clients folder
         # it was not, and every GUID the proxy learned with no obvious owner was lost to
@@ -1303,7 +1325,9 @@ class MappingStore:
                     f"would depend on which it read first.",
                 offer={"action": "find", "label": "Show me the one that is there", "value": real},
             )
-        tok = self._append_form(cid, client, real, token, origin, source)
+        if kind and kind not in TOKEN_SHAPES:
+            raise MappingError(f"unknown type {kind!r}")
+        tok = self._append_form(cid, client, real, token, origin, source, kind)
         self._validate_then_write(path, doc)
         return tok
 
@@ -1609,8 +1633,11 @@ class MappingStore:
                 if not isinstance(form, dict) or "real" not in form:
                     continue
                 old = str(form.get("token") or derived.get(str(form["real"]), ""))
-                new = "_".join(old.split()) if SPACED_SUFFIX_RE.match(old) else old
-                if JOINED_SUFFIX_RE.match(new) and form.get("token") != new:
+                spaced = SPACED_SUFFIX_RE.match(old) or SPACED_NAME_RE.match(old)
+                new = "_".join(old.split()) if spaced else old
+                # A name token too (2026-10-23): "Client05 Pty" becomes "Client05_Pty". Only aicleaner's own shapes;
+                # a token typed by hand with spaces stays as it is (it works as it is - Brad, 2026-10-23).
+                if (JOINED_SUFFIX_RE.match(new) or (spaced and JOINED_NAME_RE.match(new))) and form.get("token") != new:
                     form["token"] = new
                     touched = True
                     if new != old:
@@ -1622,7 +1649,8 @@ class MappingStore:
                     log.warning("tokens of %s not migrated: %s", cid, exc)
                     changed = [c for c in changed if c[0] != cid]
         learned = self.variants()
-        rewritten = {cid: {real: ("_".join(tok.split()) if SPACED_SUFFIX_RE.match(tok) else tok)
+        rewritten = {cid: {real: ("_".join(tok.split()) if SPACED_SUFFIX_RE.match(tok) or SPACED_NAME_RE.match(tok)
+                                  else tok)
                            for real, tok in m.items()} for cid, m in learned.items()}
         if rewritten != learned:
             changed += [(cid, tok, rewritten[cid][real]) for cid, m in learned.items()

@@ -326,7 +326,9 @@ export function fileTabs(ctx) {
   }
 
   // What the editor needs from here: whose files these are, a repaint, and a fresh read.
-  const hooks = { name: () => ctx.name(), paint: () => paint(), reload: (tab) => load(tab) };
+  const hooks = { name: () => ctx.name(), paint: () => paint(), reload: (tab) => load(tab),
+    // 139 part 3: the file as it is on disk now, for the conflict's comparison (nothing in the tab changes).
+    diskText: async (tab) => (await getJSON(`/api/session/file?${fileQuery(ctx.name(), tab)}`)).text || '' };
 
   async function load(tab) {
     tab.error = '';

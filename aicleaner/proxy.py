@@ -24,6 +24,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 import uuid
 from collections import Counter
@@ -143,6 +144,16 @@ def _outside_body(request: web.Request, tail: str) -> str:
     parts += [value for name, value in request.headers.items()
               if _forwardable(name) and name.lower() not in _CREDENTIAL_HEADERS]
     return "\n".join(p for p in parts if p)
+
+
+def _copilot_signed_in(home: Path) -> bool:
+    """The Copilot CLI's own config lists a signed-in user (the file is JSON with // comment lines)."""
+    try:
+        text = (home / ".copilot" / "config.json").read_text(encoding="utf-8")
+        doc = json.loads("\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//")))
+        return bool(doc.get("loggedInUsers"))
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _completion(request: web.Request) -> bool:
@@ -368,6 +379,10 @@ class Proxy:
         from .scanjob import ScanRunner
 
         self.scans = ScanRunner(cfg, queue_store=self.store)
+        # Feature 107: run as SYSTEM, Project sessions are off - Claude Code would run as SYSTEM, not as you.
+        self.service = os.environ.get("AICLEANER_SERVICE", "").strip().lower()
+        if self.service == "system":
+            cfg.session_enabled = False
         if cfg.session_enabled:
             self._build_session_host()
         # Always constructed so the mode can be switched on at runtime; consulted only when mode is redact.
@@ -1129,15 +1144,103 @@ class Proxy:
             log.info(said)
         return said
 
-    def completions(self) -> Any:
-        """The file editor's suggestion worker (feature 143), made on first use."""
+    def client_name_count(self, client: str) -> int | None:
+        """How many real names the mapping holds for `client` (D197); None when the client is not in it."""
+        mapper = self.mapper
+        if client in (mapper.clients or []):                     # the running mapping lists clients that have names
+            return sum(1 for f in mapper.forms if getattr(f, "client", None) == client)
+        # Not there: a placeholder made from the session form (no names yet), or no such client. The client files say.
+        try:
+            clients = self._mapping_store().load_tolerant(record=False)[0].data.get("clients") or []
+        except Exception:  # noqa: BLE001 - unknown is never a reason to refuse a start
+            return None
+        found = next((c for c in clients if c.get("id") == client), None)
+        return None if found is None else len([f for f in (found.get("forms") or []) if f.get("real")])
+
+    def _picture(self, mapper: Any) -> Any:
+        """Feature 114: (image bytes) -> picture.Redacted while pictures go with client names blacked out; else None."""
+        if not self.cfg.redact_images or self.cfg.allow_images:
+            return None
+        if getattr(self, "_picture_readers", None) is None:
+            from .picture import windows_readers
+            self._picture_readers = windows_readers(self.cfg.ocr_timeout_s) or False
+        if not self._picture_readers:
+            return None
+        from .detect import find_candidates
+        from .picture import redact_picture
+        read_boxes, fill_boxes = self._picture_readers
+        ignored = {v.lower() for v in self.store.ignore_set()} if self.store is not None else set()
+
+        def candidates(text: str) -> list[str]:
+            # Identifiers the detectors find that are not mapped yet (emails, IPs, tenants, hosts...), less the ignored.
+            return [value for value, *_rest in find_candidates(text, mapper) if value.lower() not in ignored]
+
+        return lambda raw: redact_picture(raw, mapper, read_boxes, fill_boxes, candidates)
+
+    def editor_services(self) -> dict[str, dict[str, Any]]:
+        """Each suggestion service, whether it can answer here (installed and signed in), and what it costs - for the
+        File editor card (spec 2026-10-23-editor-suggestion-services.md)."""
+        from .agents import CODEX, COPILOT, command_for
+        from .session import resolve_cli
+        home = Path.home()
+        claude = self.session.available() if self.session is not None else bool(shutil.which(resolve_cli("claude")))
+        copilot = bool(command_for(COPILOT)) and _copilot_signed_in(home)
+        codex = bool(command_for(CODEX)) and (home / ".codex" / "auth.json").exists()
+        return {
+            "claude": {"available": claude, "label": "Claude (Haiku)", "filtered": True,
+                       "cost": "a small Haiku turn on your Claude plan; about 1 second"},
+            "copilot": {"available": copilot, "label": "GitHub Copilot CLI - unfiltered", "filtered": False,
+                        "cost": "AI credits on your Copilot plan (about 0.2 a pause, measured); a few seconds"},
+            "copilot_filtered": {"available": copilot, "label": "GitHub Copilot CLI - filtered (unsupported)",
+                                 "filtered": True, "cost": "as unfiltered; may stop working when Copilot changes"},
+            "codex": {"available": codex, "label": "Codex (ChatGPT)", "filtered": True,
+                      "cost": "a turn on your ChatGPT plan; a few seconds"},
+        }
+
+    def editor_service(self, services: dict[str, dict[str, Any]] | None = None) -> str:
+        """The service the editor asks now: '' when off or none can answer."""
+        from .completion import AUTO_ORDER
+        choice = self.cfg.editor_inline_service
+        if not self.cfg.editor_inline_suggest or choice == "off":
+            return ""
+        services = services or self.editor_services()
+        if choice == "auto":
+            return next((s for s in AUTO_ORDER if services[s]["available"]), "")
+        return choice if services.get(choice, {}).get("available") else ""
+
+    async def completions(self) -> Any:
+        """The worker for the service chosen now (feature 143; spec 2026-10-23-editor-suggestion-services.md), made
+        on first use and replaced when the choice changes. None when no service can answer."""
+        from .completion import Completions
+        from .session import resolve_cli
+        service = self.editor_service()
+        if not service:
+            return None
+        if self._completions is not None and self._completions.service != service:
+            await self._completions.close()
+            self._completions = None
         if self._completions is None:
-            from .completion import Completions
-            from .session import resolve_cli
             claude = self.session.claude if self.session is not None else resolve_cli("claude")
-            self._completions = Completions(claude, f"http://127.0.0.1:{self.cfg.port}/anthropic",
-                                            self.cfg.editor_inline_model)
-        self._completions.model = self.cfg.editor_inline_model
+            base = f"http://127.0.0.1:{self.cfg.port}/anthropic"
+            if service == "claude":
+                self._completions = Completions(claude, base, self.cfg.editor_inline_model)
+            else:
+                from .agents import CODEX, COPILOT, command_for, protocol_args
+                which = CODEX if service == "codex" else COPILOT
+                env: dict[str, str] = {}
+                if service != "copilot":
+                    try:
+                        env = await self.prepare_agent(which)      # the forward proxy and the agent's certificate
+                    except Exception as exc:  # noqa: BLE001 - a suggestion that cannot be filtered is not asked
+                        log.warning("file editor suggestions: %s cannot be filtered (%s)", which.label, exc)
+                        return None
+                self._completions = Completions(claude, base, service=service,
+                                                agent_command=[*command_for(which), *protocol_args(which)],
+                                                agent_env=env)
+        if service == "claude":
+            self._completions.model = self.cfg.editor_inline_model
+            if self.session is not None:
+                self._completions.claude = self.session.claude      # followed if Claude Code moves (D204)
         return self._completions
 
     def claudeai_service(self) -> bool:
@@ -1165,6 +1268,13 @@ class Proxy:
         what is waiting said - the Copilot rule."""
         from . import claudeai_settings, claudeai_tasks, copilot_settings
 
+        # Only an installed aicleaner (started from its config) or one under a test's stand-in home acts on the
+        # Windows proxy setting and its record (2026-10-23): a test proxy with default settings pointed at the real
+        # ~/.aicleaner and the real registry, and removed the real ledger.
+        real_state = self._state_path().resolve() == (Path.home() / ".aicleaner").resolve()
+        stand_in = bool(os.environ.get("AICLEANER_CLIENT_HOME"))     # set by the tests, never by an install
+        if (self.cfg.path is None and not stand_in) or (stand_in and real_state):
+            return ""                    # a default Config's state folder IS the real ~/.aicleaner
         state = self._state_path()
         pac = self.claudeai_pac_url()
         service = self.claudeai_service()
@@ -1199,8 +1309,13 @@ class Proxy:
                 # B4: the PAC written where the PAC service reads it, and the service and the watchdog registered,
                 # before the setting points at it - so there is never a moment it would answer "not found".
                 await asyncio.to_thread(claudeai_settings.record, state)
+                registered = (state / claudeai_tasks.PAC_FILE).exists()
                 await asyncio.to_thread(claudeai_tasks.write_pac, state, self._claudeai_pac_text())
-                await asyncio.to_thread(claudeai_tasks.install, self.install_root(), state, self.cfg.port)
+                # Registered once, when the switch goes on (or a person changes it here) - not again at every start:
+                # through PowerShell it held the start up past Deploy's 15 seconds, which then started a second copy
+                # (2026-10-23). The PAC file is there exactly while the tasks are, so it says whether they are.
+                if not registered or trust:
+                    await asyncio.to_thread(claudeai_tasks.install, self.install_root(), state, self.cfg.port)
             said = await asyncio.to_thread(claudeai_settings.apply, True, state, pac)
         except (claudeai_settings.SettingsError, copilot_settings.SettingsError, claudeai_tasks.TaskError) as exc:
             self.claudeai_error = str(exc)
@@ -1450,6 +1565,15 @@ class Proxy:
                 log.info(said)
         except rules.RulesError as exc:
             log.warning("rules block not updated: %s", exc)
+        # D203: the auto-mode trusted-folder entries an earlier version repeated, taken out once.
+        if writes_settings:
+            try:
+                from .claudetrust import tidy_settings
+                said = await asyncio.to_thread(tidy_settings)
+                if said:
+                    log.info(said)
+            except Exception as exc:  # noqa: BLE001 - never stops the proxy
+                log.warning("trusted-folder entries not tidied: %s", exc)
         # The Code tab switch (feature 117) kept in step at every start, as the bash guard is.
         try:
             if writes_settings:
@@ -1576,6 +1700,7 @@ class Proxy:
         self.session.auto_titles = cfg.session_auto_titles     # item E
         # Other AI services (item K): their filtering made ready here, their conversations filed in state.
         self.session.prepare_agent = self.prepare_agent
+        self.session.client_names = self.client_name_count      # D197
         self.session.agents_dir = self._state_path()
 
     def set_casual_folder(self, folder: str) -> dict[str, Any]:
@@ -1655,6 +1780,7 @@ class Proxy:
             "forms": len(m.forms),
             "dialects": sorted(self.cfg.upstreams),
             "keep_tokenised_tools": self.cfg.keep_tokenised_tools,
+            "service": self.service,             # feature 107: "system" when run by the start-up task
         }
         if self._handle is not None:
             body["mapping_reloads"] = self._handle.reloads
@@ -1739,7 +1865,7 @@ class Proxy:
                     return fixed
 
                 obj, attach_counts = await asyncio.to_thread(
-                    lambda: scrub(obj, self.cfg.allow_images, self._pdf_to_text,
+                    lambda: scrub(obj, self.cfg.allow_images, self._pdf_to_text, picture=self._picture(mapper),
                                   image_to_text=self._image_to_text, repair=repair,
                                   ocr_max_pages=self.cfg.ocr_max_pages,
                                   ocr_timeout_s=self.cfg.ocr_timeout_s,

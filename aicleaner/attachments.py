@@ -70,8 +70,10 @@ class _Scrubber:
                  office: OfficeToText | None = office_to_text,
                  repair: Repair | None = None,
                  ocr_max_pages: int = 10, ocr_timeout_s: int = 60,
-                 ocr_max_bytes: int = 20_000_000):
+                 ocr_max_bytes: int = 20_000_000, picture: Any = None):
         self.allow_images = allow_images
+        # Feature 114: (image bytes) -> picture.Redacted, when pictures go with client names blacked out.
+        self.picture = picture
         self.pdf_to_text = pdf_to_text
         self.image_to_text = image_to_text
         self.office = office
@@ -126,10 +128,15 @@ class _Scrubber:
         self.counts["other_withheld"] += 1
         return _notice(f"[aicleaner: an attachment ({what or 'unknown type'}) was withheld: it cannot be checked for client names.]")
 
-    def image(self, block: dict[str, Any], media: str, raw: bytes | None = None) -> dict[str, Any]:
+    def image(self, block: dict[str, Any], media: str, raw: bytes | None = None) -> Any:
         if self.allow_images and media in ACCEPTED_IMAGE_TYPES:
             self.counts["image_allowed"] += 1
             return block
+        # Anthropic's image block only: the copy goes back in the same shape (an OpenAI image_url stays text only).
+        if self.picture is not None and raw and media in ACCEPTED_IMAGE_TYPES and block.get("type") == "image":
+            sent = self._redacted(raw)
+            if sent is not None:
+                return sent
         text = self._read(self._read_image(raw, media) or "")
         if text:
             self.counts["image_read"] += 1
@@ -138,6 +145,25 @@ class _Scrubber:
         self.counts["image_withheld"] += 1
         return _notice(f"[aicleaner: an image ({media or 'unknown type'}) was withheld: images are not sent to "
                        "the AI service. Describe it, or paste its text.]")
+
+    def _redacted(self, raw: bytes) -> list[dict[str, Any]] | None:
+        """Feature 114: the picture with client names blacked out, and its text (filtered with the rest of the
+        request), or None to fall back to text only (the reader failed, or a name stayed legible)."""
+        try:
+            result = self.picture(raw)
+        except (ConversionError, OSError, ValueError):
+            return None
+        if result.image is None:
+            self.counts["image_redaction_refused"] += 1
+            return None
+        self.counts["image_redacted" if result.hidden else "image_clean"] += 1
+        said = (f"[aicleaner: this image was sent with {result.hidden} client name(s) or identifier(s) blacked out; "
+                "its readable text follows.]" if result.hidden else
+                "[aicleaner: this image was checked on this machine and had no client names; its readable text follows.]")
+        media = "image/png"                    # always re-encoded (feature 114 security review)
+        picture = {"type": "image", "source": {"type": "base64", "media_type": media,
+                                               "data": base64.b64encode(result.image).decode("ascii")}}
+        return [picture, _notice(f"{said}\n\n{self._read(result.text)}" if result.text.strip() else said)]
 
     def pdf(self, data_b64: str, name: str) -> dict[str, str]:
         raw = _decode(data_b64)
@@ -246,7 +272,15 @@ class _Scrubber:
 
     def walk(self, x: Any) -> Any:
         if isinstance(x, list):
-            return [self.walk(item) for item in x]
+            out: list[Any] = []
+            for item in x:
+                done = self.walk(item)
+                # A redacted picture becomes two blocks, the picture and its text, side by side (feature 114).
+                if isinstance(done, list) and isinstance(item, dict) and item.get("type") == "image":
+                    out.extend(done)
+                else:
+                    out.append(done)
+            return out
         if isinstance(x, dict):
             if "type" in x:
                 replacement = self.block(x)
@@ -259,7 +293,7 @@ class _Scrubber:
 def scrub(obj: Any, allow_images: bool, pdf_to_text: PdfToText, *,
           image_to_text: ImageToText | None = None, office: OfficeToText | None = office_to_text,
           repair: Repair | None = None, ocr_max_pages: int = 10, ocr_timeout_s: int = 60,
-          ocr_max_bytes: int = 20_000_000) -> tuple[Any, Counter[str]]:
+          ocr_max_bytes: int = 20_000_000, picture: Any = None) -> tuple[Any, Counter[str]]:
     """Rewrite every attachment in a parsed request; returns the new body and outcome counts.
 
     `repair` is handed the text a converter produced, and nothing else. The caller uses it to put
@@ -267,5 +301,5 @@ def scrub(obj: Any, allow_images: bool, pdf_to_text: PdfToText, *,
     """
     s = _Scrubber(allow_images, pdf_to_text, image_to_text=image_to_text, office=office,
                   repair=repair, ocr_max_pages=ocr_max_pages, ocr_timeout_s=ocr_timeout_s,
-                  ocr_max_bytes=ocr_max_bytes)
+                  ocr_max_bytes=ocr_max_bytes, picture=picture)
     return s.walk(obj), s.counts

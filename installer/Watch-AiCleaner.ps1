@@ -156,10 +156,15 @@ function Install-Safeguard {
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $watch = Get-HiddenTaskAction -Execute $powershell -WorkingDirectory (Split-Path -Parent $self) `
         -Arguments "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$self`" -Port $ProxyPort -StateRoot `"$Root`""
-    # Every 5 minutes from logon (decided 2026-10-21).
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+    # Every 5 minutes (decided 2026-10-21): from now, and again from each logon. A logon trigger alone only began
+    # repeating at the next sign-in, so the watchdog registered mid-session never ran (found 2026-10-23).
+    $repeat = (New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)).Repetition
+    $fromNow = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1)
+    $fromNow.Repetition = $repeat
+    $atLogon = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $atLogon.Repetition = $repeat
+    $trigger = @($fromNow, $atLogon)
     $watchSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 4)
 
@@ -214,7 +219,12 @@ function Invoke-Watch {
     if (Test-Healthy -ProxyPort $ProxyPort) { return }
     Write-Line "aicleaner is not answering on port $ProxyPort; starting it" -Level Warn
     $started = $false
-    if (Get-ScheduledTask -TaskName 'aicleaner-proxy' -ErrorAction SilentlyContinue) {
+    $service = Get-ScheduledTask -TaskName 'aicleaner-service' -ErrorAction SilentlyContinue
+    if ($service -and $service.State -ne 'Disabled') {
+        # Feature 107: run as SYSTEM; its own task checks it every 5 minutes too. Started here when allowed.
+        try { Start-ScheduledTask -TaskName 'aicleaner-service' -ErrorAction Stop; $started = $true }
+        catch { Write-Line "could not start aicleaner-service from this account ($($_.Exception.Message)); its own 5-minute check will" -Level Warn }
+    } elseif (Get-ScheduledTask -TaskName 'aicleaner-proxy' -ErrorAction SilentlyContinue) {
         Start-ScheduledTask -TaskName 'aicleaner-proxy'
         $started = $true
     } else {

@@ -41,7 +41,12 @@
 param(
     [string]$Path = '',
     [double]$ColumnGap = 2.5,
-    [switch]$Engine
+    [switch]$Engine,
+    # Feature 114: the words of the image's first page with their boxes, as JSON, instead of the laid-out text.
+    [switch]$Boxes,
+    # Feature 114: a JSON file of boxes ([{x,y,w,h}], in the image's pixels) to fill solid black, written to -OutPath.
+    [string]$Fill = '',
+    [string]$OutPath = ''
 )
 # The app folder: this script's own, or its parent when it sits in installer\ (feature 102).
 $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
@@ -776,6 +781,37 @@ function Split-ImagePage {
 if ($Engine) {
     Assert-WindowsPowerShell
     Get-ImageEngine
+} elseif ($Path -and $Fill) {
+    # Feature 114: the boxes filled solid in a copy of the image, saved as PNG. Nothing else of the picture changes.
+    Add-Type -AssemblyName System.Drawing
+    $rects = @(Get-Content -LiteralPath $Fill -Raw -Encoding UTF8 | ConvertFrom-Json)
+    $source = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $Path).Path)
+    try {
+        $canvas = New-Object System.Drawing.Bitmap($source.Width, $source.Height)
+        $graphics = [System.Drawing.Graphics]::FromImage($canvas)
+        try {
+            $graphics.DrawImage($source, 0, 0, $source.Width, $source.Height)
+            $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::Black)
+            foreach ($rect in $rects) {
+                $graphics.FillRectangle($brush, [single]$rect.x, [single]$rect.y, [single]$rect.w, [single]$rect.h)
+            }
+            $brush.Dispose()
+        } finally { $graphics.Dispose() }
+        $canvas.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png)
+        $canvas.Dispose()
+    } finally { $source.Dispose() }
+} elseif ($Path -and $Boxes) {
+    # Feature 114: each word or line the reader found, with its box in the first page's pixels.
+    Assert-WindowsPowerShell
+    $split = Split-ImagePage -ImagePath $Path
+    try {
+        $found = @(Get-ImageWord -ImagePath $split.Pages[0])
+        $out = foreach ($word in $found) {
+            [pscustomobject]@{ text = [string]$word.Text; x = [double]$word.X; y = [double]$word.Y
+                               w = [double]$word.Width; h = [double]$word.Height }
+        }
+        ConvertTo-Json -InputObject @($out) -Compress -Depth 3
+    } finally { Remove-Item -LiteralPath $split.Folder -Recurse -Force -ErrorAction SilentlyContinue }
 } elseif ($Path) {
     Assert-WindowsPowerShell
     if (-not (Test-Path -LiteralPath $Path)) { throw "No such image: $Path" }

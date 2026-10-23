@@ -38,6 +38,11 @@ log = logging.getLogger("aicleaner.claudeai")
 # What the probes established (2026-10-21/22): the typed message is field 3 of PerformAction. The rest is learned
 # from the structure log in a synthetic session; outside the map, protowire's guess applies.
 FIELD_MAP: dict[str, dict[str, str]] = {"PerformAction": {"3": "text"}}
+# Found 2026-10-23 in a synthetic chat's structure log: the finished reply's whole text is 1.1.5.9 of a StreamTimeline
+# frame (while it streams, the pieces are 1.2.2), and 1.1.5.4 is a number beside it - who wrote it.
+REPLY_TEXT = "1.1.5.9"
+REPLY_SENDER = "1.1.5.4"
+MARK = "\n\n(filtered by aicleaner)"
 PASS_THROUGH = ("/cdn-cgi/", "/v1/code/")
 ANALYTICS = ("/api/v2/rum", "/api/event_logging")
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer",
@@ -450,10 +455,17 @@ class ClaudeAI:
         inbound: Counter[str] = SubCounter()
         field_map = FIELD_MAP.get(method)
 
+        role = self.proxy.cfg.claudeai_mark_role
+
         def restore(message: bytes) -> bytes:
             self._log_structure(method, "reply", message)
             try:
-                return pw.rewrite(message, lambda _p, t: mapper.rehydrate(t, inbound), field_map)
+                # The filtered mark (spec section 6, safeguard 1): the finished reply's whole text, from Claude - not
+                # your own message, which comes back in the same shape - ends with it. A reply without it was not
+                # restored by aicleaner. Off while the sender's value is not known (claudeai.mark_role 0).
+                mark = bool(role) and method == "StreamTimeline" and pw.varints(message, REPLY_SENDER) == [role]
+                return pw.rewrite(message, lambda p, t: mapper.rehydrate(t, inbound) + (
+                    MARK if mark and p == REPLY_TEXT and t.strip() else ""), field_map)
             except pw.ProtoError:
                 return message           # a reply that cannot be read is shown as it came (tokens, never a leak)
 

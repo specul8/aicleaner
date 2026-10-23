@@ -27,6 +27,7 @@ AUTO, DIRS, TRUST = "auto_mode", "additional_directories", "workspace_trust"
 LIST_NAMES = {AUTO: "auto-mode trusted repos", DIRS: "additional directories", TRUST: "workspace trust"}
 TRUSTED_ENTRY = "**Trusted repo**:"
 PATH_IN_TEXT = re.compile(r"[A-Za-z]:[\\/][^\s`'\",;)]*")
+OUR_ENTRY = re.compile(r"\*\*Trusted repo\*\*:\s*([A-Za-z]:[\\/].*?)\s+and everything under it", re.I)
 
 
 class TrustError(RuntimeError):
@@ -77,8 +78,47 @@ def auto_mode_roots(settings: dict) -> list[tuple[str, bool]]:
         if TRUSTED_ENTRY not in text:
             continue
         children = "everything under" in text.lower()
-        out += [(p.rstrip("\\/"), children) for p in PATH_IN_TEXT.findall(text)]
+        # The form aicleaner writes, "<path> and everything under it": the whole path, spaces included. Read with
+        # PATH_IN_TEXT alone, "...\OneDrive\Acme Pty" came back as "...\OneDrive\Acme", never matched, and the
+        # entry was added again on every check (D203).
+        ours = OUR_ENTRY.search(text)
+        paths = [ours.group(1)] if ours else PATH_IN_TEXT.findall(text)
+        out += [(p.strip().rstrip("\\/"), children) for p in paths]
     return out
+
+
+def tidy(settings: dict) -> bool:
+    """Repeated auto-mode entries (D203) taken out, the first of each kept. True when anything was removed."""
+    env = (settings.get("autoMode") or {}).get("environment")
+    if not isinstance(env, list):
+        return False
+    seen: set[str] = set()
+    kept = []
+    for entry in env:
+        key = str(entry).strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(entry)
+    if len(kept) == len(env):
+        return False
+    settings["autoMode"]["environment"] = kept
+    return True
+
+
+def tidy_settings() -> str:
+    """The settings file with its repeated auto-mode entries removed (backed up first). '' when there were none."""
+    path = settings_file()
+    try:
+        settings = _read(path)
+    except TrustError:
+        return ""
+    before = len((settings.get("autoMode") or {}).get("environment") or [])
+    if not tidy(settings):
+        return ""
+    _swap_in(path, settings)
+    removed = before - len(settings["autoMode"]["environment"])
+    return f"removed {removed} repeated auto-mode trusted-folder entr{'y' if removed == 1 else 'ies'} from {path}"
 
 
 def extra_dirs(settings: dict) -> list[str]:
@@ -144,8 +184,9 @@ def add(missing: list[dict[str, Any]], profile: str) -> dict[str, Any]:
         folder, lists = item["folder"], item["lists"]
         if AUTO in lists:
             env = settings.setdefault("autoMode", {}).setdefault("environment", [])
-            env.append(f"{TRUSTED_ENTRY} {folder} and everything under it - {profile} (added by aicleaner)")
-            changed_settings = True
+            if not any(_covers(r, folder, c) for r, c in auto_mode_roots(settings)):
+                env.append(f"{TRUSTED_ENTRY} {folder} and everything under it - {profile} (added by aicleaner)")
+                changed_settings = True
             wrote.append(f"{folder}: {LIST_NAMES[AUTO]}")
         if DIRS in lists:
             dirs = settings.setdefault("permissions", {}).setdefault("additionalDirectories", [])
@@ -161,6 +202,7 @@ def add(missing: list[dict[str, Any]], profile: str) -> dict[str, Any]:
             projects[key] = entry
             changed_state = True
             wrote.append(f"{folder}: {LIST_NAMES[TRUST]}")
+    changed_settings = tidy(settings) or changed_settings
     if changed_settings:
         backups.append(_swap_in(settings_path, settings))
     if changed_state:

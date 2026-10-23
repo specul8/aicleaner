@@ -2054,16 +2054,37 @@ function watchHints(row) {
 }
 
 const RUNNING_LOCK = 'This project profile\'s session is running. Stop the session to rename or delete it.';
+const NEW_CLIENT = '__new_client__';         // the client list's "Create new client..." (D197); never saved
 
 function profileRow(profile, clients, workspace, running) {
   const labelOf = (cid) => (clients.find((c) => c.id === cid) || {}).label || cid;
   const client = h('select', { class: 'p-client' },
     h('option', { value: '' }, 'None (Global only)'),
-    ...clients.map((c) => h('option', { value: c.id, selected: c.id === profile.client ? true : null }, c.label)));
+    ...clients.map((c) => h('option', { value: c.id, selected: c.id === profile.client ? true : null }, c.label)),
+    // D197: a client that does not exist yet, made here; the session saves, and starts once it has a name.
+    h('option', { value: NEW_CLIENT }, 'Create new client...'));
   // The client's OneDrive share (D99, moved from the Clients page): per client, kept on this
   // machine. Saved on its own, so it follows the drop-down rather than the profile's Save.
   const share = shareSlot(profile.client, labelOf(profile.client));
+  let chosen = client.value;
+  client.addEventListener('change', async (event) => {
+    if (client.value !== NEW_CLIENT) { chosen = client.value; return; }
+    event.stopImmediatePropagation();
+    client.value = chosen;                          // until the new one exists
+    const { askForNewClient } = await import('./newclient.js');
+    askForNewClient((id) => {
+      if (!id) return;
+      if (![...client.options].some((o) => o.value === id)) {
+        client.insertBefore(h('option', { value: id }, id), client.querySelector(`option[value="${NEW_CLIENT}"]`));
+      }
+      client.value = id;
+      chosen = id;
+      client.dispatchEvent(new Event('change', { bubbles: true }));
+      say(`${id} created. Add at least one of its names on its page before starting this session.`, 'ok');
+    });
+  });
   client.addEventListener('change', () => {
+    if (client.value === NEW_CLIENT) return;
     share.dataset.client = client.value;
     if (client.value) fillShare(share, client.value, labelOf(client.value));
     else share.replaceChildren();
@@ -2140,7 +2161,7 @@ function modelPick(row, names, aliases) {
 function readProfile(row) {
   return {
     name: row.querySelector('.p-name').value.trim(),
-    client: row.querySelector('.p-client').value,
+    client: row.querySelector('.p-client').value === NEW_CLIENT ? '' : row.querySelector('.p-client').value,
     projects: linesOf(row.querySelector('.p-projects')),
     // D99: this machine's workspace files and home folder choice.
     workspaces: linesOf(row.querySelector('.p-workspaces')),
@@ -2553,6 +2574,10 @@ export async function render(main, context = {}) {
       const path = cancelling ? '/api/session/queue/cancel' : '/api/session/queue/send';
       const answer = await postJSON(path, { name: view.name, id: button.dataset.id });
       if (answer.outcome === 'interrupting') say('Stopping the current turn, then sending this.', 'ok');
+      // D205: with background agents running nothing is interrupted - stopping the turn would stop them too.
+      if (answer.outcome === 'next_tool_call') {
+        say('Background agents are running, so the turn was not stopped: this goes first and reaches Claude at its next step.', 'ok');
+      }
       // Cancel gives the words back to edit (the user, 2026-10-12), ahead of anything typed since.
       if (cancelling && item && item.text) {
         const typed = promptValue();
@@ -2652,14 +2677,27 @@ export async function render(main, context = {}) {
       // Only its own lock is lifted: a start or stop in flight disables the button too, and the poll must
       // not hand it back mid-way.
       const waiting = !session.running && Boolean(view.pastLoading);
-      if (waiting) {
+      // D197: a session whose client is still a placeholder (no names to filter) is saved but not started.
+      const blocked = !session.running ? (state_.start_blocked || '') : '';
+      if (waiting || blocked) {
         run.disabled = true;
         run.dataset.waitingForList = '1';
-        run.title = 'Loading conversations...';
+        run.title = blocked || 'Loading conversations...';
       } else if (run.dataset.waitingForList) {
         delete run.dataset.waitingForList;
         run.disabled = false;
         run.title = '';
+      }
+      let note = document.getElementById('session-start-blocked');
+      if (blocked && !note) {
+        note = h('p', { id: 'session-start-blocked', class: 'chip warn' });
+        run.parentElement.after(note);
+      }
+      if (note) {
+        note.hidden = !blocked;
+        const client = (blocked.match(/#\/clients\/([^)\s]+)/) || [])[1] || '';
+        note.replaceChildren(blocked.replace(/ \(#\/clients\/[^)]*\)/, ''), ' ',
+          client ? h('a', { href: `#/clients/${client}` }, 'Open the client') : '');
       }
     }
     // Start chatting only means something while the session is running (DECISIONS 35).
@@ -3624,6 +3662,10 @@ export async function render(main, context = {}) {
     // Stop. On a session that is not running there is nothing to interrupt and saying so would
     // be noise, so it does nothing.
     if (!current().running) return;
+    // D205: Claude Code's interrupt ends the whole turn, its background agents with it. Said first.
+    const background = current().background || 0;
+    if (background > 0 && !window.confirm(`${background} background agent${background === 1 ? ' is' : 's are'} running. `
+      + 'Stopping this turn stops them too. Stop anyway?')) return;
     try {
       const answer = await postJSON('/api/session/interrupt', { name: view.name });
       if (answer && answer.state === 'pending') {

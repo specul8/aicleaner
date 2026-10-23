@@ -106,6 +106,21 @@ Write-ContactAttribution
 # A deliberate stop (route B's watchdog, Watch-AiCleaner.ps1, leaves aicleaner stopped while this is here).
 # Start-AiCleaner removes it. Claude Desktop's chat stays failing closed meanwhile: Disable is the way to send it
 # out unfiltered on purpose.
+# Feature 107: running as SYSTEM, nothing run as you can stop it - it is asked to restart instead, and its launcher
+# starts it again 5 seconds later (with new code after an update). To stop it for good, turn the service off.
+try {
+    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 3 -ErrorAction Stop
+    if ($health.PSObject.Properties['service'] -and $health.service -eq 'system') {
+        if ($PSCmdlet.ShouldProcess('aicleaner (service)', 'Restart')) {
+            Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/restart" -ContentType 'application/json' -Body '{}' -TimeoutSec 10 | Out-Null
+            Write-Host '==> aicleaner runs as a service: it was restarted (its launcher starts it again in a few seconds). Turn the service off in Settings to stop it.' -ForegroundColor Green
+        }
+        exit 0
+    }
+} catch {
+    Write-Verbose "not answering, or not a service: $($_.Exception.Message)"
+}
+
 $stoppedMarker = Join-Path $env:USERPROFILE '.aicleaner\stopped-on-purpose'
 if ($PSCmdlet.ShouldProcess($stoppedMarker, 'Mark aicleaner as stopped on purpose')) {
     try { Set-Content -LiteralPath $stoppedMarker -Value (Get-Date -Format o) -ErrorAction Stop }

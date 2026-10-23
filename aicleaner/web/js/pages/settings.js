@@ -269,10 +269,19 @@ function notificationsCard(s, remote) {
 }
 
 function imagesCard(s) {
-  const allow = checkbox('allow_images', 'Send images to the AI service', s['attachments.allow_images']);
+  // Feature 114: three ways for a picture - text only (the default), with client names blacked out, or as it is.
+  const now = s['attachments.allow_images'] ? 'as_is' : (s['attachments.redact_images'] ? 'redacted' : 'text');
+  const choices = [
+    ['text', 'Text only (recommended): the picture is never sent; its text is read here and filtered'],
+    ['redacted', 'Redacted picture: sent with client names, identifiers and secrets blacked out, plus its text'],
+    ['as_is', 'Picture as it is: sent unfiltered'],
+  ];
+  const mode = h('div', { class: 'images-mode' }, ...choices.map(([value, label]) => h('label', { class: 'check' },
+    h('input', { type: 'radio', name: 'images_mode', value, checked: value === now ? true : null }), ' ', label)));
+  const picked = () => (mode.querySelector('input:checked') || {}).value || 'text';
   const section = card('images', 'Images',
-    'Off (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. On: JPEG, PNG, GIF and WebP are sent as they are, unfiltered, so any client name in them reaches the provider (replies are still filtered). Other image types are always withheld. PDFs and Office documents are read to text and filtered either way; a scanned PDF is read page by page.',
-    [h('div', { class: 'form-row' }, allow),
+    'Text only (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. Redacted picture: the picture goes too, with every client name, unmapped identifier and secret the reader can see blacked out, and it is read again before it leaves - a name still legible keeps it back. What the reader cannot read (handwriting, a logo, tiny or rotated text) is not blacked out. Picture as it is: JPEG, PNG, GIF and WebP are sent unfiltered, so any client name in them reaches the provider (replies are still filtered). Other image types are always withheld. PDFs and Office documents are read to text and filtered either way.',
+    [mode,
      // Saying this plainly is part of the decision to do it at all (feature 36). A proxy that
      // edits the agent's own instructions from a settings page should never be a surprise.
      h('p', { class: 'hint' },
@@ -283,7 +292,7 @@ function imagesCard(s) {
        + 'binaries" rule is written into the block between the aicleaner markers. On: the rule is '
        + 'removed. Nothing outside those markers is touched, a backup is taken first, and a file '
        + 'whose markers are damaged is left alone and reported.')],
-    () => ({ 'attachments.allow_images': allow.querySelector('input').checked }));
+    () => ({ 'attachments.allow_images': picked() === 'as_is', 'attachments.redact_images': picked() === 'redacted' }));
   // On, this one sends pictures to the provider unfiltered, which is the same class of thing.
   return danger(section, s['attachments.allow_images'], 'IMAGES ARE SENT UNFILTERED');
 }
@@ -734,14 +743,43 @@ function editorCard(s) {
   // Feature 143: Claude Haiku suggests code when you pause typing in a file tab.
   const inline = checkbox('inline_suggest', 'Suggest code as you pause (Claude Haiku, through aicleaner)',
     s['editor.inline_suggest'] !== false);
+  // Which service suggests the code (spec 2026-10-23-editor-suggestion-services.md). VS Code's own Copilot
+  // completions cannot be reached from aicleaner (GitHub refuses the token), so "auto" takes Claude, Copilot, Codex.
+  const serviceChoices = [
+    ['auto', 'Automatic - the first signed in of Claude, Copilot, Codex'],
+    ['claude', 'Claude (Haiku) - filtered'],
+    ['copilot', 'GitHub Copilot CLI - UNFILTERED, as VS Code sends it'],
+    ['copilot_filtered', 'GitHub Copilot CLI - filtered (unsupported)'],
+    ['codex', 'Codex (ChatGPT) - filtered'],
+    ['off', 'Off'],
+  ];
+  const service = h('select', { name: 'inline_service', 'aria-label': 'Which service suggests code' },
+    ...serviceChoices.map(([value, label]) => h('option', { value, selected: (s['editor.inline_service'] || 'auto') === value ? true : null }, label)));
+  const serviceState = h('div', { class: 'hint editor-service-state' }, 'Checking which services are signed in...');
+  const describe = (info) => {
+    const lines = Object.entries(info.services || {}).map(([key, one]) =>
+      `${one.label}: ${one.available ? 'signed in' : 'not available here'} - ${one.cost}.`);
+    const active = (info.services || {})[info.active];
+    lines.unshift(info.active ? `Answering now: ${active.label}.` : 'No service answers now (off, or none signed in).');
+    if (info.active === 'copilot') lines.splice(1, 0, 'Unfiltered: file contents, client names included, go to GitHub as written.');
+    serviceState.textContent = lines.join(' ');
+  };
+  getJSON('/api/editor/services').then(describe).catch(() => { serviceState.textContent = ''; });
+  // The minimap down the right of a file tab: off by default (Brad, 2026-10-23).
+  const minimap = checkbox('minimap', 'Show the minimap (the file in miniature, down the right edge)', s['editor.minimap'] === true);
   return card('editor', 'File editor',
     'Double-clicking a word in a Markdown preview can take you to the same word in the source, selected '
     + 'and ready to edit - handy for reading in the preview and then changing what you read. With suggestions '
-    + 'on, a pause in typing in a file tab asks Claude Haiku for the code that comes next: it appears in grey '
-    + 'a second or two later, Tab takes it and typing on leaves it. Each answered pause is one small Haiku '
-    + 'turn on your Claude plan, filtered like everything else; Alt+\\ still asks the session\'s AI on purpose.',
-    [h('label', { class: 'field' }, 'Double-click in a Markdown preview', pick), h('div', { class: 'form-row' }, inline)],
-    () => ({ 'editor.preview_dblclick': pick.value, 'editor.inline_suggest': inline.querySelector('input').checked }),
+    + 'on, a pause in typing in a file tab asks the chosen service for the code that comes next: it appears in '
+    + 'grey a moment later, Tab takes it and typing on leaves it. Each answered pause is one small turn on that '
+    + 'service\'s plan. Claude and Codex are filtered like everything else; Copilot unfiltered sends the file as '
+    + 'written, as VS Code does. VS Code\'s own Copilot suggestions stay in VS Code: GitHub does not let another '
+    + 'program use them. Alt+\\ still asks the session\'s AI on purpose.',
+    [h('label', { class: 'field' }, 'Double-click in a Markdown preview', pick), h('div', { class: 'form-row' }, inline),
+      h('label', { class: 'field' }, 'Which service suggests code', service), serviceState,
+      h('div', { class: 'form-row' }, minimap)],
+    () => ({ 'editor.preview_dblclick': pick.value, 'editor.inline_suggest': inline.querySelector('input').checked,
+      'editor.inline_service': service.value, 'editor.minimap': minimap.querySelector('input').checked }),
     () => forgetPreviewChoice());
 }
 

@@ -148,7 +148,7 @@ def classify(real: str) -> str:
 def token_for(real: str, index: int, kind: str | None = None, prefix: str = "Client") -> str:
     """Derive a token from the identifier's shape so different shapes never collide.
 
-    name      ACME Inc              -> Client05 Pty      (Client05 alone for a single word)
+    name      ACME Inc              -> Client05_Pty      (Client05 alone for a single word)
     slug      acme-inc / acmeinc    -> client05-pty / client05pty (separator style preserved)
     domain    acme.com.au           -> client05.invalid
     tenant    acmeinc.onmicrosoft.com -> client05.onmicrosoft.invalid
@@ -179,11 +179,13 @@ def token_for(real: str, index: int, kind: str | None = None, prefix: str = "Cli
     if kind == "slug":
         sep = "-" if "-" in real else ("_" if "_" in real else "")
         return f"{tag}{sep}pty" if len(real) > 5 else tag
-    # name: keep the word count so multi-word names stay multi-word
+    # name: keep the word count so multi-word names stay multi-word - joined into one identifier (Brad,
+    # 2026-10-23), as hash-suffixed name tokens have been since 2026-10-15: "Client05 Pty" was read as a name and a
+    # qualifier, and a token written in two pieces is one no reverse table knows.
     words = real.split()
     if len(words) == 1:
         return f"{prefix}{index:02d}"
-    return f"{prefix}{index:02d} " + " ".join(["Pty", "Ltd", "Group", "Co"][: len(words) - 1])
+    return "_".join([f"{prefix}{index:02d}", *["Pty", "Ltd", "Group", "Co"][: len(words) - 1]])
 
 
 # How long a shape-preserving token may get before the shape is abandoned (D7, decided
@@ -261,6 +263,10 @@ def joined_suffix(token: str, suffix: str) -> str:
 SPACED_SUFFIX_RE = re.compile(r"^(?:client|org)\d+(?: [a-z0-9]+)* [0-9a-f]{4}(?:[0-9a-f]{4})?$", re.IGNORECASE)
 # The same token as it is now; its spaced and URL-encoded spellings are kept as aliases of it.
 JOINED_SUFFIX_RE = re.compile(r"^(?:client|org)\d+(?:_[a-z0-9]+)*_[0-9a-f]{4}(?:[0-9a-f]{4})?$", re.IGNORECASE)
+# A multi-word name token as token_for minted it before 2026-10-23 ("Client05 Pty Ltd"), and as it is now
+# ("Client05_Pty_Ltd"). Rewritten by store.migrate_spaced_suffixes; the spaced spelling still comes back as the real.
+SPACED_NAME_RE = re.compile(r"^(?:client|org)\d+(?: (?:pty|ltd|group|co))+$", re.IGNORECASE)
+JOINED_NAME_RE = re.compile(r"^(?:client|org)\d+(?:_(?:pty|ltd|group|co))+$", re.IGNORECASE)
 
 
 def email_rule_for(real: str, rules: Iterable[str]) -> str:
@@ -1012,10 +1018,17 @@ class Mapper:
         # no match can span a join. The slow scan runs only to name the culprit in the error.
         joined_tokens = "\x00".join(tokens)
         joined_reals = "\x00".join(reals)
+        # Compared ignoring case, as the matching does: "box" was let past a token "Client05_Box" (2026-10-23).
+        folded_tokens = joined_tokens.lower()
         for r in reals:
-            if r in joined_tokens:
-                bad = next(t for t in tokens if r in t)
-                raise MappingError(f"token {bad!r} contains real form; unsafe")
+            if r.lower() in folded_tokens:
+                # Only where the real would actually be FOUND inside the token by the outbound matching rule (a
+                # word or case edge each side): "AB" sits inside a token like "abwidgetbox" but runs on into
+                # "widget", so it is never matched there, and refusing it kept a two-letter name out (2026-10-23).
+                found = re.compile(_head(r[:1], "real") + re.escape(r) + _tail(r, "real"), re.IGNORECASE)
+                bad = next((t for t in tokens if r.lower() in t.lower() and found.search(t)), None)
+                if bad is not None:
+                    raise MappingError(f"token {bad!r} contains real form; unsafe")
         for t in tokens:
             if t in joined_reals:
                 raise MappingError(f"real form contains token {t!r}; unsafe")
@@ -1152,9 +1165,10 @@ class Mapper:
         self._rev_disguised_fold = {}
         for token in self._rev:
             spellings = _disguises(token)
-            if JOINED_SUFFIX_RE.match(token):
-                # Written before the suffix was joined (2026-10-15), or URL-encoded: "Client05 1a2b"
-                # and "Client05%201a2b" come back as the real, the second encoded the same way.
+            if JOINED_SUFFIX_RE.match(token) or JOINED_NAME_RE.match(token):
+                # Written before the suffix was joined (2026-10-15) or the name token was (2026-10-23), or
+                # URL-encoded: "Client05 1a2b", "Client05 Pty" and "Client05%201a2b" come back as the real, the
+                # last encoded the same way.
                 spellings += [(token.replace("_", " "), _as_written),
                               (token.replace("_", "%20"), _url_spaces)]
             for spelling, style in spellings:

@@ -20,8 +20,10 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("aicleaner.completion")
@@ -41,6 +43,10 @@ SYSTEM = ("You are a code completion engine inside a code editor. You are shown 
           "the code before or after it. Continue exactly from the cursor, matching the file's indentation and "
           "style. Prefer a short, complete step: the rest of the line, or a few lines that finish the block. If "
           "nothing useful fits, reply with an empty message.")
+# The services the editor can ask (spec 2026-10-23-editor-suggestion-services.md): `auto` takes the first signed in of
+# AUTO_ORDER (VS Code's own Copilot completions cannot be reached from aicleaner - GitHub refuses the token).
+SERVICES = ("auto", "off", "claude", "copilot", "copilot_filtered", "codex")
+AUTO_ORDER = ("claude", "copilot", "codex")
 PROSE = re.compile(r"^(here|sure|this|the |i |i'|certainly|okay|ok[,.]|to |you |note|based on)", re.I)
 FENCE = re.compile(r"^```[\w+-]*\s*\n?|\n?```\s*$")
 
@@ -123,6 +129,7 @@ class Worker:
 
         async def answer() -> str:
             assert self.process is not None and self.process.stdout is not None
+            said: list[str] = []          # the turn's assistant text: Copilot's and Codex's answer (their result is empty)
             while True:
                 line = await self.process.stdout.readline()
                 if not line:
@@ -131,10 +138,13 @@ class Worker:
                     event = json.loads(line)
                 except ValueError:
                     continue
+                if event.get("type") == "assistant":
+                    content = (event.get("message") or {}).get("content") or []
+                    said += [str(b.get("text") or "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
                 if event.get("type") == "result":
-                    if event.get("is_error"):
+                    if event.get("is_error") or event.get("subtype") == "error_during_execution":
                         raise RuntimeError(str(event.get("result") or "the model returned an error")[:300])
-                    return str(event.get("result") or "")
+                    return str(event.get("result") or "") or "".join(said)
 
         return await asyncio.wait_for(answer(), timeout)
 
@@ -157,10 +167,17 @@ class Completions:
     """The worker kept warm, one suggestion at a time, the latest request winning."""
 
     def __init__(self, claude: str, base_url: str, model: str = "haiku", recycle_after: int = RECYCLE_AFTER,
-                 idle_s: float = IDLE_S) -> None:
+                 idle_s: float = IDLE_S, service: str = "claude", agent_command: list[str] | None = None,
+                 agent_env: dict[str, str] | None = None) -> None:
         self.claude = claude
         self.base_url = base_url
         self.model = model
+        # Copilot and Codex (spec 2026-10-23-editor-suggestion-services.md): through aicleaner's agent bridge, which
+        # speaks Claude Code's stream-json; `agent_command` is the agent's own CLI and protocol flags, `agent_env` the
+        # forward proxy and certificate when it is filtered (nothing when it is Copilot unfiltered).
+        self.service = service
+        self.agent_command = agent_command or []
+        self.agent_env = agent_env or {}
         self.recycle_after = recycle_after
         self.idle_s = idle_s
         self._worker: Worker | None = None
@@ -174,12 +191,34 @@ class Completions:
         self.last_error = ""
         self.last_ms = 0
 
+    @property
+    def bridged(self) -> bool:
+        return self.service != "claude"
+
     def command(self) -> list[str]:
+        if self.bridged:
+            agent = "codex" if self.service == "codex" else "copilot"
+            cmd = [sys.executable, "-m", "aicleaner.agents.bridge", "--agent", agent, "--print", "--verbose",
+                   "--output-format", "stream-json", "--input-format", "stream-json", "--permission-mode", "manual"]
+            # Copilot on this account takes only "auto" (measured 2026-10-23); Codex keeps its own default.
+            return cmd + (["--model", "auto"] if agent == "copilot" else [])
         cmd = [self.claude, "--print", "--input-format", "stream-json", "--output-format", "stream-json",
                "--verbose", *ISOLATION, "--system-prompt", SYSTEM]
         return cmd + (["--model", self.model] if self.model else [])
 
+    def wrap(self, prompt: str) -> str:
+        """The bridge takes no system prompt, so its agent gets the instructions in the prompt itself."""
+        return f"{SYSTEM}\n\n{prompt}" if self.bridged else prompt
+
     def env(self) -> dict[str, str]:
+        if self.bridged:
+            env = {k: v for k, v in os.environ.items()
+                   if k.upper() not in ("HTTPS_PROXY", "HTTP_PROXY", "NODE_EXTRA_CA_CERTS", "CODEX_CA_CERTIFICATE")}
+            env.update(self.agent_env)
+            env["AICLEANER_AGENT_COMMAND"] = json.dumps(self.agent_command)
+            env["AICLEANER_AGENT_TRANSCRIPTS"] = ""        # suggestions are not conversations: nothing filed
+            env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent)
+            return env
         env = dict(os.environ)
         env["ANTHROPIC_BASE_URL"] = self.base_url
         # The proxy knows the request by this: no footer, no marks, no origin note, labelled in the evidence log.
@@ -229,7 +268,7 @@ class Completions:
             started = time.monotonic()
             try:
                 worker = await self._current()
-                text = await worker.ask(prompt)
+                text = await worker.ask(self.wrap(prompt))
             except (RuntimeError, asyncio.TimeoutError, OSError) as exc:
                 self.failed += 1
                 self.last_error = str(exc) or type(exc).__name__
@@ -263,4 +302,4 @@ class Completions:
     def summary(self) -> dict[str, Any]:
         return {"answered": self.answered, "superseded": self.superseded, "failed": self.failed,
                 "last_error": self.last_error, "last_ms": self.last_ms, "warm": bool(self._worker and self._worker.alive),
-                "model": self.model}
+                "model": self.model if self.service == "claude" else "", "service": self.service}

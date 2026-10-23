@@ -3,7 +3,12 @@
 // Enter is a new line and never sends; Tab indents; Ctrl+Enter adds; Escape cancels (twice when
 // something was typed, so a stray key does not throw it away).
 import { h } from './dom.js';
+import { loadMonaco, monacoReady, MonacoBox } from './monacoedit.js';
 import { LANGUAGES, MAX_LINES } from './snippets.js';
+
+// 139 part 3: the snippet languages as the VS Code editor names them.
+const MONACO = { text: 'plaintext', bash: 'shell' };
+const monacoOf = (lang) => MONACO[lang] || lang || 'plaintext';
 
 const INDENT = { powershell: '    ', python: '    ', csharp: '    ', sql: '    ' };
 
@@ -20,6 +25,7 @@ export function codeEditor({ slot, pane, say }) {
   let current = null;
 
   const close = () => {
+    if (current && current.box && current.box.dispose) current.box.dispose();
     current = null;
     slot.replaceChildren();
     slot.hidden = true;
@@ -27,7 +33,80 @@ export function codeEditor({ slot, pane, say }) {
   };
 
   // { code, lang, firstLine, title, update, onDone(code, lang), onCancel(), onChange(state) }
+  // The VS Code editor is waited for when it is still loading (the page starts it as it opens), so the box is the
+  // same every time; the plain box only where it cannot load.
   const open = (options) => {
+    if (monacoReady()) { openMonaco(options); return; }
+    loadMonaco().then((module) => (module ? openMonaco(options) : openPlain(options)));
+  };
+
+  // 139 part 3: the VS Code editor in the prompt's place - compact (no minimap), the snippet's language, numbered
+  // from its first line; Enter is a new line, Ctrl+Enter adds, Escape cancels (twice once something was typed).
+  const openMonaco = (options) => {
+    const first = Number(options.firstLine) > 0 ? Number(options.firstLine) : 1;
+    const host = h('div', { class: 'code-editor-box monaco-code-box', role: 'textbox',
+      'aria-label': options.title || 'Code snippet' });
+    const select = h('select', { class: 'code-editor-lang', 'aria-label': 'Language' },
+      ...LANGUAGES.map(([value, label]) => h('option', { value, selected: value === (options.lang || 'text') }, label)));
+    if (options.lang && !LANGUAGES.some(([value]) => value === options.lang)) {
+      select.append(h('option', { value: options.lang, selected: true }, options.lang));
+    }
+    const hint = h('span', { class: 'hint code-editor-hint' }, 'Ctrl+Enter adds it; Escape cancels');
+    const done = h('button', { type: 'button', class: 'primary code-editor-done' },
+      options.update ? 'Update snippet' : 'Add snippet to prompt');
+    const cancel = h('button', { type: 'button', class: 'btn code-editor-cancel' }, 'Cancel');
+    slot.replaceChildren(
+      h('div', { class: 'code-editor-head' }, h('strong', {}, options.title || 'Code snippet'), select),
+      h('div', { class: 'file-editor-frame code-editor-frame monaco' }, host),
+      h('div', { class: 'form-row code-editor-actions' }, done, cancel, hint));
+    slot.hidden = false;
+    pane.classList.add('coding');
+    const box = new MonacoBox(host, options.code || '', 'snippet', { compact: true, language: monacoOf(options.lang),
+      firstLine: first });
+    const original = box.value;
+    let armed = false;
+    const state = () => ({ code: box.value, lang: select.value });
+    const finish = () => {
+      if (box.value.split('\n').length > MAX_LINES) {
+        say(`That is over ${MAX_LINES} lines - ask Claude to read the file instead.`, 'warn');
+        return;
+      }
+      const result = state();
+      close();
+      options.onDone(result.code, result.lang);
+    };
+    const abandon = () => { close(); if (options.onCancel) options.onCancel(); };
+    box.addEventListener('input', () => {
+      armed = false;
+      hint.textContent = 'Ctrl+Enter adds it; Escape cancels';
+      if (options.onChange) options.onChange(state());
+    });
+    select.addEventListener('change', () => {
+      box.setLanguage(monacoOf(select.value));
+      if (options.onChange) options.onChange(state());
+    });
+    box.bindKey((mod, key) => mod.CtrlCmd | key.Enter, finish);
+    // Escape: the editor's own popups (suggestions, find) close first; with none open, it cancels.
+    box.addEventListener('keydown', (event) => {
+      if (event.key !== 'Escape' || host.querySelector('.suggest-widget.visible, .find-widget.visible')) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (box.value !== original && !armed) {
+        armed = true;
+        hint.textContent = 'Press Escape again to throw this away';
+        return;
+      }
+      abandon();
+    });
+    done.addEventListener('click', finish);
+    cancel.addEventListener('click', abandon);
+    current = { box };
+    box.focus();
+    const end = box.value.length;
+    box.setSelectionRange(end, end);
+  };
+
+  const openPlain = (options) => {
     const first = Number(options.firstLine) > 0 ? Number(options.firstLine) : 1;
     const box = h('textarea', { class: 'code-editor-box', wrap: 'off', spellcheck: 'false',
       'aria-label': options.title || 'Code snippet', placeholder: 'Paste or type the code here' });
