@@ -163,7 +163,7 @@ def check_usable(path: str | Path, roots: list[Path], what: str = "folder",
     if not roots:
         raise FolderOutside(
             f"no folders are allowed yet, so no {what} can be chosen. "
-            "Add one on this machine under Settings > Folders the pages may reach.")
+            "Add one on this machine under Settings > Remote access > Folders the pages can open.")
     target = _resolved(path)
     if not is_usable(target, roots):
         allowed = ", ".join(str(r) for r in roots)
@@ -181,7 +181,7 @@ def listing(path: str | Path | None, roots: list[Path]) -> dict:
     """
     if not roots:
         raise FolderOutside("no folders are allowed yet. Add one on this machine under "
-                            "Settings > Folders the pages may reach.")
+                            "Settings > Remote access > Folders the pages can open.")
     target = _resolved(path) if str(path or "").strip() else _common_top(roots)
     if not is_visible(target, roots):
         raise FolderOutside(f"{target} is outside the folders these pages may reach")

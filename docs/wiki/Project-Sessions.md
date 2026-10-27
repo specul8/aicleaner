@@ -30,7 +30,7 @@ folder - never in the shared client folder, because a profile names folders on *
 | Standing brief | Text sent with the first prompt of each session, for example "Landing zone work for Contoso. Terraform only." |
 
 Folders must sit inside the allowed folder locations (`folders.roots`, set in
-[Folders the pages may reach](Settings.md#card-folders)). A profile naming a client that is not in the mapping is refused when you
+[Folders the pages can open](Settings.md#card-folders)). A profile naming a client that is not in the mapping is refused when you
 save it. Edits to a profile apply from the session's next start.
 
 **Naming a session does not narrow the filter.** Every client's names are replaced in every

@@ -40,7 +40,7 @@ people (DECISIONS 51 and 67).
 
 1. In OneDrive on the web, open the shared folder and choose **Add shortcut to My files**.
 2. On Client Filters, press **Joined a shared client?** and pick that folder (it must be under one of
-   the folders the pages may reach - see [Folders the pages may reach](Settings.md#card-folders)). This works on the machine itself
+   the folders the pages may reach - see [Folders the pages can open](Settings.md#card-folders)). This works on the machine itself
    only, not through the tunnel.
 3. Paste the key you were sent into the **Client key** card and press **Enter key**.
 

@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,8 +78,18 @@ class ClientReport:
 
 
 def _read(p: Path) -> Any:
+    # A read that lands while a save swaps the file in (os.replace) can meet a Windows sharing violation for a moment;
+    # a local tool polling a client file while its page saves it hit exactly that (2026-10-26). Tried again briefly.
+    for attempt in range(5):
+        try:
+            text = p.read_text(encoding="utf-8-sig")
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (attempt + 1))
     try:
-        return json.loads(p.read_text(encoding="utf-8-sig"))
+        return json.loads(text)
     except json.JSONDecodeError as exc:
         raise MappingError(f"{p.name} is not valid JSON: {exc}") from exc
 
@@ -142,6 +153,49 @@ def _check_label(label: Any) -> str:
     if len(label) > 80 or any(ord(ch) < 32 for ch in label):
         raise MappingError("a display name is up to 80 characters with no control characters")
     return label
+
+
+# A system's name is a word or two ("ConnectWise", "Xero AU"), not free text: tooling asks for it by name.
+EXTERNAL_SYSTEM_RE = re.compile(r"^[A-Za-z0-9 ._-]{1,40}$")
+EXTERNAL_NAME_MAX = 200
+
+
+def _check_system(system: Any) -> str:
+    system = str(system or "").strip()
+    if not EXTERNAL_SYSTEM_RE.match(system):
+        raise MappingError(f"{system!r} is not a system name: up to 40 letters, digits, spaces, dots, "
+                           "hyphens and underscores")
+    return system
+
+
+def _clean_external_names(mapping: Any) -> dict[str, str]:
+    """{system: name} as it will be stored: trimmed, empty pairs dropped, one name per system."""
+    if not isinstance(mapping, dict):
+        raise MappingError("names in other systems are an object of system to name")
+    clean: dict[str, str] = {}
+    for system, name in mapping.items():
+        if name is not None and not isinstance(name, str):
+            raise MappingError(f"the name for {system!r} must be text")
+        name = (name or "").strip()
+        if not str(system or "").strip() or not name:
+            continue
+        system = _check_system(system)
+        if len(name) > EXTERNAL_NAME_MAX or any(ord(ch) < 32 or ord(ch) == 127 for ch in name):
+            raise MappingError(f"the name for {system} is up to {EXTERNAL_NAME_MAX} characters with no "
+                               "control characters")
+        if any(k.lower() == system.lower() for k in clean):
+            raise MappingError(f"{system} is listed twice; a client has one name in each system")
+        clean[system] = name
+    return dict(sorted(clean.items(), key=lambda kv: kv[0].lower()))
+
+
+def _stored_external_names(value: Any) -> dict[str, str]:
+    """What a client file holds, read forgivingly: a file edited by hand never fails to load over
+    this, the pairs that are not text are simply not offered."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(k).strip(): v.strip() for k, v in value.items()
+            if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()}
 
 
 def _safe_kind(real: str) -> str:
@@ -967,6 +1021,9 @@ class MappingStore:
         kept_ignore = sorted({v for v in ignore if isinstance(v, str)}) if isinstance(ignore, list) else []
         if kept_ignore:
             rebuilt["ignore"] = kept_ignore
+        external = _stored_external_names(_recover_value(text, "external_names"))
+        if external:
+            rebuilt["external_names"] = external
 
         # A recovered entry can be readable and still unusable - a token that contains a real,
         # a duplicate, a shape that no longer validates. Drop those one at a time rather than
@@ -1051,6 +1108,9 @@ class MappingStore:
                 "email_rules": email_rules,
                 # The repo that carries this engagement's agent tooling, by name (D41).
                 "primary_repo": str(doc.get("primary_repo") or ""),
+                # Names in other systems (feature 150): the card edits them, so the page needs them -
+                # the loopback-only GET is for tooling, not for the page, which is also used remotely.
+                "external_names": _stored_external_names(doc.get("external_names")),
                 "ignore": list(doc.get("ignore", []) or []),
                 "source": source, "file": p.name}
 
@@ -1699,6 +1759,69 @@ class MappingStore:
             client.pop("primary_repo", None)
         self._validate_then_write(path, doc)
 
+    # ---- names in other systems (feature 150) ------------------------------------------------
+    #
+    # What the client is called in another system - a ticketing or billing system - so local tooling
+    # can find the client there from the name aicleaner knows it by. Read over loopback only (ui.py).
+
+    def get_external_names(self, cid: str) -> dict[str, str]:
+        """The client's names in other systems, {system: name}; {} for a file that has none."""
+        _path, _doc, client = self._client_doc(cid)
+        return _stored_external_names(client.get("external_names"))
+
+    def external_names_for(self, system: str) -> list[dict[str, str]]:
+        """Every client with a name in `system` (matched without regard to case), as
+        {client, label, name}, in client-id order. A client whose file cannot be read is left out."""
+        system = _check_system(system)
+        found = []
+        for client in self.load_tolerant(record=False)[0].data["clients"]:
+            cid = str(client.get("id", ""))
+            if cid == GLOBAL_ID:
+                continue
+            names = {k.lower(): v for k, v in _stored_external_names(client.get("external_names")).items()}
+            if system.lower() in names:
+                found.append({"client": cid, "label": str(client.get("label") or cid),
+                              "name": names[system.lower()]})
+        return sorted(found, key=lambda c: c["client"].lower())
+
+    def set_external_names(self, cid: str, mapping: Any, source: str = "") -> dict[str, Any]:
+        """Replace the client's names in other systems, then add each name that is not yet one of its
+        entries - it is the client's own real name, so it has to be tokenised like the others.
+
+        The names are saved whatever happens to the entries: a name the mapping refuses (another
+        client has it, it holds shell text) is reported per name in `refused`, and the lookup the
+        tooling needs still works. A name Global has is not added either - Global wins, so it is
+        already tokenised, and a copy here would only be a locked duplicate."""
+        cid = self._check_id(cid)
+        if cid == GLOBAL_ID:
+            raise MappingError("Global is not a client anyone else knows by name; names in other "
+                               "systems belong on a client")
+        clean = _clean_external_names(mapping)
+        path, doc, client = self._client_doc(cid)
+        if clean:
+            client["external_names"] = clean
+        else:
+            client.pop("external_names", None)
+        self._validate_then_write(path, doc)
+        have = {str(f.get("real", "")).lower() for f in client.get("forms", []) or [] if isinstance(f, dict)}
+        global_reals = self._global_reals()
+        added: list[str] = []
+        refused: list[dict[str, str]] = []
+        for name in dict.fromkeys(clean.values()):
+            if name.lower() in have:
+                continue
+            if name.lower() in global_reals:
+                refused.append({"name": name, "why": "it is in Global, which wins: it is already tokenised there"})
+                continue
+            try:
+                self.add_form(cid, name, source=source)
+            except MappingError as exc:
+                refused.append({"name": name, "why": str(exc)})
+                continue
+            added.append(name)
+            have.add(name.lower())
+        return {"external_names": clean, "added": added, "refused": refused}
+
     def update_form(self, cid: str, real: str, new_real: str | None = None, new_token: str | None = None,
                     new_kind: str | None = None, new_match: Any = _UNSET) -> str:
         """Edit an entry in place (inline edit, or fixing a rejected row). A changed real without an
@@ -1757,6 +1880,31 @@ class MappingStore:
                 form["match"] = rule.as_json()
         self._validate_then_write(path, doc)
         return form.get("token") or client_tokens({**client, "id": cid})[target]
+
+    def declared_real(self, cid: str, real: str) -> str:
+        """The entry as the client file spells it, for text found in another case. The canary
+        matches case variants too, so what it found ("az") may not be what was declared ("AZ")."""
+        _path, _doc, client = self._client_doc(cid)
+        reals = [str(f.get("real", "")) for f in (client or {}).get("forms", []) or [] if isinstance(f, dict)]
+        if real in reals:
+            return real
+        same = [r for r in reals if r.lower() == real.lower()]
+        if not same:
+            raise MappingError(f"{real!r} is not a form of {cid}")
+        return same[0]
+
+    def set_whole_word(self, cid: str, real: str, on: bool) -> str:
+        """Turn "whole word only" on or off for one entry, keeping whatever else its rule says."""
+        real = self.declared_real(cid, real)
+        _path, _doc, client = self._client_doc(cid)
+        form = next(f for f in client.get("forms", []) if f.get("real") == real)
+        rule = parse_match(form.get("match"))
+        merged = {} if rule is None else rule.as_json()
+        merged = {"cased": True} if merged == "cased" else dict(merged)
+        merged.pop("whole_word", None)
+        if on:
+            merged["whole_word"] = True
+        return self.update_form(cid, real, new_match=merged or None)
 
     def rederive_form(self, cid: str, real: str) -> str:
         """Throw away this entry's stored token and derive it again under today's rules.

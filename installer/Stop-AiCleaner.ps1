@@ -17,7 +17,7 @@
 
 .NOTES
     Contact:       see contact-*.json stored alongside this script
-    Last-modified: 2026-10-19
+    Last-modified: 2026-10-24
     Requires:      Windows PowerShell 5.1 or PowerShell 7+
 #>
 
@@ -106,21 +106,8 @@ Write-ContactAttribution
 # A deliberate stop (route B's watchdog, Watch-AiCleaner.ps1, leaves aicleaner stopped while this is here).
 # Start-AiCleaner removes it. Claude Desktop's chat stays failing closed meanwhile: Disable is the way to send it
 # out unfiltered on purpose.
-# Feature 107: running as SYSTEM, nothing run as you can stop it - it is asked to restart instead, and its launcher
-# starts it again 5 seconds later (with new code after an update). To stop it for good, turn the service off.
-try {
-    $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 3 -ErrorAction Stop
-    if ($health.PSObject.Properties['service'] -and $health.service -eq 'system') {
-        if ($PSCmdlet.ShouldProcess('aicleaner (service)', 'Restart')) {
-            Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/restart" -ContentType 'application/json' -Body '{}' -TimeoutSec 10 | Out-Null
-            Write-Host '==> aicleaner runs as a service: it was restarted (its launcher starts it again in a few seconds). Turn the service off in Settings to stop it.' -ForegroundColor Green
-        }
-        exit 0
-    }
-} catch {
-    Write-Verbose "not answering, or not a service: $($_.Exception.Message)"
-}
-
+# Feature 107: the start-up task's launcher loop (Run-AiCleanerService.ps1) reads the same marker - it starts aicleaner
+# again after it stops unless the marker is there, so writing it first makes this a stop, not a restart.
 $stoppedMarker = Join-Path $env:USERPROFILE '.aicleaner\stopped-on-purpose'
 if ($PSCmdlet.ShouldProcess($stoppedMarker, 'Mark aicleaner as stopped on purpose')) {
     try { Set-Content -LiteralPath $stoppedMarker -Value (Get-Date -Format o) -ErrorAction Stop }
@@ -186,6 +173,33 @@ if (-not $proc) { Write-Host "==> Port $Port is held by pid $($conn.OwningProces
 if ($proc.ProcessName -notlike 'python*') {
     Write-Warning "Port $Port is held by $($proc.ProcessName) (pid $($proc.Id)), not aicleaner; not stopping it"
     exit 1
+}
+# Feature 107: started with the computer, aicleaner runs in another Windows logon session, and a process there cannot
+# be ended from this one ("Access is denied" - the 2026-10-25 live test). It is asked to end itself instead, through
+# its own restart (which in this mode is the process leaving); the launcher sees stopped-on-purpose and stops too.
+$health = $null
+try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 5 -ErrorAction Stop } catch { $health = $null }
+if ($health -and $health.PSObject.Properties['service'] -and [string]$health.service) {
+    if ($PSCmdlet.ShouldProcess("pid $($proc.Id) (started with the computer)", 'Ask aicleaner to stop')) {
+        try {
+            Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/restart" -ContentType 'application/json' `
+                -Body '{}' -TimeoutSec 10 -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Warning "aicleaner did not take the request to stop: $($_.Exception.Message)"
+            exit 1
+        }
+        $until = (Get-Date).AddSeconds(20)
+        while ((Get-Date) -lt $until -and (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
+            Start-Sleep -Milliseconds 500
+        }
+        if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+            Write-Warning "aicleaner was asked to stop but still holds port $Port"
+            exit 1
+        }
+        Write-Host "==> aicleaner stopped (was pid $($proc.Id), started with the computer)" -ForegroundColor Green
+        Remove-CopilotProxy
+    }
+    exit 0
 }
 if ($PSCmdlet.ShouldProcess("pid $($proc.Id) ($($proc.ProcessName))", 'Stop aicleaner proxy')) {
     Stop-Process -Id $proc.Id -Force

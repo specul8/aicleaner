@@ -10,7 +10,12 @@ API (JSON; writes need Content-Type application/json):
   POST /api/clients/<id>/key               {action: generate|enter|rotate, key?}; local only
   POST /api/clients/<id>/held              {accept: bool} - a held change, reviewed
   POST /api/mcp/approve                    {pattern} - real names for a remote MCP server; local only
+  GET  /api/service                        the start-up task as you (feature 107): mode, state, password_problem
+  POST /api/service                        {on} set it up or take it away (elevated script on this machine); local only
   POST /api/clients/<id>/salvage           rebuild from the entries still readable in a broken file
+  GET  /api/clients/<id>/external-names    {client, external_names} its names in other systems; this machine only
+  POST /api/clients/<id>/external-names    {external_names} replace them; names not yet entries are added (F150)
+  GET  /api/external-names?system=<s>      {system, clients[{client, label, name}]}; this machine only
   GET  /api/clients/<id>/share             that client's OneDrive share, and where OneDrive is
   POST /api/clients/<id>/share             {path} use a folder, {create: true} make one, {path: ""} forget it
   GET  /api/session                        every profile, and the state of each session (?name=)
@@ -31,6 +36,10 @@ API (JSON; writes need Content-Type application/json):
   GET  /api/session/events                 server-sent events for one session (?name=)
   GET  /api/session/profiles               the profiles, and the clients one can be pointed at
   POST /api/session/profiles               {profiles: [...]} replace them (validate, then commit)
+  GET  /api/session/presets                Start Work / Start Personal and the current run (feature 152)
+  POST /api/session/presets                {presets: [...]} save them, at most max_running - 1 projects each
+  POST /api/session/preset/go              {id} start a run: the set started, the rest stopped when idle
+  POST /api/session/preset/cancel          end the run; sessions asked to finish are no longer stopped
   GET  /api/candidates                     pending review items
   POST /api/candidates/resolve             {value, action: map|ignore, client?, index?, real?}
   POST /api/candidates/public              {value} the same in every tenant: ignore it everywhere
@@ -43,6 +52,8 @@ API (JSON; writes need Content-Type application/json):
   POST /api/mapping/form/from-global       {real, to}   Global gives it back: unlocks, or moves
   POST /api/mapping/form/move              {client, real, to}   never into Global
   POST /api/mapping/client/label           {id, label}   display name (empty clears it)
+  POST /api/mapping/form/whole-word        {client, real, on}  "whole word only" on one entry
+  POST /api/canary/ignore                  {client, real, scope}  a canary match's entry, ignored
   POST /api/mapping/form/update            {client, real, new_real?, new_token?, new_kind?,
                                            match?}  match absent = leave the rule alone,
                                            null = remove it (feature 23)
@@ -128,6 +139,12 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # time, each one logged with its context and the person who turned it on.
                    "canary.fail_open",
                    "highlight.terminal", "session.enabled", "session.max_running", "session.auto_titles", "update.auto",
+                   "session.job_cleanup", "session.max_processes", "session.max_memory_gb",
+                   "session.show_thinking", "session.turn_summary",
+                   "session.idle_offer_hours",
+                   # Start Work and Start Personal (feature 152): which sessions a Go starts, like the other
+                   # session settings; nothing on the machine is touched by saving them.
+                   "session.presets",
                    "detect.auto_map_client_resources",
                    "detect.near_miss", "detect.placeholder_kinds",
                    # Accepted from Review's offer, which is where triage happens - on the phone as
@@ -168,10 +185,12 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "session.casual_folder",
                    # Settings review rows 13, 14 and 42 (Brad, 2026-10-20, "as proposed"): none prompts on the
                    # machine. The rename-collapse guard and remote.enabled stay local.
-                   "claude.bash_guard", "codetab.enabled", "codetab.port", "claude.deliver_between_tools")
+                   "claude.bash_guard", "codetab.enabled", "codetab.port", "claude.deliver_between_tools",
+                   # Your own words for a setting (feature 153): they only help "Find a setting" find a card.
+                   "ui.setting_keywords")
 LOCAL_ONLY_SETTINGS = tuple(k for k in Config.EDITABLE if k not in REMOTE_SETTINGS)
 from .mapping import (GLOBAL_ID, SOURCE_MANUAL, SOURCE_REVIEW, MappingError)
-from . import bashguard, rules
+from . import bashguard, lifecycle, rules
 from .models import ModelList
 from .restart import RestartError, restart
 from .store import _UNSET, MappingStore
@@ -187,6 +206,22 @@ model_list = ModelList()
 REMOTE_IDENTITIES = ("Cloudflare", "OneTimePin", "Google", "Microsoft", "GitHub")
 REMOTE_NEEDS_CLIENT = ("Google", "Microsoft", "GitHub")
 
+
+def deliver_lead(count: int, turn_summary: bool) -> str:
+    """What comes before messages handed to Claude between tool calls (feature 119).
+
+    With session.turn_summary (Brad, 2026-10-27): Claude answers what was sent meanwhile in its summary when the task is
+    done - unless the message asks for something now ("quickly do x, then carry on", "write script x now"), which it
+    does at once, says so in a line, and goes back to the task."""
+    them = "this message" if count == 1 else "these messages"
+    if not turn_summary:
+        return (f"The user sent {them} while you were working - read {'it' if count == 1 else 'them'} now and take "
+                f"{'it' if count == 1 else 'them'} into account before you continue:")
+    return (f"The user sent {them} while you were working. Turn summary is on: take {'it' if count == 1 else 'them'} "
+            "into account, but do not stop to reply - carry on with the task and answer in your summary when the task "
+            "is complete. The exception is a message that asks for something now (for example \"quickly change x, "
+            "then continue\", \"write script y now\", \"stop\"): do that first, say so in one line, then go back "
+            "to the task:")
 
 def remote_setup_command(shell: str, script: Path | str, hostname: str, email: str, identity: str = "OneTimePin",
                          client_id: str = "", account_kind: str = "", directory: str = "",
@@ -650,6 +685,94 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(problem)
         proxy.reload_profiles()
         return web.json_response({"ok": True, "folder": folder})
+
+    # ---- Start Work and Start Personal (feature 152) --------------------------------------------
+
+    def _presets_view(host) -> dict[str, Any]:
+        from .presets import limit_for, runner_of
+
+        return {"presets": proxy.cfg.session_presets, "max_running": host.max_running,
+                "limit": limit_for(host.max_running), "profiles": [p.name for p in host.profiles],
+                **runner_of(host).state()}
+
+    async def presets_get(request: web.Request) -> web.Response:
+        """The two panels and the current run, if any. Sessions switched off: no panels, and no error - the page asks
+        on every visit, and the Session page already says it is off."""
+        from .session import SessionError
+
+        try:
+            return web.json_response(_presets_view(session_host()))
+        except SessionError:
+            return web.json_response({"presets": [], "run": None, "finishing": {}, "active": False, "profiles": [],
+                                      "max_running": 0, "limit": None})
+
+    async def presets_save(request: web.Request) -> web.Response:
+        """Save the panels: every project a known profile, at most max_running - 1 each."""
+        from .presets import PresetError
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        body = await request.json()
+        wanted = body.get("presets")
+        names = {p.name.lower(): p.name for p in host.profiles}
+        try:
+            for entry in wanted if isinstance(wanted, list) else []:
+                if isinstance(entry, dict) and isinstance(entry.get("profiles"), list):
+                    unknown = [str(n) for n in entry["profiles"] if str(n).strip().lower() not in names]
+                    if unknown:
+                        raise PresetError(f"no project session called {', '.join(unknown)}")
+                    entry["profiles"] = [names[str(n).strip().lower()] for n in entry["profiles"]]
+            proxy.cfg.update_settings({"session.presets": wanted})
+        except ValueError as problem:
+            return err(problem)
+        return web.json_response(_presets_view(host))
+
+    async def _before_preset_start(name: str) -> None:
+        """What a page Start does first: the MCP audit (H11), and no start on a machine short of memory (S2) -
+        the page can ask; a run cannot, so it says why and that session is not started."""
+        from .session import SessionError
+
+        await proxy.audit_mcp()
+        memory = await asyncio.to_thread(lifecycle.proctree.memory)
+        if lifecycle.low_memory(memory):
+            free = (memory["commit_limit_mb"] - memory["commit_mb"]) / 1024
+            raise SessionError(f"memory is nearly full ({free:.1f} GB left) - stop a session, then start it by hand")
+
+    async def preset_go(request: web.Request) -> web.Response:
+        """Go: the panel's set started, the rest stopped when idle (feature 152)."""
+        from .presets import runner_of
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        body = await request.json()
+        pid = str(body.get("id", "")).strip().lower()
+        preset = next((p for p in proxy.cfg.session_presets if p["id"] == pid), None)
+        if preset is None:
+            return err(ValueError(f"no panel called {pid or '(blank)'}"))
+        if not preset["profiles"]:
+            return err(ValueError(f"{preset['name']} has no projects yet - choose them with ..."))
+        runner = runner_of(host)
+        runner.before_start = _before_preset_start
+        runner.go(preset["id"], preset["name"], preset["profiles"])
+        return web.json_response(_presets_view(host))
+
+    async def preset_cancel(request: web.Request) -> web.Response:
+        """End the run; sessions asked to finish are no longer stopped by aicleaner."""
+        from .presets import runner_of
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        runner_of(host).cancel()
+        return web.json_response(_presets_view(host))
 
     # ---- worktree sessions (DECISIONS 66, feature 86) -------------------------------------------
 
@@ -1729,6 +1852,16 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if proxy is not None:
             # A session may open a project whose .mcp.json is new: audit before it starts (H11).
             await proxy.audit_mcp()
+        # Stability spec S2: short of memory, a start asks first - another session is what took the machine down
+        # twice on 2026-10-24. The page shows the numbers and starts anyway when told to.
+        if not body.get("low_memory_ok"):
+            memory = await asyncio.to_thread(lifecycle.proctree.memory)
+            if lifecycle.low_memory(memory):
+                free = (memory["commit_limit_mb"] - memory["commit_mb"]) / 1024
+                return web.json_response(
+                    {"error": f"Memory is nearly full: {free:.1f} GB of {memory['commit_limit_mb'] / 1024:.0f} GB left.",
+                     "why": "Another session would take more. Stop a session you are not using first, or start anyway.",
+                     "offer": {"action": "start_low_memory", "label": "Start anyway", **memory}}, status=409)
         try:
             state = await session_host().start(name=str(body.get("name", "")),
                                                project=str(body.get("project", "")),
@@ -1914,10 +2047,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         taken = session.take_waiting(str(body.get("session_id", ""))) if session is not None else []
         if not taken:
             return web.json_response({"ok": True, "text": ""})
-        lead = ("The user sent this message while you were working - read it now and take it into "
-                "account before you continue:" if len(taken) == 1 else
-                "The user sent these messages while you were working - read them now and take them "
-                "into account before you continue:")
+        lead = deliver_lead(len(taken), bool(proxy is not None and proxy.cfg.session_turn_summary))
         find = getattr(session, "origin_of", None)
         origin = find(str(body.get("session_id", ""))) if find else ""
         return web.json_response({"ok": True, "text": "\n\n".join([lead, *taken, *([origin] if origin else [])])})
@@ -2496,6 +2626,46 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except (MappingError, KeyError, ValueError) as exc:
             return err(exc)
 
+    async def whole_word(request: web.Request) -> web.Response:
+        """The entry's "whole word only" checkbox, and the canary fix on the Log page."""
+        body = await request.json()
+        try:
+            mf.set_whole_word(str(body["client"]), str(body["real"]), bool(body.get("on", True)))
+            return web.json_response({"ok": True})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def canary_ignore(request: web.Request) -> web.Response:
+        """The Log page's other canary fix: the entry the canary matched, ignored for its client or
+        everyone. The match may be a case variant, so the entry is looked up as the file spells it."""
+        body = await request.json()
+        try:
+            cid = str(body["client"])
+            real = mf.declared_real(cid, str(body["real"]))
+            mf.form_to_ignore(cid, real, str(body.get("scope", "global")))
+            store.add_ignore(real)
+            return web.json_response({"ok": True, "real": real})
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+
+    async def processes(request: web.Request) -> web.Response:
+        """Settings > Diagnostics > Processes: memory, each session's process tree as its job counts it, processes
+        left behind, the last pause, and the lifecycle log's recent events (spec 2026-10-24-session-lifecycle-
+        instrumentation.md). ?fresh=1 takes a new look instead of the last 5-minute one."""
+        monitor = proxy.lifecycle
+        snap: dict[str, Any] = {}
+        if monitor is not None:
+            if request.query.get("fresh") == "1" or not monitor.last_snapshot:
+                snap = await asyncio.to_thread(monitor.snapshot)
+            else:
+                snap = monitor.last_snapshot
+        wanted = ("session-start", "stop-requested", "stop-result", "kill", "limit-hit", "cli-exit", "broker-hold",
+                  "broker-hold-timeout", "broker-exit", "pause", "orphan", "gone", "proxy-start", "proxy-stop")
+        events = await asyncio.to_thread(lifecycle.read, Path(proxy.cfg.log_dir), 2, wanted, 60) if monitor else []
+        return web.json_response({"on": monitor is not None, "job_cleanup": lifecycle.job_cleanup,
+                                  "max_processes": lifecycle.max_processes, "max_memory_mb": lifecycle.max_memory_mb,
+                                  "snapshot": snap, "events": events})
+
     async def move_ignore(request: web.Request) -> web.Response:
         body = await request.json()
         try:
@@ -2926,6 +3096,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             if proxy.session is not None:
                 proxy.session.max_running = proxy.cfg.session_max_running
                 proxy.session.auto_titles = proxy.cfg.session_auto_titles
+                proxy.session.idle_offer_hours = proxy.cfg.session_idle_offer_hours
+            lifecycle.job_cleanup = proxy.cfg.session_job_cleanup     # new sessions from now on
+            lifecycle.set_limits(proxy.cfg.session_max_processes, proxy.cfg.session_max_memory_gb)
             # One control (feature 36). The setting governs the pipe and the CLAUDE.md rule
             # governs the agent, and only the rule is in front of the model - so leaving them to
             # disagree meant the setting appeared to do nothing. Flipping it rewrites the block.
@@ -2988,9 +3161,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     async def restart_proxy(request: web.Request) -> web.Response:
         if proxy is None or proxy.cfg.path is None:
             return err(ValueError("this proxy was not started from an installed config; restart it by hand"))
-        if getattr(proxy, "service", "") == "system":
-            # Feature 107: run as SYSTEM by its launcher, which starts it again 5 seconds after it stops - so a restart
-            # (and an update's) is this process ending. Nothing running as you could stop a SYSTEM process.
+        if getattr(proxy, "service", ""):
+            # Feature 107: run by the start-up task's launcher loop, which starts it again 5 seconds after it stops -
+            # so a restart is this process ending. Stop-AiCleaner would also end the loop (stopped on purpose).
             asyncio.get_running_loop().call_later(0.5, lambda: os._exit(0))
             return web.json_response({"ok": True, "log": "", "service": True})
         try:
@@ -2998,6 +3171,46 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except RestartError as exc:
             return err(exc, status=409)
         return web.json_response({"ok": True, "log": str(log_path)})
+
+    # ---- starting with the computer, as you (feature 107, decided 2026-10-24) ----------------------------
+
+    def _app_root() -> Path | None:
+        if proxy is None or proxy.cfg.path is None:
+            return None
+        return proxy.cfg.path.parent
+
+    async def service_get(request: web.Request) -> web.Response:
+        """The start-up task's state, read without elevation. Shown remotely too - the switch is locked there."""
+        from . import service as service_module
+        root = _app_root()
+        found = (await asyncio.to_thread(service_module.state, root)) if root is not None else service_module.off()
+        found["running_as_service"] = bool(getattr(proxy, "service", ""))
+        found["elevated"] = getattr(proxy, "_elevated", None)        # this copy's own token (feature 107)
+        found["remote"] = bool(request.get(REMOTE))
+        return web.json_response(found)
+
+    async def service_set(request: web.Request) -> web.Response:
+        """Turn it on or off: the elevated script, run on this machine. Local only - it needs an administrator
+        prompt and your password, both of which only someone at this machine can answer."""
+        from . import service as service_module
+        if request.get(REMOTE):
+            return err(ValueError("local only: starting aicleaner with the computer is changed at the machine where "
+                                  "it is deployed (an administrator prompt and your password are asked for there)"),
+                       status=403)
+        root = _app_root()
+        if root is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        try:
+            body = await request.json()
+        except ValueError:
+            return err(ValueError("expected JSON with on: true or false"))
+        if not isinstance(body, dict) or not isinstance(body.get("on"), bool):
+            return err(ValueError("expected JSON with on: true or false"))
+        try:
+            said = service_module.change(root, body["on"], proxy.cfg.port)
+        except service_module.ServiceError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True, "said": said})
 
     # ---- feedback (2026-10-16; spec 2026-10-16-feedback-design.md) ----------------------------------
 
@@ -3498,6 +3711,44 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except MappingError as exc:
             return err(exc, 404 if str(exc).startswith("unknown client") else 400)
 
+    # Names in other systems (feature 150). The reads are for tooling on this machine - a ticketing
+    # integration finding the client's company - and nothing on a phone has a use for them, so they
+    # are refused through remote access; the page gets the names with the client (client_view).
+    async def external_names_get(request: web.Request) -> web.Response:
+        if request.get(REMOTE):
+            return err(ValueError("names in other systems are read on this machine only"), status=403)
+        cid = request.match_info["cid"]
+        try:
+            names = await asyncio.to_thread(mf.get_external_names, cid)
+        except MappingError as exc:
+            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+        return web.json_response({"client": cid, "external_names": names})
+
+    async def external_names_by_system(request: web.Request) -> web.Response:
+        if request.get(REMOTE):
+            return err(ValueError("names in other systems are read on this machine only"), status=403)
+        system = request.query.get("system", "")
+        try:
+            clients = await asyncio.to_thread(mf.external_names_for, system)
+        except MappingError as exc:
+            return err(exc)
+        return web.json_response({"system": system.strip(), "clients": clients})
+
+    async def external_names_set(request: web.Request) -> web.Response:
+        """Replace them; each name not yet an entry is added as one (the result says which, and which
+        were refused). A client edit like any other, so it reaches remotely as they do."""
+        cid = request.match_info["cid"]
+        try:
+            body = await request.json()
+            answer = await asyncio.to_thread(mf.set_external_names, cid, body.get("external_names"),
+                                             SOURCE_MANUAL)
+        except (MappingError, ValueError, AttributeError) as exc:
+            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+        for name in answer["added"]:
+            _record_provenance(mf, cid, name, SOURCE_MANUAL,
+                               note="the client's name in another system, set on the Clients page")
+        return web.json_response({"ok": True, **answer})
+
     async def client_raw(request: web.Request) -> web.Response:
         try:
             return web.json_response(mf.raw(request.match_info["cid"]))
@@ -3711,6 +3962,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get(old, old_page)
     app.router.add_static("/web/", WEB, follow_symlinks=False, show_index=False)
     app.router.add_get("/api/status", status)
+    app.router.add_get("/api/diagnostics/processes", processes)
     app.router.add_get("/api/clients/{cid}", client_view)
     app.router.add_get("/api/clients/{cid}/raw", client_raw)
     app.router.add_post("/api/clients/{cid}/restore", client_restore)
@@ -3719,6 +3971,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/clients/{cid}/held", client_held)
     app.router.add_post("/api/mcp/approve", mcp_approve_server)
     app.router.add_post("/api/clients/{cid}/salvage", client_salvage)
+    app.router.add_get("/api/clients/{cid}/external-names", external_names_get)
+    app.router.add_post("/api/clients/{cid}/external-names", external_names_set)
+    app.router.add_get("/api/external-names", external_names_by_system)
     if proxy is not None:
         app.router.add_get("/api/clients/{cid}/share", client_share)
         app.router.add_get("/api/clients/{cid}/onedrive", client_onedrive)
@@ -3810,6 +4065,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get("/api/session/commands", session_commands)
         app.router.add_get("/api/session/profiles", session_profiles)
         app.router.add_post("/api/session/profiles", session_profiles_save)
+        app.router.add_get("/api/session/presets", presets_get)
+        app.router.add_post("/api/session/presets", presets_save)
+        app.router.add_post("/api/session/preset/go", preset_go)
+        app.router.add_post("/api/session/preset/cancel", preset_cancel)
     app.router.add_get("/api/candidates", candidates)
     app.router.add_post("/api/candidates/resolve", resolve)
     app.router.add_post("/api/candidates/restore", restore_candidates)
@@ -3831,6 +4090,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/mapping/client/archive", archive_client)
     app.router.add_post("/api/mapping/form/move", move_form)
     app.router.add_post("/api/mapping/form/ignore", form_to_ignore)
+    app.router.add_post("/api/mapping/form/whole-word", whole_word)
+    app.router.add_post("/api/canary/ignore", canary_ignore)
     app.router.add_post("/api/mapping/forms/ignore", forms_to_ignore)
     app.router.add_post("/api/ignore/move", move_ignore)
     app.router.add_get("/api/evidence", evidence)
@@ -3845,6 +4106,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/editor/services", editor_services)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)
+    app.router.add_get("/api/service", service_get)
+    app.router.add_post("/api/service", service_set)
     app.router.add_get("/api/feedback/state", feedback_get_state)
     app.router.add_post("/api/feedback/connect", feedback_connect)
     app.router.add_post("/api/feedback/disconnect", feedback_disconnect)

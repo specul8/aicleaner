@@ -44,7 +44,7 @@ VSCODE_NOTE = (f"{OPEN}Sent from Claude Code in VS Code or a terminal: either VS
                f"tell which.{CLOSE}")
 
 _SKIP = ("<command-name>", "<command-message>", "<local-command-stdout>", "<local-command-caveat>",
-         "<local-command-stderr>", "Caveat:")
+         "<local-command-stderr>", "Caveat:", "<task-notification>")
 
 
 def _typed(content: list) -> bool:

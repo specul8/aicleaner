@@ -119,7 +119,7 @@ A restart is needed after editing `aicleaner-config.json` (listen, port, upstrea
 ## Reporting a problem
 
 Send the `/healthz` output and the relevant evidence lines - both hold counts and settings, never
-content. The contact is shown in Settings, [Contact](Settings.md#card-contact).
+content. The contact is shown in Settings, [Your details](Settings.md#card-contact).
 
 ---
 

@@ -21,7 +21,7 @@ import re
 from collections import Counter
 from typing import Any, Callable, Iterable
 
-from .mapping import MARK_CLOSE, MARK_OPEN, Mapper
+from .mapping import MARK_CLOSE, MARK_OPEN, Mapper, inside_word
 
 StrFn = Callable[[str], str]
 
@@ -340,8 +340,11 @@ def canary_matches(mapper: Mapper, body: bytes, limit: int = 20) -> list[dict[st
     def check(text: str, where: str, path: str) -> None:
         for form, start, end in mapper.real_spans(text):
             if len(found) < limit:
+                # The entry's own text and whether this match is part of a longer word, so the Log
+                # page can offer "whole word only" where that would clear it, and say so where not.
                 found.append({"path": path, "where": where, "client": form.client,
                               "form": index.get(id(form), -1), "found": text[start:end],
+                              "declared": form.real, "inside": inside_word(text, start, end),
                               "before": flat(text[max(0, start - CANARY_CONTEXT):start]),
                               "after": flat(text[end:end + CANARY_CONTEXT])})
 

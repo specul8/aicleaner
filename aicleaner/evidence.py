@@ -159,7 +159,8 @@ class EvidenceLog:
                     events += [{**base, "type": "substitution", "action": action, "direction": "out",
                                 "client": m["client"], "real": m["found"], "token": "", "kind": "",
                                 "where": f"{m['path']} ({m['where']})", "before": m["before"],
-                                "after": m["after"]} for m in canary_matches]
+                                "after": m["after"], "declared": m.get("declared", ""),
+                                "inside": bool(m.get("inside"))} for m in canary_matches]
                 else:
                     events += [{**base, "type": "substitution", "action": action, "direction": "out",
                                 "client": cid, "real": "", "token": "", "kind": ""} for cid in canary]

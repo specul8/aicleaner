@@ -187,6 +187,8 @@ function matchMode(rule) {
   if (rule === 'cased' || (rule.cased && !rule.followed_by && !rule.preceded_by)) {
     return { mode: 'cased', side: 'followed_by', words: '' };
   }
+  // "Whole word only" on its own is the row's checkbox, not one of the select's modes.
+  if (!rule.followed_by && !rule.preceded_by) return { mode: '', side: 'followed_by', words: '' };
   const side = (rule.preceded_by && rule.preceded_by.length) ? 'preceded_by' : 'followed_by';
   return { mode: 'near', side, words: (rule[side] || []).join(', ') };
 }
@@ -258,6 +260,38 @@ function matchWhy(rule) {
   return 'This entry has a matching rule.';
 }
 
+// "Whole word only" (the checkbox beside the name): matched only where the name is the entire word,
+// so AZ is the client and the "az" inside "azure" is not. It sits alongside the other rules.
+function wholeWord(rule) {
+  return Boolean(rule && typeof rule === 'object' && rule.whole_word);
+}
+
+function withWholeWord(rule, on) {
+  if (!on) return rule;
+  return { ...(rule === 'cased' ? { cased: true } : (rule || {})), whole_word: true };
+}
+
+function wholeWordBox(cid, form, readOnly) {
+  const box = h('input', { type: 'checkbox', class: 'whole-word', checked: wholeWord(form.match) ? true : null,
+    disabled: readOnly ? true : null, 'aria-label': `${form.real}: whole word only` });
+  const label = h('label', { class: 'whole-word-label hint', title: 'Matched only where this is the entire word, '
+    + 'not inside a longer one. Still detected everywhere.' }, box, ' whole word');
+  // The cell opens the editor on a click; ticking the box is not a request to edit the name.
+  label.addEventListener('click', (event) => event.stopPropagation());
+  box.addEventListener('change', async () => {
+    box.disabled = true;
+    try {
+      await postJSON('/api/mapping/form/whole-word', { client: cid, real: form.real, on: box.checked });
+      await reloadClient(cid, { saved: form.real });
+    } catch (error) {
+      box.checked = !box.checked;
+      box.disabled = false;
+      sayError(error, refusalHandlers(cid));
+    }
+  });
+  return label;
+}
+
 // The row's controls back into what the API takes: undefined for "leave it alone" is the caller's
 // job, so this only ever returns a rule or null (remove it).
 function matchValue(mode, side, words) {
@@ -290,13 +324,14 @@ function moveTargets(cid) {
 
 function entryRow(cid, form, reason, readOnly) {
   if (form.locked) readOnly = true;
-  const realTd = h('td', { class: 'real' }, form.real);
+  // The cell holds the checkbox too, so the page's clip-title (which skips cells with a control) cannot title it.
+  const realTd = h('td', { class: 'real', title: form.real }, form.real, reason ? null : wholeWordBox(cid, form, readOnly));
   const tokenTd = reason ? h('td', { class: 'reason' }, reason) : h('td', { class: 'mono token' }, form.token);
   // A form with a matching rule does not replace everywhere its text appears, which is a
   // surprising thing for a row to be doing silently. The chip says so at a glance, beside the
   // shape, rather than only inside the edit form (feature 23).
   const kindTd = h('td', {}, reason ? '' : kindLabel(form.kind),
-    reason || !form.match ? null : h('span', { class: 'chip match', title: matchWhy(form.match) },
+    reason || !form.match || !matchMode(form.match).mode ? null : h('span', { class: 'chip match', title: matchWhy(form.match) },
                                      matchChip(form.match)),
     reason ? null : sourceChip(form));
   const actions = h('td', { class: 'actions' });
@@ -404,7 +439,8 @@ function entryRow(cid, form, reason, readOnly) {
       const newToken = tokenIn.value.trim();
       const tokenChanged = Boolean(newToken) && newToken !== form.token;
       const kindChanged = kindIn.value !== form.kind;
-      const newMatch = matchValue(matchIn.value, matchSide.value, matchWords.value);
+      // The editor has no whole-word control (the row's checkbox is it), so it carries over.
+      const newMatch = withWholeWord(matchValue(matchIn.value, matchSide.value, matchWords.value), wholeWord(form.match));
       // Compared as JSON because a rule is a value, not a string, and "unchanged" has to survive
       // "cased" vs {"cased": true} meaning the same thing.
       const matchChanged = JSON.stringify(newMatch) !== JSON.stringify(form.match || null);
@@ -1106,7 +1142,7 @@ function tools(cid, clientView, table, readOnly) {
 // What this client is called, in the three places it has a name. The id is the one that leaves
 // this window - it names the file, keys the mapping, and is what the command line wants - so it
 // is here rather than only in the address bar.
-function identityCard(cid, clientView, row) {
+function identityCard(cid, clientView, row, readOnly) {
   const index = clientView.index ?? row.index;
   const command = cid === 'global'
     ? 'aicleaner scan <folder> --add global'
@@ -1134,8 +1170,62 @@ function identityCard(cid, clientView, row) {
         h('div', { class: 'mono identity-value' }, value),
         h('div', { class: 'hint identity-why' }, why)))),
     h('p', { class: 'hint' }, 'From a terminal: ', h('code', { class: 'mono' }, command)),
+    cid === 'global' ? null : externalNames(cid, clientView.external_names || {}, readOnly),
     cid === 'global' ? null : renumberRow(cid, index),
     cid === 'global' ? null : shareInOneDrive(cid));
+}
+
+// What the client is called in other systems (feature 150): local tooling finds the client there
+// by it - a ticketing system's company, say. Edited as a list and saved as a whole. The name is the
+// client's own, so saving also adds it as an entry; the answer says which were added and which the
+// mapping refused (the name is kept either way, so the lookup still works).
+function externalNames(cid, saved, readOnly) {
+  const names = new Map(Object.entries(saved));
+  const rows = h('tbody');
+  const system = h('input', { type: 'text', class: 'external-system', value: 'ConnectWise', maxlength: '40',
+    'aria-label': 'System', disabled: readOnly });
+  const name = h('input', { type: 'text', class: 'external-name', maxlength: '200',
+    placeholder: 'Its name in that system', 'aria-label': 'Name in that system', disabled: readOnly });
+  const save = h('button', { type: 'button', class: 'external-save', disabled: readOnly }, 'Save');
+  const table = h('table', { class: 'entries external-names-table' }, rows);
+  const paint = () => {
+    table.hidden = !names.size;
+    rows.replaceChildren(...[...names].map(([sys, value]) => {
+      const remove = iconButton('trash', `Remove the ${sys} name`, { class: 'icon danger external-remove', disabled: readOnly });
+      remove.addEventListener('click', () => { names.delete(sys); paint(); });
+      return h('tr', { class: 'external-row', dataset: { system: sys } },
+        h('td', { class: 'external-system-cell' }, sys), h('td', { class: 'mono external-value' }, value),
+        h('td', { class: 'actions' }, remove));
+    }));
+  };
+  paint();
+  save.addEventListener('click', async () => {
+    const wanted = Object.fromEntries(names);
+    const sys = system.value.trim();
+    if (sys && name.value.trim()) wanted[sys] = name.value.trim();
+    if (FORBIDDEN.test(sys + name.value)) { say(NOT_YET, 'error'); return; }
+    save.disabled = true;
+    try {
+      const answer = await postJSON(`/api/clients/${encodeURIComponent(cid)}/external-names`, { external_names: wanted });
+      const added = answer.added || [];
+      say(added.length ? `Saved. Added ${added.join(', ')} as ${added.length === 1 ? 'an entry' : 'entries'}.` : 'Saved.', 'ok');
+      for (const refusal of answer.refused || []) {
+        say(`${refusal.name} is saved but was not added as an entry.`, 'warn', { why: refusal.why });
+      }
+      await reloadClient(cid);
+    } catch (error) {
+      save.disabled = false;
+      sayError(error, refusalHandlers(cid));
+    }
+  });
+  const block = h('div', { class: 'external-names', dataset: { card: 'external-names' } },
+    h('h3', {}, 'Names in other systems'),
+    h('p', { class: 'hint' }, 'What this client is called elsewhere, such as ConnectWise, for tools on this machine that look it up. The name is added to the entries too, so it is tokenised like the others.'),
+    table,
+    readOnly ? null : h('div', { class: 'form-row' }, system, name, save));
+  // Rows removed but not saved count as unsaved, as well as a name typed and not saved (D98).
+  if (!readOnly) track(block, () => [[...names], system.value, name.value]);
+  return block;
 }
 
 // A different index for this client (DECISIONS 67): before sharing it, when a colleague's client
@@ -1226,7 +1316,7 @@ async function loadBody(cid, body) {
   // A key per client and its held changes (DECISIONS 51): Global is never shared, so has neither.
   // The page is about tokenising only (D99): names, terms replaced, terms ignored, Scan, the key.
   const keyCard = cid === 'global' ? null : await keySection(cid, () => reloadClient(cid));
-  setChildren(body, heldCallout(row, () => reloadClient(cid)), ...parts, identityCard(cid, clientView, row),
+  setChildren(body, heldCallout(row, () => reloadClient(cid)), ...parts, identityCard(cid, clientView, row, readOnly),
               emailRulesCard(cid, clientView.email_rules || [], allForms, readOnly),
               entriesCard, ignoresBlock(cid, scopeValues), scanCard, keyCard);
 }

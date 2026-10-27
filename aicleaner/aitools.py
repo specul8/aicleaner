@@ -157,11 +157,11 @@ async def rows(cfg: Any, copilot: dict[str, Any] | None = None, base: Path | Non
     signed_in = bool(getattr(cfg, "claudeai_enabled", False))          # route B: the claude.ai sign-in, filtered
     out.append(_row("claude-desktop", "Claude Desktop (chat)", desktop_found(base), desktop_routed or signed_in,
                     "routed through aicleaner (its gateway setting)" if desktop_routed else
-                    "filtered (Settings > Claude Desktop's chat)" if signed_in else
-                    "not filtered - Settings > Claude Desktop's chat",
+                    "filtered (Settings > AI apps > Claude Desktop: chat)" if signed_in else
+                    "not filtered - Settings > AI apps > Claude Desktop: chat",
                     None, {"kind": "steps", "steps": "Claude Desktop signs in in its own window, on the machine."}))
     out.append(_row("codetab", "Claude Desktop's Code tab", desktop_found(base), bool(cfg.codetab_enabled),
-                    "filtered (Settings > the Code tab)" if cfg.codetab_enabled else "not filtered - Settings > the Code tab",
+                    "filtered (Settings > AI apps > Claude Desktop: Code tab)" if cfg.codetab_enabled else "not filtered - Settings > AI apps > Claude Desktop: Code tab",
                     None, {"kind": "steps", "steps": "Uses Claude Desktop's sign-in."}))
     copilot = copilot or {}
     vscode_copilot = _extension("github.copilot", base)
@@ -169,7 +169,7 @@ async def rows(cfg: Any, copilot: dict[str, Any] | None = None, base: Path | Non
     out.append(_row("copilot-vscode", "GitHub Copilot in VS Code", vscode_copilot,
                     bool(cfg.copilot_enabled and pointed),
                     ("filtered" if pointed else (copilot.get("waiting") or "switched on, VS Code not pointed here yet"))
-                    if cfg.copilot_enabled else "not filtered - Settings > GitHub Copilot in VS Code",
+                    if cfg.copilot_enabled else "not filtered - Settings > AI apps > GitHub Copilot",
                     None, {"kind": "steps", "steps": "VS Code owns this sign-in: in VS Code, Accounts (the person icon, "
                                                      "bottom left) > Sign in with GitHub to use GitHub Copilot."}))
     from .agents import CODEX, COPILOT, command_for

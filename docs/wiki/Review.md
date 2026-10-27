@@ -19,7 +19,7 @@ tokenising. Anything still identifier-shaped is, by definition, not in the mappi
 Types set to **Auto-tokenise** or **Ignore** never reach Review, and nor does anything on the
 shipped list of identifiers that are the same in every tenant. A value that proves its own owner
 (an address at a client's mapped domain) may be added to that client straight away instead - see
-Settings, [What happens to something new](Settings.md#card-kinds).
+Settings, [New names found](Settings.md#card-kinds).
 
 You hear about new items through a footer on the model's reply and a Windows toast (both switchable
 in [Notifications](Settings.md#card-notifications)), and through the amber "<n> to Review" status.
@@ -82,7 +82,7 @@ back what was done (un-mapping or un-ignoring them).
 When one type has been ignored 20 or more times and kept no more than 1 time in 10, Review offers:
 
 - **Tokenise <type> automatically** - moves that type to Auto-tokenise: every find is still
-  replaced, but without asking you. Undo is on the message, and [What happens to something new](Settings.md#card-kinds) can turn it back.
+  replaced, but without asking you. Undo is on the message, and [New names found](Settings.md#card-kinds) can turn it back.
 - **Not now** - hides the offer until that type has been ignored 50 more times, without changing
   anything else.
 
@@ -90,7 +90,7 @@ When one type has been ignored 20 or more times and kept no more than 1 time in 
 
 Identifiers that are the same in every tenant (built-in role and policy ids, Microsoft first-party
 application ids, vendor hosts) ship with aicleaner and are never queued. The Settings card
-[Identifiers that belong to nobody](Settings.md#card-public-list) shows the list and what it has suppressed since the proxy
+[Shared identifiers](Settings.md#card-public-list) shows the list and what it has suppressed since the proxy
 started. **Treat as public** in Review is how you add your own: it goes on Global's ignore list.
 
 ## Added by someone else

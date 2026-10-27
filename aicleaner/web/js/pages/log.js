@@ -2,7 +2,7 @@
 // by what, whose it is, what was done, and who was driving - plus every change made through the UI.
 // A value appears the first time a session sends it and again when what happens to it changes.
 
-import { getJSON, sayError } from '../api.js';
+import { getJSON, postJSON, say, sayError } from '../api.js';
 import { h } from '../dom.js';
 
 const ACTIONS = [
@@ -13,7 +13,7 @@ const ACTIONS = [
   ['ui', 'Changes made in the UI'],
 ];
 
-const view = { main: null, filters: {}, next: null, events: [] };
+const view = { main: null, filters: {}, next: null, events: [], fixShown: new Set() };
 
 function driver(who) {
   if (!who) return ['', ''];
@@ -36,7 +36,51 @@ function time(ts) {
   return Number.isNaN(at.getTime()) ? ts : at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function row(e) {
+// What to do about a canary match: the entry it matched, shown as the file spells it, and EITHER
+// "whole word only" (offered where the match sat inside a longer word, which is what it would clear)
+// OR ignoring the entry for its client or for everyone. Once per entry per request, however many
+// times the request carried it.
+function canaryFix(e, n) {
+  if (!['canary-refused', 'canary-fail-open'].includes(e.action) || !e.declared || !e.client) return null;
+  const key = `${e.request}|${e.client}|${e.declared}`;
+  if (view.fixShown.has(key)) return null;
+  view.fixShown.add(key);
+  const name = `canary-fix-${n}`;
+  const whole = h('input', { type: 'radio', name, value: 'whole', checked: e.inside ? true : null,
+    disabled: e.inside ? null : true });
+  const ignore = h('input', { type: 'radio', name, value: 'ignore', checked: e.inside ? null : true });
+  const scope = h('select', { class: 'canary-scope', 'aria-label': 'Ignore for' },
+    e.client === 'global' ? null : h('option', { value: e.client }, `${e.client} only`),
+    h('option', { value: 'global' }, 'Everyone'));
+  const apply = h('button', { type: 'button', class: 'canary-apply' }, 'Apply');
+  const status = h('span', { class: 'hint canary-status' });
+  const panel = h('div', { class: 'canary-fix' },
+    h('div', {}, 'Matched entry ', h('strong', { class: 'mono canary-declared' }, e.declared), ` (${e.client})`,
+      e.inside ? ' - found inside a longer word.' : ' - found as a whole word.'),
+    h('label', { title: e.inside ? 'Match it only where it is the entire word.'
+      : 'This match is already a whole word, so whole word only would not clear it.' }, whole, ' Whole word only'),
+    h('label', {}, ignore, ' Ignore for: '), scope, ' ', apply, ' ', status);
+  scope.addEventListener('change', () => { ignore.checked = true; });
+  apply.addEventListener('click', async () => {
+    apply.disabled = true;
+    try {
+      if (whole.checked) {
+        await postJSON('/api/mapping/form/whole-word', { client: e.client, real: e.declared, on: true });
+        status.textContent = 'Whole word only is on. Send the request again.';
+      } else {
+        await postJSON('/api/canary/ignore', { client: e.client, real: e.declared, scope: scope.value });
+        status.textContent = `Ignored for ${scope.value === 'global' ? 'everyone' : e.client}. Send the request again.`;
+      }
+      say(status.textContent, 'ok');
+    } catch (error) {
+      apply.disabled = false;
+      sayError(error);
+    }
+  });
+  return panel;
+}
+
+function row(e, n) {
   const [who, whoDetail] = driver(e.who);
   if (e.type === 'ui') {
     return h('tr', { class: 'log-ui' },
@@ -56,7 +100,7 @@ function row(e) {
   return h('tr', { 'data-action': e.action || '' },
     h('td', { class: 'nowrap' }, time(e.ts)),
     h('td', {}, h('span', { class: `chip action-${e.action}` }, `${e.action}${route}`)),
-    h('td', { class: 'mono' }, e.real || '', context),
+    h('td', { class: 'mono' }, e.real || '', context, canaryFix(e, n)),
     h('td', { class: 'mono' }, e.token ? `${arrow}${e.token}` : ''),
     h('td', {}, e.client || ''),
     h('td', {}, e.session || ''),
@@ -64,7 +108,8 @@ function row(e) {
 }
 
 function table() {
-  const body = h('tbody', {}, view.events.map(row));
+  view.fixShown = new Set();
+  const body = h('tbody', {}, view.events.map((e, n) => row(e, n)));
   const empty = view.events.length ? null : h('p', { class: 'muted', id: 'log-empty' }, 'Nothing logged for this day and filter.');
   return h('div', { class: 'log-wrap' },
     h('table', { class: 'log-table', id: 'log-table' },

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import copy
 import json
 import logging
 import os
@@ -39,6 +40,7 @@ from pathlib import Path
 from urllib.parse import quote
 from typing import Any, Awaitable, Callable
 
+from . import lifecycle
 from .fileio import network_path
 
 log = logging.getLogger("aicleaner.session")
@@ -72,7 +74,7 @@ async def _read_line(stream: asyncio.StreamReader) -> bytes:
 # of it, shaped like the asyncio Process Session always used - stdin, stdout, stderr, wait, kill -
 # so the session's own logic is unchanged whether it started the broker or found it after a restart.
 
-BROKER_START_S = 15
+BROKER_START_S = 45      # 15 was too short for a cold start: Python's first imports took 12-17 s after idle (2026-10-27)
 APPROVE_MCP_TIMEOUT_MS = 12 * 60 * 60 * 1000   # how long Claude Code waits on a permission or question: 12 hours
 
 
@@ -109,6 +111,7 @@ class BrokerChild:
         self.url = f"http://127.0.0.1:{published['port']}"
         self.token = published["token"]
         self.pid = published.get("cli_pid")
+        self.broker_pid = published.get("pid")
         self.returncode: int | None = None
         self.stdout = asyncio.StreamReader(limit=STREAM_LINE_LIMIT)
         self.stderr = asyncio.StreamReader(limit=STREAM_LINE_LIMIT)
@@ -130,11 +133,17 @@ class BrokerChild:
         import aiohttp
 
         self._http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_read=60))
-        async with self._http.get(f"{self.url}/state", headers=self._headers()) as r:
-            if r.status != 200:
-                await self._http.close()
-                raise SessionError(f"the session broker refused this proxy ({r.status})")
-            self.replay_upto = int((await r.json()).get("seq", 0))
+        try:
+            async with self._http.get(f"{self.url}/state", headers=self._headers()) as r:
+                if r.status != 200:
+                    raise SessionError(f"the session broker refused this proxy ({r.status})")
+                self.replay_upto = int((await r.json()).get("seq", 0))
+        except BaseException:
+            # A broker that has gone (or refuses) leaves no client behind: each one used to log "Unclosed client
+            # session" at every start (2026-10-25, 29 of them).
+            await self._http.close()
+            self._http = None
+            raise
         if self.replay_upto == 0:
             self._mark_replay_done()          # nothing to replay: everything from here is live
         self._pump = asyncio.ensure_future(self._read())
@@ -215,6 +224,36 @@ class BrokerChild:
             await self._http.close()
 
 
+def _live_brokers() -> dict[int, float] | None:
+    """Running Python processes, id -> start time; None when that cannot be read here (then every broker is asked,
+    as before)."""
+    from . import proctree
+    if not proctree.WINDOWS:
+        return None
+    snap = proctree.snapshot({"python.exe", "pythonw.exe"})
+    return {p.pid: p.created for p in snap.procs.values() if p.name.lower() in ("python.exe", "pythonw.exe")}
+
+
+def _broker_alive(published: dict[str, Any], alive: dict[int, float]) -> bool:
+    """Whether the broker that wrote broker.json is still the process with its id. A process started after the
+    broker wrote the file holds a reused id, not the broker."""
+    pid = int(published.get("pid") or 0)
+    if pid not in alive:
+        return False
+    started, created = float(published.get("started") or 0), alive[pid]
+    return not (started and created and created > started + 5)
+
+
+def _mark_gone(folder: Path, published: dict[str, Any]) -> None:
+    try:
+        tmp = folder / "broker.json.tmp"
+        tmp.write_text(json.dumps({**published, "exit_code": -1, "gone": "broker no longer running"}, indent=2),
+                       encoding="utf-8")
+        os.replace(tmp, folder / "broker.json")
+    except OSError as exc:
+        log.debug("could not record %s as gone: %s", folder, exc)
+
+
 def spawn_broker(folder: Path) -> None:
     """Start a broker for the session in `folder`, detached from this process so a proxy restart
     leaves it running (a new process group, and out of any job that closes with the proxy)."""
@@ -223,7 +262,10 @@ def spawn_broker(folder: Path) -> None:
     root = Path(__file__).resolve().parent.parent
     command = [sys.executable, "-m", "aicleaner.broker", str(folder)]
     errors = (folder / "broker-stderr.log").open("ab")
-    kwargs: dict[str, Any] = {"cwd": str(root), "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+    from .lowertoken import session_environment
+    # Not the start-up task's markers: the broker is a session's, not the task's copy of aicleaner (D213).
+    kwargs: dict[str, Any] = {"cwd": str(root), "env": session_environment(),
+                              "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
                               "stderr": errors, "close_fds": True}
     try:
         if sys.platform == "win32":
@@ -723,6 +765,7 @@ class Session(_FindsClaude):
         self.started_at = 0.0
         self.last_error = ""
         self._process: asyncio.subprocess.Process | None = None
+        self._starting = False
         self._reader: asyncio.Task | None = None
         self._watchers: set[asyncio.Queue] = set()
         self._sequence = 0
@@ -916,7 +959,8 @@ class Session(_FindsClaude):
 
         CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT: a second, separate limit - a call with no response or
         progress - which aborted a question after 30 minutes (D102). 0 turns it off."""
-        environment = dict(os.environ)
+        from .lowertoken import session_environment
+        environment = session_environment()
         if self.base_url:
             # The whole point: what the session sends goes through the filter like anything else.
             environment["ANTHROPIC_BASE_URL"] = self.base_url
@@ -937,6 +981,17 @@ class Session(_FindsClaude):
         """Start a session in one of the configured project folders."""
         if self.running:
             raise SessionError("a session is already running; stop it first")
+        # It counts as running only once its broker answers, after the seed and the spawn: a second start in that
+        # window began a second Claude Code for the same session (2026-10-27, two at 08:30:48), one never driven.
+        if self._starting:
+            raise SessionError("this session is already starting")
+        self._starting = True
+        try:
+            return await self._start(project, resume, model)
+        finally:
+            self._starting = False
+
+    async def _start(self, project: str, resume: str, model: str) -> dict[str, Any]:
         if not self.available():
             raise SessionError(f"the Claude Code CLI ({self.claude}) is not on this machine")
         folder = self._project_folder(project)
@@ -993,7 +1048,9 @@ class Session(_FindsClaude):
         launch = {"command": command, "cwd": str(folder), "env": env,
                   "profile": self.profile.name if self.profile else "", "project": str(folder),
                   "resume": resume, "model": model, "approve_token": self.approve_token,
-                  "started_at": self.started_at}
+                  "started_at": self.started_at,
+                  "lifecycle_dir": lifecycle.directory(), "job_cleanup": lifecycle.job_cleanup,
+                  "max_processes": lifecycle.max_processes, "max_memory_mb": lifecycle.max_memory_mb}
         (self.folder / "launch.json").write_text(json.dumps(launch, indent=2), encoding="utf-8")
         try:
             spawn_broker(self.folder)
@@ -1578,13 +1635,32 @@ class Session(_FindsClaude):
         if waiting is not None and not waiting.done():
             response = event.get("response")
             waiting.set_result(response if isinstance(response, dict) else {"subtype": "success"})
+        elif waiting is None and self._replaying:
+            # A re-attached session's broker replays its history, and with it the answers to requests the previous
+            # proxy made: expected at every restart, not news (stability spec S7).
+            log.debug("control_response for a request made before this proxy started %r", request_id)
         elif waiting is None:
             # Nobody asked for this, or asked and forgot. It used to vanish here without a trace.
             log.warning("control_response for an unknown request %r: %s", request_id, event.get("response"))
         return True
 
-    async def stop(self) -> None:
+    async def stop(self, reason: str = "user") -> None:
         """End the session; the child is asked first and killed if it will not go."""
+        started = time.monotonic()
+        name = self.profile.name if self.profile else ""
+        broker_pid = getattr(self._process, "broker_pid", None)
+        cli_pid = getattr(self._process, "pid", None)
+        if self._process is not None and self._process.returncode is None:
+            lifecycle.record("stop-requested", session=name, why=reason, broker_pid=broker_pid, cli_pid=cli_pid,
+                             origin=self.origin)
+        outcome = await self._stop_child()
+        if outcome:
+            lifecycle.record("stop-result", session=name, why=reason, how=outcome,
+                             seconds=round(time.monotonic() - started, 1), broker_pid=broker_pid, cli_pid=cli_pid)
+
+    async def _stop_child(self) -> str:
+        """Stop's work. Returns how it ended - "graceful" (it left within the wait), "killed", or "" when there
+        was nothing running."""
         process, self._process = self._process, None
         if self._reader is not None:
             self._reader.cancel()
@@ -1594,12 +1670,14 @@ class Session(_FindsClaude):
         # the full timeout for an answer that can no longer arrive.
         self._release_control("the session was stopped")
         if process is None or process.returncode is not None:
-            return
+            return ""
+        outcome = "graceful"
         try:
             if process.stdin is not None:
                 process.stdin.close()
             await asyncio.wait_for(process.wait(), timeout=5)
         except (asyncio.TimeoutError, ProcessLookupError, ConnectionResetError):
+            outcome = "killed"
             try:
                 process.kill()
             except ProcessLookupError:
@@ -1610,6 +1688,7 @@ class Session(_FindsClaude):
         self.pending.clear()
         self.seen_waiting = 0
         self._emit({"type": "stopped"})
+        return outcome
 
     # ---- reading the child ------------------------------------------------------------
 
@@ -1836,6 +1915,11 @@ class SessionHost(_FindsClaude):
         self.approve_url = approve_url
         self.max_running = max(0, int(max_running or 0))     # 0 = no cap: the machine is the limit
         self.auto_titles = True       # session.auto_titles (item E): set by the proxy from the config
+        # Stability spec S2: each running session's memory (refreshed by the lifecycle monitor every minute), the
+        # machine's, and how long idle before the page offers to stop a session (0 = never; never automatic).
+        self.resources: dict[str, dict[str, Any]] = {}
+        self.machine_memory: dict[str, Any] = {}
+        self.idle_offer_hours = 8
         # Another AI service's filtering, made ready by the proxy before such a session starts (item K):
         # async (agent) -> the environment its process needs - the forward proxy, its certificate.
         self.prepare_agent: Any = None
@@ -1910,6 +1994,7 @@ class SessionHost(_FindsClaude):
         if self.sessions_dir is None or not self.sessions_dir.is_dir():
             return []
         found: list[str] = []
+        alive = _live_brokers()
         for folder in sorted(self.sessions_dir.iterdir()):
             try:
                 published = json.loads((folder / "broker.json").read_text(encoding="utf-8"))
@@ -1917,6 +2002,13 @@ class SessionHost(_FindsClaude):
             except (OSError, ValueError):
                 continue
             if published.get("exit_code") is not None:
+                continue
+            # A broker that is no longer running - a restart or a reboot ended it before it could write its exit -
+            # is not asked: each one cost a 2-second connection timeout at start-up, one after another, and 29 of
+            # them kept a new aicleaner from answering for 75 seconds (2026-10-25). Recorded as gone, so the next
+            # start skips it without looking.
+            if alive is not None and not _broker_alive(published, alive):
+                _mark_gone(folder, published)
                 continue
             name = str(launch.get("profile", ""))
             try:
@@ -1939,6 +2031,10 @@ class SessionHost(_FindsClaude):
 
     async def detach_all(self) -> None:
         """This proxy is stopping: let go of every brokered session without ending any."""
+        # A start-set run (feature 152) ends with the proxy; the sessions it asked to finish are left running.
+        runner = getattr(self, "preset_runner", None)
+        if runner is not None:
+            runner.close()
         for session in list(self.sessions.values()):
             await session.detach()
 
@@ -2000,6 +2096,9 @@ class SessionHost(_FindsClaude):
             "selected": selected,
             "running": running,
             "max_running": self.max_running,
+            "resources": self.resources,
+            "machine_memory": self.machine_memory,
+            "idle_offer_hours": self.idle_offer_hours,
             "available": self.available(),
             # D197: why the selected profile cannot start yet ("" when it can) - its client has no names to filter.
             "start_blocked": self._start_blocked_of(selected),
@@ -2022,9 +2121,36 @@ class SessionHost(_FindsClaude):
             return [str(w) for w in profile.workspaces]
         return implicit_workspaces([str(p) for p in profile.projects])
 
+    # Each profile's tree and home, kept for a moment (2026-10-27): they were rebuilt for every profile on every
+    # state request - every switch and every page's 5-second poll - reading workspace files and checking each folder
+    # (OneDrive ones included): 180-400 ms a request on the proxy's one core, while a session with nine agents was
+    # keeping that core busy. Keyed on what the profile says, so an edit shows at once; a workspace file changed on
+    # disk shows within ROOTS_TTL_S.
+    ROOTS_TTL_S = 20.0
+
+    def _cached_roots(self, kind: str, profile: Profile, build: Callable[[], Any]) -> Any:
+        cache = self.__dict__.setdefault("_roots_cache", {})
+        # The folders the pages may reach shape the tree too: changing them (Settings) shows at once, not 20 s later.
+        try:
+            roots = tuple(str(r) for r in (self.allowed_roots() or ()))
+        except Exception:  # noqa: BLE001 - the key only; tree_of says what is wrong with the roots itself
+            roots = ()
+        key = (kind, profile.name, tuple(str(p) for p in profile.projects), getattr(profile, "home_override", ""),
+               tuple(getattr(profile, "workspaces", ()) or ()), roots)
+        now = time.monotonic()
+        hit = cache.get(key)
+        if hit is not None and now - hit[0] < self.ROOTS_TTL_S:
+            return copy.deepcopy(hit[1])
+        value = build()
+        cache[key] = (now, value)
+        return copy.deepcopy(value)
+
     def tree_of(self, profile: Profile) -> list[str]:
         """The folders a profile's file tree shows (D99): every folder of every workspace file,
         then the manual folders, each once. Best effort - a workspace file must never cost the page."""
+        return self._cached_roots("tree", profile, lambda: self._tree_of(profile))
+
+    def _tree_of(self, profile: Profile) -> list[str]:
         from .workspace import profile_tree
 
         folders = [str(p) for p in profile.projects]
@@ -2037,6 +2163,9 @@ class SessionHost(_FindsClaude):
     def home_of(self, profile: Profile) -> dict[str, Any]:
         """Where this profile's work is homed (D99): derived from the first workspace file, or the
         user's override. {"folder", "how", "derived", "overridden"}."""
+        return self._cached_roots("home", profile, lambda: self._home_of(profile))
+
+    def _home_of(self, profile: Profile) -> dict[str, Any]:
         from .workspace import home_of
 
         try:
@@ -2299,10 +2428,10 @@ class SessionHost(_FindsClaude):
                 return session.origin
         return ""
 
-    async def stop(self, name: str = "") -> None:
+    async def stop(self, name: str = "", reason: str = "user") -> None:
         session = self._session(name)
         conv_id = session.session_id
-        await session.stop()
+        await session.stop(reason)
         # The conversation that just ended gets a title when it grew (item E, session.auto_titles).
         if session.profile is not None:
             self.title_after_stop(session.profile.name, conv_id)
@@ -2313,13 +2442,38 @@ class SessionHost(_FindsClaude):
     async def set_permission_mode(self, name: str = "", mode: str = "") -> None:
         await self._session(name).set_permission_mode(mode)
 
-    async def stop_all(self) -> None:
+    async def stop_all(self, reason: str = "stop-all") -> None:
         for session in list(self.sessions.values()):
             if session.running:
                 try:
-                    await session.stop()
+                    await session.stop(reason)
                 except SessionError:
                     pass
+
+    def process_view(self) -> list[dict[str, Any]]:
+        """Each running session's processes as its broker counts them (blocking: called off the loop by the
+        lifecycle monitor). A broker that does not answer is reported as such - that is itself a finding."""
+        import urllib.request
+
+        from .broker import TOKEN_HEADER
+        out: list[dict[str, Any]] = []
+        for name, session in list(self.sessions.items()):
+            child = session._process
+            if child is None or child.returncode is not None:
+                continue
+            view: dict[str, Any] = {"name": name, "cli_pid": getattr(child, "pid", None),
+                                    "broker_pid": getattr(child, "broker_pid", None),
+                                    "started": session.started_at}
+            url, token = getattr(child, "url", ""), getattr(child, "token", "")
+            if url:
+                try:
+                    request = urllib.request.Request(f"{url}/state", headers={TOKEN_HEADER: token})
+                    with urllib.request.urlopen(request, timeout=3) as response:
+                        view["job"] = json.loads(response.read().decode("utf-8")).get("job") or {}
+                except (OSError, ValueError) as exc:
+                    view["broker_error"] = str(exc)
+            out.append(view)
+        return out
 
     @_agent_history
     def earlier(self, name: str, before: float, limit: int = EARLIER_LIMIT) -> dict[str, Any]:

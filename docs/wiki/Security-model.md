@@ -28,7 +28,7 @@ The mechanics are in [How it works](How-it-works.md).
 | Kinds set to "Ignore" | Not queued and not held back, by your choice. (A kind set to "Auto-tokenise" is still replaced.) |
 | A placeholder that could not be made safely | That one value goes out as it is; this is logged in the proxy log. |
 | What, rather than who | Architecture, technology choices, topology and anything not mapped still reach the model. aicleaner hides **who**, not **what**. |
-| Images when [Images](Settings.md#card-images) allows them | Sent as images, unfiltered. Off by default. |
+| Images when [Pictures](Settings.md#card-images) allows them | Sent as images, unfiltered. Off by default. |
 | A path listed in `allow_non_json_paths` | Forwarded uninspected; every such request is logged `UNFILTERED`. Empty by default. |
 | Telemetry the tools send themselves | Outside the model path. The installer reviews OpenTelemetry settings and turns off what it can. |
 | What was sent before aicleaner was in the path | Cannot be undone. |

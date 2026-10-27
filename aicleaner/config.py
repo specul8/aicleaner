@@ -21,6 +21,60 @@ PREVIEW_DBLCLICK = ("ask", "source", "off")
 # What prompt autocorrect may also leave alone (feature 94); code and paths always are.
 AUTOCORRECT_SKIPS = ("clients", "used", "capitalised")
 REPLACEMENT_RE = re.compile(r"[A-Za-z][A-Za-z'-]{0,39} = [^\r\n=]{1,60}")
+# Your own words for a Settings card (feature 153): ui.setting_keywords = {"<card key>": ["telemetry"]}.
+# A card key is checked by its shape, not against a list: the cards are drawn by the page, so a list
+# here would be a second copy that drifts, and a key no card answers to (a card later renamed) is
+# harmless - it never matches - and is kept so it is not lost while a page is out of date.
+SETTING_CARD_RE = re.compile(r"[a-z][a-z0-9-]{0,39}")
+SETTING_WORD_MAX = 40
+SETTING_WORDS_PER_CARD = 20
+SETTING_KEYWORD_CARDS = 100     # a bound on the whole map, so a stray POST cannot grow the config file
+
+
+def setting_keywords(value: Any, strict: bool = True) -> dict[str, list[str]]:
+    """Clean ui.setting_keywords: words trimmed (inner spaces collapsed), 1-40 characters on one line,
+    duplicates (any case) dropped, up to 20 per card; a card with none left is dropped. Strict (from
+    the page) refuses what does not fit; not strict (a config file edited by hand) drops it instead."""
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        if strict:
+            raise ValueError("ui.setting_keywords is a map of card key to a list of words")
+        return {}
+    cleaned: dict[str, list[str]] = {}
+    for key, words in value.items():
+        key = str(key).strip()
+        if not SETTING_CARD_RE.fullmatch(key):
+            if strict:
+                raise ValueError(f"{key!r} is not a settings card key (lower-case letters, digits and -)")
+            continue
+        if isinstance(words, str):
+            words = [words]
+        if not isinstance(words, list):
+            if strict:
+                raise ValueError(f"the words for {key} must be a list")
+            continue
+        kept: list[str] = []
+        for word in words:
+            word = " ".join(str(word).split())
+            if not word or word.lower() in (w.lower() for w in kept):
+                continue
+            if len(word) > SETTING_WORD_MAX or not word.isprintable():
+                if strict:
+                    raise ValueError(f"a word for a setting is up to {SETTING_WORD_MAX} characters on one line: {word[:50]}")
+                continue
+            kept.append(word)
+        if len(kept) > SETTING_WORDS_PER_CARD:
+            if strict:
+                raise ValueError(f"up to {SETTING_WORDS_PER_CARD} words for one setting ({key} has {len(kept)})")
+            kept = kept[:SETTING_WORDS_PER_CARD]
+        if kept:
+            cleaned[key] = kept
+    if len(cleaned) > SETTING_KEYWORD_CARDS:
+        if strict:
+            raise ValueError(f"words for up to {SETTING_KEYWORD_CARDS} settings")
+        cleaned = dict(list(cleaned.items())[:SETTING_KEYWORD_CARDS])
+    return cleaned
 
 
 def _flag(section: dict[str, Any], key: str, default: bool, name: str) -> bool:
@@ -47,6 +101,11 @@ NEVER_HELD_BACK = frozenset({"name"})
 # And kinds that are always replaced by a stand-in, so there is nothing to choose (DECISIONS 38;
 # detect.STATELESS_KINDS). Dropped from a saved placeholder_kinds for the same reason.
 ALWAYS_STOOD_IN = frozenset({"guid"})
+
+
+def _default_presets() -> list[dict]:
+    from .presets import default_presets
+    return default_presets()
 
 
 def _held_back(kinds: list[str]) -> list[str]:
@@ -183,6 +242,8 @@ class Config:
     # Diagnostics (feature 91): record request timings, off again 24 hours after it was turned on.
     debug_timings: bool = False
     debug_timings_since: int = 0
+    # Your own words for Settings cards (feature 153), found by "Find a setting"; see setting_keywords().
+    ui_setting_keywords: dict[str, list[str]] = field(default_factory=dict)
     session_claude: str = "claude"
     session_projects: list[str] = field(default_factory=list)
     session_permission_mode: str = "manual"
@@ -190,7 +251,21 @@ class Config:
     # session.projects list still reads as a single profile, so nobody has to migrate to upgrade.
     session_profiles: list[dict] = field(default_factory=list)
     session_max_running: int = 4
+    # Start Work and Start Personal (feature 152): [{id, name, profiles}], at most max_running - 1 profiles each.
+    session_presets: list[dict] = field(default_factory=lambda: _default_presets())
     session_auto_titles: bool = True     # a title for a conversation when its session stops (item E)
+    # A new session's job ends its whole process tree when its broker goes (spec 2026-10-24-session-lifecycle-
+    # instrumentation.md). Off: the job only counts and measures.
+    session_job_cleanup: bool = False
+    # The Session page draws Claude's thinking expanded (on) or folded to its "thinking" line (off) (2026-10-27).
+    session_show_thinking: bool = True
+    # A message sent while Claude works waits for the task's end-of-turn summary, unless it asks for something now.
+    session_turn_summary: bool = False
+    # Caps on each new session as a whole (D208): processes alive at once, and memory committed (0 = no cap).
+    session_max_processes: int = 400
+    session_max_memory_gb: int = 16
+    # The Session page offers to stop a session idle this many hours (0 = never). An offer, never a stop.
+    session_idle_offer_hours: int = 8
     session_thinking_display: str = "summarized"   # "" leaves thinking to the CLI (empty blocks)
     # Restored names shown in green (see transform.strip_marks). Always on the session page, which
     # draws them; for Claude Code in a terminal or VS Code, only once someone has seen it render.
@@ -289,7 +364,14 @@ class Config:
         "session.projects": ("session_projects", list),
         "session.permission_mode": ("session_permission_mode", str),
         "session.max_running": ("session_max_running", int),
+        "session.presets": ("session_presets", "presets"),
         "session.auto_titles": ("session_auto_titles", bool),
+        "session.job_cleanup": ("session_job_cleanup", bool),
+        "session.show_thinking": ("session_show_thinking", bool),
+        "session.turn_summary": ("session_turn_summary", bool),
+        "session.max_processes": ("session_max_processes", int),
+        "session.max_memory_gb": ("session_max_memory_gb", int),
+        "session.idle_offer_hours": ("session_idle_offer_hours", int),
         "detect.placeholder_kinds": ("placeholder_kinds", list),
         "attachments.allow_images": ("allow_images", bool),
         "attachments.redact_images": ("redact_images", bool),
@@ -325,6 +407,7 @@ class Config:
         "prompt.autocorrect_words": ("prompt_autocorrect_words", list),
         "prompt.autocorrect_replace": ("prompt_autocorrect_replace", list),
         "debug.timings_since": ("debug_timings_since", int),
+        "ui.setting_keywords": ("ui_setting_keywords", dict),
     }
 
     def settings(self) -> dict[str, Any]:
@@ -347,6 +430,13 @@ class Config:
                 value = [str(v).strip() for v in (value or []) if str(v).strip()]
                 if key == "detect.placeholder_kinds":
                     value = _held_back(value)
+            elif typ is dict:
+                value = setting_keywords(value)
+            elif typ == "presets":
+                # Against the cap as it will be after this save, when the same save changes it.
+                from .presets import normalise_presets
+                cap = int(changes.get("session.max_running", self.session_max_running) or 0)
+                value = normalise_presets(value, cap)
             else:
                 value = str(value)
             if key == "secrets.mode" and value not in ("redact", "block", "off"):
@@ -499,6 +589,8 @@ class Config:
             cfg.debug_timings_since = int(debug.get("timings_since", 0) or 0)
         except (TypeError, ValueError):
             cfg.debug_timings_since = 0
+        ui_cfg = data.get("ui") if isinstance(data.get("ui"), dict) else {}
+        cfg.ui_setting_keywords = setting_keywords(ui_cfg.get("setting_keywords"), strict=False)
         ses = data.get("session") or {}
         cfg.session_enabled = _flag(ses, "enabled", True, "session.enabled")
         cfg.session_casual_folder = os.path.expandvars(str(ses.get("casual_folder", "") or "")).strip()
@@ -512,7 +604,26 @@ class Config:
             cfg.session_max_running = 4
         cfg.session_thinking_display = str(ses.get("thinking_display", "summarized") or "")
         cfg.session_auto_titles = _flag(ses, "auto_titles", True, "session.auto_titles")
+        cfg.session_job_cleanup = _flag(ses, "job_cleanup", False, "session.job_cleanup")
+        cfg.session_show_thinking = _flag(ses, "show_thinking", True, "session.show_thinking")
+        cfg.session_turn_summary = _flag(ses, "turn_summary", False, "session.turn_summary")
+        # D208's caps: missing or not a number = the default, never "no cap" by accident.
+        for attr, key, default in (("session_max_processes", "max_processes", 400),
+                                   ("session_max_memory_gb", "max_memory_gb", 16),
+                                   ("session_idle_offer_hours", "idle_offer_hours", 8)):
+            try:
+                setattr(cfg, attr, max(0, int(ses.get(key, default))))
+            except (TypeError, ValueError):
+                setattr(cfg, attr, default)
         cfg.session_profiles = session_profiles(ses, cfg.session_projects)
+        # Loaded without the length limit: a cap lowered since must not lose a panel's projects (the run fails the
+        # ones that find no slot instead). A malformed entry falls back to the two empty panels.
+        from .presets import PresetError, normalise_presets
+        try:
+            cfg.session_presets = normalise_presets(ses.get("presets"))
+        except PresetError as exc:
+            log.warning("session.presets ignored: %s", exc)
+            cfg.session_presets = _default_presets()
         hl = data.get("highlight") or {}
         cfg.highlight_session = _flag(hl, "session", True, "highlight.session")
         cfg.highlight_terminal = _flag(hl, "terminal", False, "highlight.terminal")

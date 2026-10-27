@@ -23,6 +23,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import re
 import shutil
 import time
@@ -39,7 +40,7 @@ from .config import Config, session_profiles
 from .attachments import scrub
 from .convert import image_converter, pdftotext_converter
 from .contact import ContactSource
-from . import bashguard, codetab_settings, deliver, rules, updates, who
+from . import bashguard, codetab_settings, deliver, lifecycle, rules, shutdown, updates, who
 from .codetab import CODETAB, CodeTab
 from .codetab_ca import Authority, AuthorityError
 from .guard import REMOTE, make_guard
@@ -319,6 +320,7 @@ class Proxy:
         # Updates from the Settings page (2026-10-16): the last check, and update.auto's loop.
         self.updates = updates.UpdateState()
         self._auto_update: asyncio.Task | None = None
+        self.lifecycle: lifecycle.Monitor | None = None
         self.codetab_error = ""
         # Copilot in VS Code (release 6): what keeps VS Code from being pointed here, the last failure, when
         # Copilot traffic last arrived and since when it has been expected (the Overview's warning).
@@ -379,10 +381,13 @@ class Proxy:
         from .scanjob import ScanRunner
 
         self.scans = ScanRunner(cfg, queue_store=self.store)
-        # Feature 107: run as SYSTEM, Project sessions are off - Claude Code would run as SYSTEM, not as you.
+        # Feature 107 (decided 2026-10-24): "user" when the start-up task runs it as you, from boot, with the password
+        # Windows keeps. It is still you, so Project sessions stay on; a restart is this process ending, and the
+        # task's launcher loop (installer/Run-AiCleanerService.ps1) starts it again.
         self.service = os.environ.get("AICLEANER_SERVICE", "").strip().lower()
-        if self.service == "system":
-            cfg.session_enabled = False
+        from . import proctree
+        self._elevated = proctree.elevated()
+        self._token = proctree.token_facts()
         if cfg.session_enabled:
             self._build_session_host()
         # Always constructed so the mode can be switched on at runtime; consulted only when mode is redact.
@@ -1594,6 +1599,14 @@ class Proxy:
             except Exception as exc:  # noqa: BLE001 - a proxy that cannot re-attach still starts
                 log.warning("could not re-attach running sessions: %s", exc)
         self._auto_update = asyncio.create_task(self._auto_update_loop())
+        # The lifecycle log and its watcher (spec 2026-10-24-session-lifecycle-instrumentation.md): only for an
+        # installed proxy or a test home, like every other write to this machine's state above.
+        if writes_settings:
+            lifecycle.configure(self.cfg.log_dir, self.cfg.session_job_cleanup, self.cfg.session_max_processes,
+                                self.cfg.session_max_memory_gb)
+            self.lifecycle = lifecycle.Monitor(self._lifecycle_sessions, self._lifecycle_owners)
+            self.lifecycle.on_resources = self._session_resources
+            self.lifecycle.start()
 
     # ---- updates (2026-10-16) ---------------------------------------------------------------------
 
@@ -1698,6 +1711,7 @@ class Proxy:
         # The tree draws from the profile's workspace files (D99), within the allowed folder locations.
         self.session.allowed_roots = self._allowed_roots
         self.session.auto_titles = cfg.session_auto_titles     # item E
+        self.session.idle_offer_hours = cfg.session_idle_offer_hours     # stability spec S2
         # Other AI services (item K): their filtering made ready here, their conversations filed in state.
         self.session.prepare_agent = self.prepare_agent
         self.session.client_names = self.client_name_count      # D197
@@ -1711,11 +1725,11 @@ class Proxy:
         from . import casual
 
         if not self.cfg.folder_roots:
-            raise casual.CasualError("no root folders are set yet - add one under Settings, "
-                                     "\"Folders the pages may reach\", then choose a folder inside it")
+            raise casual.CasualError("no root folders are set yet - add one under Settings > Remote access, "
+                                     "\"Folders the pages can open\", then choose a folder inside it")
         if not casual.inside(Path(folder.strip().strip('"')), list(self.cfg.folder_roots)):
             raise casual.CasualError(f"{folder} is not inside a root folder - choose one inside them, or add its "
-                                     "location under Settings, \"Folders the pages may reach\"")
+                                     "location under Settings > Remote access, \"Folders the pages can open\"")
         path = casual.prepare(folder)
         self.cfg.update_settings({"session.casual_folder": str(path)})
         entries, _problem = self.profile_store.load()
@@ -1747,9 +1761,23 @@ class Proxy:
             self._build_session_host()
         elif not self.cfg.session_enabled and self.session is not None:
             host, self.session = self.session, None
-            await host.stop_all()
+            await host.stop_all("session-disabled")
+
+    def _lifecycle_sessions(self) -> list[dict[str, Any]]:
+        return self.session.process_view() if self.session is not None else []
+
+    def _session_resources(self, resources: dict[str, dict[str, Any]], memory: dict[str, Any]) -> None:
+        if self.session is not None:
+            self.session.resources = resources
+            self.session.machine_memory = memory
+
+    def _lifecycle_owners(self) -> list[int]:
+        return [os.getpid(), os.getppid()]
 
     async def _stop(self, app: web.Application) -> None:
+        if self.lifecycle is not None:
+            await self.lifecycle.stop()
+            lifecycle.record("proxy-stop", pid=os.getpid())
         if self._auto_update is not None:
             self._auto_update.cancel()
             self._auto_update = None
@@ -1780,7 +1808,10 @@ class Proxy:
             "forms": len(m.forms),
             "dialects": sorted(self.cfg.upstreams),
             "keep_tokenised_tools": self.cfg.keep_tokenised_tools,
-            "service": self.service,             # feature 107: "system" when run by the start-up task
+            "service": self.service,             # feature 107: "user" when run by the start-up task
+            # Feature 107: the start-up task must give aicleaner the limited token, never an administrator's.
+            "elevated": self._elevated,
+            "token": self._token,
         }
         if self._handle is not None:
             body["mapping_reloads"] = self._handle.reloads
@@ -2023,7 +2054,7 @@ class Proxy:
                         {"type": "error", "error": {"type": "aicleaner_canary",
                          "message": "aicleaner refused to send this request: a real client "
                                     f"identifier survived tokenisation (clients: {', '.join(leaked)}). "
-                                    "Check the mapping forms."}},
+                                    "The Log page (Refused by the canary) shows what matched and offers a fix."}},
                         status=403,
                     )
             elif "/" + tail not in self.cfg.allow_non_json_paths:
@@ -2244,6 +2275,7 @@ class Proxy:
                     await response.write(held.pop(0).serialise())
             await response.write(out.serialise())
 
+        cut: BaseException | None = None
         try:
             opened = self._open.get((request.get(_REQ) or {}).get("id", ""))
             async for chunk in upstream_resp.content.iter_any():
@@ -2278,6 +2310,8 @@ class Proxy:
                 await send(out)
             while held:
                 await response.write(held.pop(0).serialise())
+        except (aiohttp.ClientPayloadError, aiohttp.ClientConnectionError) as exc:
+            cut = exc                    # the upstream ended the reply part-way (S7): said below, once
         finally:
             if rewriter.fragments:
                 # The safety net under D87: a token written in a form swap-back does not know went
@@ -2294,6 +2328,8 @@ class Proxy:
                 auto_added=auto_added, held_back=held_back, attachments=attach, near_miss=near_miss,
                 session=session_name, session_client=session_client,
             )
+        if cut is not None:
+            return cut_short(request, response, f"{request.method} /{tail}", cut)
         await response.write_eof()
         return response
 
@@ -2329,8 +2365,22 @@ class Proxy:
         """folders.roots plus the folders already in use, resolved - what a folder picker may
         show, and so what a workspace file may add to a session's tree (D72)."""
         from .folders import roots_of
+        # Kept until the folder settings or the profiles file change (2026-10-27): it read the profiles file and
+        # resolved every folder (OneDrive ones included) each time, and the Session page asks for it per profile on
+        # every switch and every 5-second poll - most of a 250 ms state request on the proxy's one core.
+        try:
+            stat = self.profile_store.path.stat()
+            stamp = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = None
+        key = (tuple(str(r) for r in self.cfg.folder_roots), stamp)
+        held = getattr(self, "_roots_held", None)
+        if held is not None and held[0] == key:
+            return list(held[1])
         in_use = [str(p) for entry in self.read_profiles() for p in (entry.get("projects") or [])]
-        return roots_of(list(self.cfg.folder_roots) + in_use)
+        roots = roots_of(list(self.cfg.folder_roots) + in_use)
+        self._roots_held = (key, roots)
+        return list(roots)
 
     def _mapping_store(self) -> MappingStore:
         if self._handle is not None:
@@ -2375,7 +2425,47 @@ class Proxy:
         )
 
 
+# The exit code of a start that found its port already taken: "another copy has it", not a crash. Start-AiCleaner
+# and the watchdog read it as "wait for the one that is starting" (stability spec S3).
+PORT_TAKEN_EXIT = 3
+
+
+def cut_short(request: web.Request, response: web.StreamResponse, what: str, exc: BaseException) -> web.StreamResponse:
+    """An upstream that ended a streamed reply part-way (the network dropped, the host slept): one line in the log,
+    and the client's connection closed, so it sees a broken reply rather than a short one that looks complete.
+    It used to surface as an unhandled traceback from aiohttp (stability spec S7)."""
+    log.warning("the upstream ended the reply part-way (%s): %s", what, exc)
+    if request.transport is not None:
+        request.transport.close()
+    return response
+
+
+def claim_port(listen: str, port: int) -> socket.socket:
+    """The listening socket, claimed before anything else runs. A second copy started beside a first - two logon
+    triggers after a cold boot did it on 2026-10-24 - used to run every start-up hook (re-attaching to the first
+    copy's sessions, opening clients) and only then fail to bind, leaving a traceback and unclosed sessions. Now it
+    finds out first and leaves. Exclusive on Windows, so no other program can share the port either."""
+    family = socket.AF_INET6 if ":" in listen else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    try:
+        sock.bind((listen, port))
+        sock.listen(128)
+    except OSError:
+        sock.close()
+        raise
+    sock.setblocking(False)
+    return sock
+
+
 def run(cfg: Config) -> None:
+    try:
+        sock = claim_port(cfg.listen, cfg.port)
+    except OSError as exc:
+        log.warning("port %s:%d is already in use (%s): another aicleaner is running or starting - not starting a "
+                    "second copy", cfg.listen, cfg.port, exc.strerror or exc)
+        raise SystemExit(PORT_TAKEN_EXIT) from None
     # A folder per client (DECISIONS 51): files earlier versions wrote flat move into their folders
     # before anything reads them, backed up first. A failure here costs the move, never the start.
     try:
@@ -2408,11 +2498,19 @@ def run(cfg: Config) -> None:
                     "specific refusal right now.", path)
     app = proxy.build_app()
     app.on_startup.append(lambda _app: _start_watchdog(cfg.listen, cfg.port, lambda: _restart_self(cfg)))
-    web.run_app(app, host=cfg.listen, port=cfg.port, print=None, access_log=None)
+    # Logoff or shutdown: say so and leave at once, rather than hold Windows up (stability spec S4). Sessions live
+    # in their brokers, which answer the same event for themselves.
+    shutdown.install(lambda kind: lifecycle.record("proxy-stop", pid=os.getpid(), why=kind))
+    web.run_app(app, sock=sock, print=None, access_log=None)
 
 
 def _restart_self(cfg: Config) -> None:
-    """What the Restart button does: Stop and Start in a detached PowerShell, which stops this process."""
+    """What the Restart button does: Stop and Start in a detached PowerShell, which stops this process. Run by the
+    start-up task (feature 107), ending this process is the restart: its launcher starts it again in 5 seconds."""
+    if os.environ.get("AICLEANER_SERVICE", "").strip():
+        log.critical("run by the start-up task: ending this process so its launcher starts it again")
+        os._exit(0)
+        return
     from .restart import restart
     if cfg.path is None:
         raise RuntimeError("not started from an installed config")

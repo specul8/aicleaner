@@ -1,6 +1,6 @@
 // Settings: cards, each saved on its own (logging, notifications, auto-add, tool arguments),
-// import and export, and read-only contact and advanced details. Secrets mode lives on the
-// Secrets page only.
+// import and export, and read-only contact and advanced details, in groups chosen from a sidebar
+// (GROUPS) with a search across all of them. Secrets mode lives on the Secrets page only.
 
 import { getJSON, postJSON, say, sayError } from '../api.js';
 import { h, icon, kindLabel, savingButton, shortTime, timeAgo } from '../dom.js';
@@ -11,31 +11,388 @@ import { forgetPreviewChoice } from '../previewjump.js';
 import { openFeedback } from '../feedback.js';
 import { aiToolsTable } from '../aitools.js';
 import { casualFolderField } from '../chatnow.js';
+import { arrangeSheet } from '../sheet.js';
 
-const view = { main: null, ctx: null, config: null, host: null, cards: [], watching: false };
+const view = { main: null, ctx: null, config: null, host: null, cards: [], group: null, side: null };
 
-// Below this the page is one column. Kept in step with the media query in app.css.
-const TWO_COLUMNS_FROM = 1000;
+// The groups down the left, in this order, and the cards in each, in this order (Brad, 2026-10-27:
+// "a sidebar of groups, like Windows Settings"). A card is named by its data-card key, which never
+// changes, so #/settings/<card> links and the tests that find a card by key outlive a new title.
+// The Danger zone is last: every card in it turns a protection off, and a control like that should
+// take deciding to reach. Pictures is dangerous too (one choice sends pictures unfiltered), but it
+// is a filtering choice first, so it lives in Filtering and keeps its red state there.
+const GROUPS = [
+  { key: 'aicleaner', label: 'aicleaner',
+    cards: ['setup', 'updates', 'service', 'restart', 'contact', 'feedback', 'menu-layout', 'importexport'] },
+  { key: 'sessions', label: 'Sessions', cards: ['session', 'editor', 'autocorrect', 'highlight', 'notifications'] },
+  { key: 'filtering', label: 'Filtering',
+    cards: ['kinds', 'near-miss', 'public-list', 'tools', 'images', 'ocr', 'scan-markers'] },
+  { key: 'ai-apps', label: 'AI apps', cards: ['aitools', 'routing', 'bash-guard', 'codetab', 'claudeai', 'copilot'] },
+  { key: 'remote-access', label: 'Remote access', cards: ['tunnel', 'folders'] },
+  { key: 'logs', label: 'Logs', cards: ['logging', 'diagnostics', 'advanced'] },
+  { key: 'danger-zone', label: 'Danger zone', cards: ['bypass', 'fail-open', 'uninspected'] },
+];
+// A card added later and not yet given a group is still shown, in the first group, rather than lost.
+const FALLBACK_GROUP = GROUPS[0].key;
+// The group last chosen, for an address that names none (this browser only, like the menu layout).
+const LAST_GROUP = 'aicleaner.settingsGroup';
 
-// Cards are dealt across the columns in order - 1 left, 2 right, 3 left - so the page reads the
-// way it always has. What changes is that each column then packs on its own, in a flex column
-// with one fixed gap: a grid builds rows, and a row is as tall as its tallest card, so a short
-// card beside a long one left a pocket of dead space and the gap between two cards depended on
-// what happened to be next to them.
-//
-// Narrow, it is one column, and the dealing has to be redone rather than left to CSS: with the
-// cards already split between two elements, collapsing them would read 1, 3, 5, then 2, 4, 6.
-function dealCards(host, cards) {
-  const count = window.innerWidth >= TWO_COLUMNS_FROM ? 2 : 1;
-  const columns = Array.from({ length: count }, () => h('div', { class: 'settings-column' }));
-  cards.filter(Boolean).forEach((section, index) => columns[index % count].append(section));
-  host.replaceChildren(...columns);
+// Other words people use for a card (feature 153, Brad 2026-10-27: "so that it can be found based on
+// what I think it should be called"). "Find a setting" matches these as well as what the card says;
+// your own words (ui.setting_keywords) add to them. Every card has some - a test checks.
+const BUILTIN_WORDS = {
+  setup: ['wizard', 'getting started', 'install', 'first run', 'onboarding'],
+  updates: ['upgrade', 'version', 'release', 'auto-update', 'new version'],
+  service: ['startup', 'boot', 'windows service', 'scheduled task', 'autostart'],
+  restart: ['reboot', 'reload', 'stop', 'start proxy', 'relaunch'],
+  contact: ['profile', 'account', 'email', 'my name', 'who am i'],
+  feedback: ['bug report', 'issue', 'suggestion', 'support', 'help'],
+  'menu-layout': ['navigation', 'sidebar', 'top bar', 'menu position'],
+  importexport: ['backup', 'restore', 'migrate', 'transfer', 'download'],
+  session: ['chat sessions', 'project sessions', 'conversations', 'claude code', 'permissions', 'profiles'],
+  editor: ['code editor', 'monaco', 'minimap', 'completion', 'suggestions', 'markdown preview'],
+  autocorrect: ['spelling', 'spell check', 'typos', 'replacements', 'dictionary'],
+  highlight: ['colour', 'color', 'terminal', 'green text', 'rehydrated'],
+  notifications: ['alerts', 'toast', 'footer', 'popups', 'messages'],
+  kinds: ['detection', 'auto-add', 'new names', 'identifiers', 'placeholders', 'quiet'],
+  'near-miss': ['typos', 'misreadings', 'misspellings', 'fuzzy', 'similar names'],
+  'public-list': ['shared identifiers', 'global list', 'common names', 'public names'],
+  tools: ['tool calls', 'MCP', 'tool arguments', 'tokens in tools'],
+  images: ['pictures', 'screenshots', 'vision', 'photos', 'attachments', 'redact images'],
+  ocr: ['scanned', 'text in images', 'PDF', 'scans', 'character recognition'],
+  'scan-markers': ['build output', 'generated files', 'node_modules', 'bin', 'skip folders'],
+  aitools: ['sign in', 'login', 'accounts', 'AI tools', 'Claude Code', 'Codex'],
+  routing: ['proxy', 'base URL', 'endpoints', 'redirect', 'environment variables'],
+  'bash-guard': ['shell', 'bash', 'commands', 'PowerShell tool', 'guard'],
+  codetab: ['Claude Desktop', 'desktop app', 'code tab', 'forward proxy'],
+  claudeai: ['claude.ai', 'Claude Desktop', 'chat', 'web chat', 'route B'],
+  copilot: ['VS Code', 'Visual Studio Code', 'GitHub', 'code completion', 'certificate'],
+  tunnel: ['remote access', 'VPN', 'phone', 'Cloudflare', 'away from desk', 'mobile', 'encryption'],
+  folders: ['directories', 'paths', 'file picker', 'OneDrive', 'allowed folders'],
+  logging: ['logs', 'audit', 'history', 'retention', 'detail log'],
+  diagnostics: ['telemetry', 'tracing', 'performance', 'timings', 'slow', 'speed', 'debug'],
+  advanced: ['config file', 'port', 'listening', 'aicleaner-config.json', 'technical'],
+  bypass: ['turn off filtering', 'disable', 'pass through', 'off switch', 'unfiltered'],
+  'fail-open': ['canary', 'emergency', 'false positive', 'locked out', 'override'],
+  uninspected: ['unchecked', 'non-JSON', 'endpoints', 'paths not filtered', 'allow list'],
+};
+
+function groupOf(cardKey) {
+  const found = GROUPS.find((group) => group.cards.includes(cardKey));
+  return found ? found.key : FALLBACK_GROUP;
 }
 
-// #/settings/<card> opens at that card. A refusal elsewhere can then link straight to the control
-// that answers it, instead of naming a card among eighteen and leaving you to scroll for it - the
-// folders list sits two thirds of the way down one of two columns, which is how it got reported as
-// missing. Unknown names are ignored, so an old link is never worse than the plain page.
+function groupLabel(groupKey) {
+  return (GROUPS.find((group) => group.key === groupKey) || GROUPS[0]).label;
+}
+
+// The groups that have something to show: a group whose cards are all null here (AI apps off
+// Windows has only the read-only ones, but a group could be empty) is not offered.
+function shownGroups() {
+  const present = new Set(view.cards.map((section) => groupOf(section.dataset.card)));
+  return GROUPS.filter((group) => present.has(group.key));
+}
+
+// The cards in group order, each after a small "In <group>" line that is shown only while
+// searching, when cards from every group are listed together. All of them stay in the page and
+// are hidden rather than removed: a card out of sight still holds what was typed into it, and the
+// unsaved-changes check (D98) still sees it.
+function placeCards() {
+  const rank = (section) => {
+    const key = section.dataset.card;
+    const group = GROUPS.findIndex((g) => g.key === groupOf(key));
+    const within = GROUPS[group].cards.indexOf(key);
+    return group * 100 + (within < 0 ? 99 : within);
+  };
+  const ordered = [...view.cards].sort((a, b) => rank(a) - rank(b));
+  view.host.replaceChildren(...ordered.flatMap((section) => {
+    const group = groupOf(section.dataset.card);
+    const label = h('p', { class: 'settings-found-in', dataset: { group }, hidden: true }, 'In ',
+      h('a', { href: `#/settings/${section.dataset.card}` }, groupLabel(group)),
+      h('span', { class: 'settings-matched' }));
+    label.querySelector('a').addEventListener('click', (event) => {
+      event.preventDefault();
+      clearSearch();
+      openGroup(group);
+      showCard(section.dataset.card);
+    });
+    return [label, section];
+  }));
+}
+
+// What a search reads on a card: its title, its description and the words beside its controls. Not
+// the Words line at its foot: keywords are matched on their own, so a match on one can say so.
+function searchText(section) {
+  const parts = section.querySelectorAll(':scope > h2, :scope > p.hint, label, legend, th, summary, option, button');
+  return Array.from(parts).filter((el) => !el.closest('.setting-words'))
+    .map((el) => el.textContent).join(' ').toLowerCase();
+}
+
+function cardTitle(section) {
+  const title = section.querySelector(':scope > h2');
+  return title ? title.textContent : section.dataset.card;
+}
+
+// A card's own words (ui.setting_keywords), as saved; the config always sends the map, maybe empty.
+function ownWords(cardKey) {
+  const map = (view.config && view.config.settings && view.config.settings['ui.setting_keywords']) || {};
+  return Array.isArray(map[cardKey]) ? map[cardKey] : [];
+}
+
+function builtinWords(cardKey) {
+  return BUILTIN_WORDS[cardKey] || [];
+}
+
+// Every word typed has to be on the card or in one of its keywords, in any order. Returns null for
+// no match; otherwise the keywords that were needed (none when the card's own text was enough).
+function matchCard(section, words) {
+  const text = searchText(section);
+  const key = section.dataset.card;
+  const keywords = [...ownWords(key).map((word) => ({ word, own: true })),
+    ...builtinWords(key).map((word) => ({ word, own: false }))];
+  const used = [];
+  for (const word of words) {
+    if (text.includes(word)) continue;
+    const hit = keywords.find((k) => k.word.toLowerCase().includes(word));
+    if (!hit) return null;
+    if (!used.includes(hit)) used.push(hit);
+  }
+  return used;
+}
+
+// Every word typed has to be somewhere on the card, in any order.
+function applySearch(query) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const searching = words.length > 0;
+  let found = 0;
+  for (const section of view.cards) {
+    const label = section.previousElementSibling;
+    const used = searching ? matchCard(section, words) : null;
+    const show = searching ? used !== null : groupOf(section.dataset.card) === view.group;
+    section.hidden = !show;
+    if (label && label.classList.contains('settings-found-in')) {
+      label.hidden = !(searching && show);
+      // Why a card whose text does not say the word was found: "matched your word telemetry".
+      const why = label.querySelector('.settings-matched');
+      if (why) {
+        why.replaceChildren(...(used && used.length ? [' - matched ',
+          ...used.flatMap((k, i) => [i ? ', ' : '', k.own ? 'your word ' : '', h('em', {}, k.word)])] : []));
+      }
+    }
+    if (show) found += 1;
+  }
+  view.empty.hidden = !(searching && found === 0);
+  paintOffer(searching && found === 0 ? query : '');
+  paintGroups();
+}
+
+// --- Your own words for a setting (feature 153) ---------------------------------------------------
+
+const WORD_MAX = 40;            // config.SETTING_WORD_MAX
+const WORDS_PER_CARD = 20;      // config.SETTING_WORDS_PER_CARD
+
+const tidyWord = (text) => String(text || '').trim().split(/\s+/).filter(Boolean).join(' ');
+
+// Saved like any other setting, so the words follow you to every device; the whole map is sent, as
+// the server keeps a setting whole rather than merging into it.
+async function saveWords(cardKey, words) {
+  const map = { ...((view.config.settings || {})['ui.setting_keywords'] || {}) };
+  if (words.length) map[cardKey] = words;
+  else delete map[cardKey];
+  const result = await postJSON('/api/config', { settings: { 'ui.setting_keywords': map } });
+  view.config.settings = result.settings;
+  window.dispatchEvent(new CustomEvent('aicleaner:settings', { detail: result.settings }));
+  for (const section of view.cards) paintWords(section);
+  applySearch(view.search ? view.search.value : '');
+}
+
+// Adds a word to a card; says why not when it cannot. true when it was added (or was there already).
+async function addWord(cardKey, typed) {
+  const word = tidyWord(typed);
+  if (!word) return false;
+  if (word.length > WORD_MAX) {
+    say(`A word for a setting is up to ${WORD_MAX} characters.`, 'warn');
+    return false;
+  }
+  const own = ownWords(cardKey);
+  const known = [...own, ...builtinWords(cardKey)].map((w) => w.toLowerCase());
+  if (known.includes(word.toLowerCase())) {
+    say(`"${word}" is already a word for that setting.`, 'info');
+    return true;
+  }
+  if (own.length >= WORDS_PER_CARD) {
+    say(`Up to ${WORDS_PER_CARD} of your own words for one setting; remove one first.`, 'warn');
+    return false;
+  }
+  try {
+    await saveWords(cardKey, [...own, word]);
+    return true;
+  } catch (error) {
+    sayError(error);
+    return false;
+  }
+}
+
+async function removeWord(cardKey, word) {
+  try {
+    await saveWords(cardKey, ownWords(cardKey).filter((w) => w !== word));
+  } catch (error) {
+    sayError(error);
+  }
+}
+
+// The Words line at a card's foot: the built-in words in grey, your own with an x to remove, and a
+// box to add one. Kept out of the unsaved-changes check: a word is saved the moment it is added.
+// Added after the card is built, so a card locked through remote access still takes words.
+function paintWords(section) {
+  const key = section.dataset.card;
+  let line = section.querySelector(':scope > .setting-words');
+  if (!line) {
+    line = h('div', { class: 'setting-words', 'data-unsaved-ignore': true });
+    section.append(line);
+  }
+  const box = h('input', { type: 'text', class: 'setting-word-input', placeholder: 'Add a word',
+    maxlength: WORD_MAX, autocomplete: 'off', 'aria-label': `Add your own word for ${cardTitle(section)}` });
+  const add = h('button', { type: 'button', class: 'setting-word-add' }, 'Add');
+  const submit = async () => {
+    add.disabled = true;
+    if (await addWord(key, box.value)) box.value = '';
+    add.disabled = false;
+  };
+  add.addEventListener('click', submit);
+  box.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); submit(); }
+  });
+  const own = ownWords(key).map((word) => {
+    const remove = h('button', { type: 'button', class: 'setting-word-remove', title: `Remove ${word}`,
+      'aria-label': `Remove your word ${word}` }, 'x');
+    remove.addEventListener('click', () => removeWord(key, word));
+    return h('span', { class: 'setting-word own', dataset: { word } }, word, remove);
+  });
+  const builtin = builtinWords(key).map((word) => h('span', { class: 'setting-word builtin',
+    title: 'Built in', dataset: { word } }, word));
+  line.replaceChildren(h('span', { class: 'setting-words-label' }, 'Words:'), ...own, ...builtin, box, add);
+}
+
+// When nothing matches, the words typed can become a word for the card you meant (Brad's case:
+// "telemetry" for Diagnostics). Offered only for something that would be accepted as a word.
+function paintOffer(query) {
+  if (!view.offer) return;
+  const word = tidyWord(query);
+  if (!word || word.length > WORD_MAX) {
+    view.offer.hidden = true;
+    view.offer.replaceChildren();
+    delete view.offer.dataset.word;
+    return;
+  }
+  // Redrawn only when the word changes: a redraw would drop a setting already chosen in the list.
+  if (!view.offer.hidden && view.offer.dataset.word === word) return;
+  view.offer.dataset.word = word;
+  const choose = h('select', { class: 'setting-word-card', 'aria-label': 'The setting this word is for' },
+    h('option', { value: '' }, 'Choose a setting'),
+    ...shownGroups().map((group) => h('optgroup', { label: group.label },
+      ...view.cards.filter((section) => groupOf(section.dataset.card) === group.key)
+        .map((section) => h('option', { value: section.dataset.card }, cardTitle(section))))));
+  const add = h('button', { type: 'button', class: 'primary setting-word-offer-add', disabled: true }, 'Add');
+  choose.addEventListener('change', () => { add.disabled = !choose.value; });
+  add.addEventListener('click', async () => {
+    add.disabled = true;
+    if (!(await addWord(choose.value, word))) add.disabled = false;
+  });
+  view.offer.hidden = false;
+  view.offer.replaceChildren(h('span', {}, 'Add ', h('em', {}, word), ' as a word for:'), choose, add);
+}
+
+function clearSearch() {
+  if (view.search && view.search.value) view.search.value = '';
+  applySearch('');
+}
+
+// The address says which group is open, without a navigation: the router is told, as the session
+// page tells it (D118), so it does not take the new address for one it still has to route to.
+function noteAddress(hash) {
+  if (location.hash === hash) return;
+  history.replaceState(null, '', hash);
+  window.dispatchEvent(new CustomEvent('aicleaner:address', { detail: hash }));
+}
+
+function openGroup(groupKey, { address = true } = {}) {
+  const offered = shownGroups();
+  const chosen = offered.find((group) => group.key === groupKey) || offered[0];
+  if (!chosen) return;
+  view.group = chosen.key;
+  try { localStorage.setItem(LAST_GROUP, chosen.key); } catch (error) { /* not remembered */ }
+  if (address) noteAddress(`#/settings/${chosen.key}`);
+  applySearch(view.search ? view.search.value : '');
+}
+
+// The sidebar (and, on a phone, the drop-down that stands in for it): one entry per group shown,
+// the open one marked, and any group holding a card that is red now - a protection switched off -
+// marked red too, so it can be seen without opening the group.
+function paintGroups() {
+  if (!view.side) return;
+  const searching = Boolean(view.search && view.search.value.trim());
+  const offered = shownGroups();
+  const alarmed = new Set(view.cards.filter((section) => section.classList.contains('bad'))
+    .map((section) => groupOf(section.dataset.card)));
+  view.groupList.replaceChildren(...offered.map((group) => {
+    const current = !searching && group.key === view.group;
+    const bad = alarmed.has(group.key);
+    const button = h('button', { type: 'button', class: `settings-group${bad ? ' bad' : ''}`,
+      dataset: { group: group.key }, 'aria-current': current ? 'true' : null,
+      title: bad ? `${group.label}: something here is switched on that turns a protection off` : null },
+    h('span', { class: 'settings-group-name' }, group.label),
+    bad ? h('span', { class: 'settings-group-mark', 'aria-label': 'turned on' }) : null);
+    button.addEventListener('click', () => { clearSearch(); openGroup(group.key); window.scrollTo(0, 0); });
+    return button;
+  }));
+  // An option cannot be coloured everywhere (a phone draws its own list), so it says so in words.
+  view.groupSelect.replaceChildren(...offered.map((group) => h('option', { value: group.key },
+    alarmed.has(group.key) ? `${group.label} (!)` : group.label)));
+  view.groupSelect.value = view.group;
+  view.groupSelect.classList.toggle('bad', alarmed.has(view.group));
+}
+
+function sidePanel() {
+  view.search = h('input', { type: 'search', class: 'settings-search', placeholder: 'Find a setting',
+    'aria-label': 'Find a setting in any group', 'data-unsaved-ignore': true, autocomplete: 'off' });
+  view.search.addEventListener('input', () => applySearch(view.search.value));
+  view.search.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { clearSearch(); view.search.blur(); }
+  });
+  view.groupList = h('nav', { class: 'settings-groups', 'aria-label': 'Settings groups' });
+  view.groupSelect = h('select', { class: 'settings-group-select', 'aria-label': 'Settings group',
+    'data-unsaved-ignore': true });
+  view.groupSelect.addEventListener('change', () => {
+    const chosen = view.groupSelect.value;   // read first: clearing the search redraws the options
+    clearSearch();
+    openGroup(chosen);
+  });
+  return h('aside', { class: 'settings-side', 'data-unsaved-ignore': true }, view.search, view.groupSelect, view.groupList);
+}
+
+// Where the page opens: the group or card the address names, else the group chosen last time, else
+// the first. A card's address opens its group and goes to the card.
+function openFromAddress(id) {
+  if (id && GROUPS.some((group) => group.key === id)) {
+    openGroup(id);
+    return;
+  }
+  if (id && view.cards.some((section) => section.dataset.card === id)) {
+    openGroup(groupOf(id), { address: false });
+    showCard(id);
+    return;
+  }
+  let last = null;
+  try { last = localStorage.getItem(LAST_GROUP); } catch (error) { /* none */ }
+  openGroup(last || GROUPS[0].key, { address: false });
+}
+
+// #/settings/<card> opens at that card (its group is opened first, by openFromAddress). A refusal
+// elsewhere can then link straight to the control that answers it, instead of naming a card among
+// thirty-odd and leaving you to find it - the folders list, two thirds of the way down one of two
+// columns, was reported as missing. Unknown names are ignored, so an old link is never worse than
+// the plain page.
 function showCard(name) {
   if (!name || !view.host) return;
   const section = view.host.querySelector(`section[data-card="${CSS.escape(name)}"]`);
@@ -84,6 +441,7 @@ function refreshDangerous() {
     if (active && !chip) section.prepend(h('p', { class: 'chip bad' }, saying));
     if (!active && chip) chip.remove();
   }
+  paintGroups();                        // the sidebar's red marks follow
 }
 
 function paintCards() {
@@ -101,36 +459,22 @@ function paintCards() {
     view.config.windows ? codeTabCard(s) : null,   // remotely: shown, locked by its keys (E4)
     view.config.windows ? copilotCard(s) : null,   // remotely too; its certificate waits for the machine
     view.config.windows ? claudeaiCard(s) : null,  // route B: the Copilot rule
-    toolsCard(s), routingCard(), restartCard(), updatesCard(s), feedbackCard(),
+    toolsCard(s), routingCard(), restartCard(),
+    view.config.windows ? serviceCard() : null,    // feature 107: shown remotely too, locked there
+    updatesCard(s), feedbackCard(),
     foldersCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
     contactCard(status.contact), editorCard(s), autocorrectCard(s), diagnosticsCard(s, status),
     advancedCard(status, view.config, view.config.dialects || []),
   ];
-  // Last, so each lands at the foot of its column and none of them is the first thing the page
-  // offers. Every one turns a protection off - forwarding untouched, sending pictures unfiltered,
-  // sending what the canary would refuse - and a control like that should take deciding to reach,
-  // not be sitting at the top where a settings page is usually skimmed. They still turn red and
-  // say so when they are on (DANGEROUS, above), which is the half that has to be impossible to miss.
+  // Every one of these turns a protection off - forwarding untouched, sending pictures unfiltered,
+  // sending what the canary would refuse. Where each is shown is GROUPS' business (the Danger zone,
+  // last; Pictures in Filtering); they turn red and say so when they are on (DANGEROUS, above), and
+  // the sidebar marks their group, which is the half that has to be impossible to miss.
   const dangerous = [bypassCard(s), imagesCard(s), failOpenCard(s)];
   view.cards = [...everyday, ...dangerous].filter(Boolean);   // a card with nothing to show is null
-  dealCards(view.host, view.cards);
-}
-
-// A button per card at the top of the page (the user, 2026-10-15: "too hard to find things"): its
-// title on the button, its description on hover, and a click goes straight to it - as a link to
-// #/settings/<card> does. In the page's own order, so the dangerous ones are last here too.
-function paintJump() {
-  if (!view.jump) return;
-  view.jump.replaceChildren(...view.cards.map((section) => {
-    const key = section.dataset.card;
-    const title = (section.querySelector(':scope > h2') || {}).textContent || key;
-    const hint = (section.querySelector(':scope > p.hint') || {}).textContent || '';
-    const button = h('button', { type: 'button', class: `chip settings-jump-to${section.classList.contains('bad') ? ' bad' : ''}`,
-      dataset: { card: key }, title: hint || title }, title);
-    button.addEventListener('click', () => showCard(key));
-    return button;
-  }));
+  for (const section of view.cards) paintWords(section);
+  placeCards();
 }
 
 // Where the menu sits (the user, 2026-10-15: moved here from the header's display button). A choice
@@ -154,7 +498,7 @@ function menuLayoutCard() {
 // Every AI tool aicleaner knows (item H, 2026-10-19): found, filtered, signed in, and sign-in. The table
 // locks what runs on this machine itself, so the card is not locked as a whole.
 function aiToolsCard() {
-  return card('aitools', 'AI tools',
+  return card('aitools', 'Sign-ins',
     'The AI tools aicleaner knows, whether each is on this machine, whether its traffic is filtered, and whether it is signed in. '
     + 'Claude Code can be signed in to from here - from any device. GitHub Copilot CLI and Codex are shown so you can see them; '
     + 'filtering them is not built yet. Microsoft 365 Copilot runs in Microsoft\'s cloud and is not covered.',
@@ -279,7 +623,7 @@ function imagesCard(s) {
   const mode = h('div', { class: 'images-mode' }, ...choices.map(([value, label]) => h('label', { class: 'check' },
     h('input', { type: 'radio', name: 'images_mode', value, checked: value === now ? true : null }), ' ', label)));
   const picked = () => (mode.querySelector('input:checked') || {}).value || 'text';
-  const section = card('images', 'Images',
+  const section = card('images', 'Pictures',
     'Text only (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. Redacted picture: the picture goes too, with every client name, unmapped identifier and secret the reader can see blacked out, and it is read again before it leaves - a name still legible keeps it back. What the reader cannot read (handwriting, a logo, tiny or rotated text) is not blacked out. Picture as it is: JPEG, PNG, GIF and WebP are sent unfiltered, so any client name in them reaches the provider (replies are still filtered). Other image types are always withheld. PDFs and Office documents are read to text and filtered either way.',
     [mode,
      // Saying this plainly is part of the decision to do it at all (feature 36). A proxy that
@@ -300,7 +644,7 @@ function imagesCard(s) {
 function nearMissCard(s) {
   const on = checkbox('near_miss', 'Correct misreadings in text read from images and documents',
     s['detect.near_miss']);
-  return card('near-miss', 'Misreadings',
+  return card('near-miss', 'Near-misses',
     'An OCR engine turns rn into m and l into I, and a mangled client name would walk straight past the filter. With this on, a word one letter away from a mapped identifier is corrected back to it - but only in text read from an image, a scan or a document, which is the only place a misreading is expected. Typed text is never touched: there, almost every match would be an ordinary long word being replaced by a client token.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'detect.near_miss': on.querySelector('input').checked }));
@@ -341,7 +685,7 @@ function foldersCard(s) {
     'System folders are refused from either side: Program Files, Program Files (x86), ProgramData '
     + 'and Windows, and anything inside them. Client work is never in one, and a root there would '
     + 'put every file under it behind the picker.');
-  return card('folders', 'Folders the pages may reach', hint,
+  return card('folders', 'Folders the pages can open', hint,
     [h('div', { class: 'form-row' }, area), inUse, refused],
     () => ({ 'folders.roots': area.value.split('\n').map((line) => line.trim()).filter(Boolean) }));
 }
@@ -352,7 +696,7 @@ function scanMarkersCard(s) {
   const area = h('textarea', { name: 'markers', rows: '3', 'aria-label': 'Machine-written folders',
     placeholder: 'scripts/output\ndiaglogs-\nintune-portal-export' });
   area.value = (s['scan.generated_markers'] || []).join('\n');
-  return card('scan-markers', 'Folders holding machine-written output',
+  return card('scan-markers', 'Generated-output folders',
     'One path fragment per line, matched inside the folder being scanned. In a file a machine wrote - '
     + 'a diagnostic dump, a portal export, a capture - a scan only keeps what carries a name the '
     + 'mapping already knows, because a bare GUID or address in one of those belongs to whoever made '
@@ -368,7 +712,7 @@ function uninspectedCard(paths) {
   const body = listed.length
     ? [h('ul', { class: 'bad-list' }, ...listed.map((p) => h('li', { class: 'mono' }, p)))]
     : [h('p', { class: 'chip ok' }, 'Empty: every request with a body is inspected.')];
-  const section = card('uninspected', 'AI endpoints forwarded with no inspection at all',
+  const section = card('uninspected', 'Unchecked endpoints',
     'The filter works on text it can find inside a parsed body, so a request whose body is not JSON - a file upload, a form post, anything binary - is refused rather than sent unread. An endpoint listed here is exempt, and exempt means nothing is done to it: no names replaced, no identifiers detected, nothing held back, and no canary check before it leaves. It is the only path through this proxy with no safety net under it. The exemption is per endpoint and never per file, so listing an upload endpoint exempts every upload through it, not the one you had in mind. Set it in aicleaner-config.json (allow_non_json_paths) and restart; there is no control here because this is not a setting to tune.',
     body, null);
   if (listed.length) section.classList.add('bad');
@@ -482,7 +826,7 @@ function kindsCard(s, kinds) {
       'detect.ignore_add_kinds': owned.filter((kind) => chosen[kind].ignore),
     };
   };
-  return card('kinds', 'What happens to something new',
+  return card('kinds', 'New names found',
     // Shorter, with the detail behind each row's ? (the user, 2026-10-06).
     'What aicleaner does with identifiers the mapping does not know yet, for each type. Hover over or click the \u2753 beside a type to see what its current choices will do. Private IP addresses and anything on an ignore list are never touched - but an ignore wildcard (admin*, *-prod) never covers a value that contains a client\'s name: admin-<client>-vm still reaches Review unless that exact value is on the list.',
     [h('div', { class: 'kinds-wrap' }, table),
@@ -499,6 +843,24 @@ function sessionCard(s) {
   // Titles when a session stops (item E, 2026-10-16): on by default; one short request to a small model.
   const titles = checkbox('auto-titles', 'Write a title for a conversation when its session stops (a short request to a small model, filtered as usual)',
     s['session.auto_titles'] !== false);
+  // Job cleanup (2026-10-24): off, a session's job only counts its processes; on, a broker that crashes or is
+  // killed takes its whole tree with it. Stop still lets work in hand finish (D112).
+  // Two ways of working with a session (Brad, 2026-10-27).
+  const thinking = checkbox('show-thinking', 'Show thinking: Claude\'s thinking is drawn expanded in the chat (off: folded to one line, opened with a click)',
+    s['session.show_thinking'] !== false);
+  const summary = checkbox('turn-summary', 'Turn summary: a message sent while Claude works is answered when the task is done, unless it asks for something now ("quickly change x, then carry on")',
+    s['session.turn_summary'] === true);
+  const cleanup = checkbox('job-cleanup', "End a session's leftover processes when its broker ends (a crash, a kill or a shutdown) - new sessions only",
+    s['session.job_cleanup'] === true);
+  // Caps on each session as a whole (D208): a runaway - a fork bomb, a leak - is refused inside its own session
+  // instead of freezing the machine. 0 = no cap.
+  const capProcs = h('input', { type: 'number', name: 'max_processes', min: '0', max: '100000', step: '10',
+    value: String(s['session.max_processes'] ?? 400) });
+  const capMemory = h('input', { type: 'number', name: 'max_memory_gb', min: '0', max: '1024', step: '1',
+    value: String(s['session.max_memory_gb'] ?? 16) });
+  // Stability spec S2: the Session page offers to stop a session idle this long. An offer only, never a stop.
+  const idleHoursIn = h('input', { type: 'number', name: 'idle_offer_hours', min: '0', max: '720', step: '1',
+    value: String(s['session.idle_offer_hours'] ?? 8) });
   // The casual-chats folder (item J): asked for here when Project Sessions is on and none is chosen.
   const casual = casualFolderField(null);
   const casualAsk = h('p', { class: 'hint casual-ask', hidden: true },
@@ -514,9 +876,24 @@ function sessionCard(s) {
       h('div', { class: 'form-row' }, h('label', { class: 'field' },
         'Sessions running at once (0 = no cap; the machine is the limit). Lowering it stops nothing - it only refuses new starts until enough have stopped.', most)),
       h('div', { class: 'form-row' }, titles),
+      h('div', { class: 'form-row' }, thinking),
+      h('div', { class: 'form-row' }, summary),
+      h('div', { class: 'form-row' }, cleanup),
+      h('div', { class: 'form-row' }, h('label', { class: 'field' },
+        'Most processes one session may run at once (0 = no cap). New sessions only.', capProcs)),
+      h('div', { class: 'form-row' }, h('label', { class: 'field' },
+        'Offer to stop a session idle this many hours (0 = never; it is only ever an offer).', idleHoursIn)),
+      h('div', { class: 'form-row' }, h('label', { class: 'field' },
+        'Most memory one session may use, in GB (0 = no cap). Past it the session\'s own allocations fail, not the machine\'s. New sessions only.', capMemory)),
       h('h3', {}, 'Casual chats'), casualAsk, casual.element],
     () => ({ 'session.enabled': on.querySelector('input').checked,
       'session.auto_titles': titles.querySelector('input').checked,
+      'session.job_cleanup': cleanup.querySelector('input').checked,
+      'session.show_thinking': thinking.querySelector('input').checked,
+      'session.turn_summary': summary.querySelector('input').checked,
+      'session.max_processes': capProcs.value.trim() === '' ? 400 : Math.max(0, Math.floor(Number(capProcs.value) || 0)),
+      'session.max_memory_gb': capMemory.value.trim() === '' ? 16 : Math.max(0, Math.floor(Number(capMemory.value) || 0)),
+      'session.idle_offer_hours': idleHoursIn.value.trim() === '' ? 8 : Math.max(0, Math.floor(Number(idleHoursIn.value) || 0)),
       // A cleared box is the default, never "no cap" by accident.
       'session.max_running': most.value.trim() === '' ? 4 : Math.max(0, Math.floor(Number(most.value) || 0)) }));
 }
@@ -592,7 +969,7 @@ function tunnelCard(s) {
 
 function highlightCard(s) {
   const terminal = checkbox('terminal', 'Also colour them in Claude Code (terminal and VS Code)', s['highlight.terminal']);
-  return card('highlight', 'Restored names in green',
+  return card('highlight', 'Real names in green',
     'Names the proxy restored in a reply are shown in green, so you can see what the filter did and read an odd answer in that light - the AI saw a token where you see the name. The session page always does this. Claude Code gets it as a terminal colour: turn it on and look at a reply, and if the VS Code panel shows raw codes such as [32;22m instead of colour, turn it off again. Claude Desktop is not coloured.',
     [h('div', { class: 'form-row' }, terminal)],
     () => ({ 'highlight.terminal': terminal.querySelector('input').checked }));
@@ -603,7 +980,7 @@ function highlightCard(s) {
 function bashGuardCard(s) {
   // Named for PowerShell, which is what people look for (D172, the user 2026-10-09).
   const guard = checkbox('bash-guard', 'Use PowerShell, and stop Bash commands that contain a doubled backslash', s['claude.bash_guard']);
-  return card('bash-guard', 'Claude Code on Windows: PowerShell',
+  return card('bash-guard', 'Claude Code: PowerShell',
     'On Windows, Claude Code\'s Bash tool halves every doubled backslash before the shell sees it - even inside a quoted heredoc - so text Claude writes through Bash can silently change (\\\\n becomes a line break). Write, Edit and the PowerShell tool keep backslashes exactly. With this on, a Bash call holding a doubled backslash is stopped and Claude is told to use PowerShell (5.1 preferred, or 7) or Write/Edit; the PowerShell tool is switched on in Claude Code\'s settings if it is not already. It applies to skills and plugins too - a hook cannot tell them apart. Restart Claude Code sessions after changing it.',
     [h('div', { class: 'form-row' }, guard)],
     () => ({ 'claude.bash_guard': guard.querySelector('input').checked }));
@@ -633,7 +1010,7 @@ function codeTabCard(s) {
     }
     status.textContent = lines.join(' ');
   }).catch(() => { status.textContent = ''; });
-  return card('codetab', 'Claude Code in the Claude Desktop app (the Code tab)',
+  return card('codetab', 'Claude Desktop: Code tab',
     'The Code tab does not use aicleaner\'s usual routing. With this on, Claude Code\'s settings send its traffic through a proxy on this machine: calls to Anthropic are read and filtered like VS Code\'s, sign-in and updates pass through untouched, and its error-log upload is blocked. Only Claude Code trusts the certificate aicleaner uses, and that certificate can only vouch for api.anthropic.com. Commands Claude Code runs and the MCP servers in its own settings connect directly, as before; MCP servers from a project\'s .mcp.json or a plugin pass through the proxy untouched. While aicleaner is stopped the Code tab cannot reach Anthropic - nothing is sent unfiltered. Restart the Claude Desktop app after changing it.',
     [h('div', { class: 'form-row' }, on), h('label', { class: 'field' }, 'Port', port), status],
     () => ({ 'codetab.enabled': on.querySelector('input').checked, 'codetab.port': Number(port.value) || 8788 }));
@@ -661,7 +1038,7 @@ function copilotCard(s) {
   const status = h('div', { class: 'hint copilot-status' }, 'Checking...');
   getJSON('/api/copilot').then((info) => { status.textContent = copilotStatus(info); })
     .catch(() => { status.textContent = ''; });
-  return card('copilot', 'GitHub Copilot in VS Code',
+  return card('copilot', 'GitHub Copilot',
     'With this on, VS Code\'s proxy setting points at aicleaner on this machine: Copilot\'s chat, agent, inline completions, next edit suggestions, public code matching and telemetry are read and filtered; everything else VS Code sends - sign-in, extensions, Settings Sync - passes through untouched. VS Code needs to trust aicleaner\'s Copilot certificate, which can only vouch for Copilot\'s own hosts; it is added to your Windows certificates the first time this is turned on here, and Windows asks you to confirm. The first time it is turned on is done at the machine, where that confirmation is answered; the certificate then stays installed while Copilot is off, so after that it can be turned on or off from anywhere. While aicleaner is stopped VS Code\'s proxy setting is taken out, so VS Code keeps working - unfiltered - until it starts again. Microsoft 365 Copilot (Word, Teams, Outlook) is not covered: it runs in Microsoft\'s cloud. Reload VS Code after changing it.',
     [h('div', { class: 'form-row' }, on), status],
     () => ({ 'copilot.enabled': on.querySelector('input').checked }));
@@ -707,7 +1084,7 @@ function claudeaiCard(s) {
   const status = h('div', { class: 'hint claudeai-status' }, 'Checking...');
   getJSON('/api/claudeai').then((info) => { status.textContent = claudeaiStatus(info); })
     .catch(() => { status.textContent = ''; });
-  return card('claudeai', 'Claude Desktop\'s chat',
+  return card('claudeai', 'Claude Desktop: chat',
     'With this on, the Windows proxy setting sends claude.ai - and only claude.ai - to aicleaner: what you type, project instructions and knowledge, and the files you attach (read on this machine and sent as filtered text) go out with client names replaced, and replies come back with them restored. claude.ai in Edge on this machine is filtered too. Every other site goes where it went before, through your own proxy if you have one. aicleaner\'s claude.ai certificate, which can only vouch for claude.ai, is added to your Windows certificates the first time this is turned on here, and Windows asks you to confirm; after that it can be turned on or off from anywhere. While aicleaner\'s forward proxy is down, Claude Desktop\'s chat fails rather than going out unfiltered. Restart Claude Desktop after changing it. No API key or credit is needed: it is your own claude.ai sign-in.',
     [h('div', { class: 'form-row' }, on), warning, status],
     () => ({ 'claudeai.enabled': box.checked }));
@@ -720,7 +1097,7 @@ function ocrCard(s) {
     value: String(s['attachments.ocr_max_pages'] || 10), 'aria-label': 'Most pages read from a scanned PDF' });
   const seconds = h('input', { type: 'number', name: 'ocr_timeout_s', min: '5', max: '600', class: 'narrow',
     value: String(s['attachments.ocr_timeout_s'] || 60), 'aria-label': 'Longest a reading may take, in seconds' });
-  return card('ocr', 'Text in images and scanned PDFs',
+  return card('ocr', 'Text in pictures and scans',
     'An image or a scanned PDF in a request is read on this machine, and the text it holds is filtered like any other text before anything leaves. With this off, such attachments are replaced by a notice instead. The limits keep a large scan from holding a request up.',
     [h('div', { class: 'form-row' }, on),
       h('div', { class: 'form-row' }, h('label', { class: 'field' }, 'Most pages read from a scanned PDF', pages),
@@ -824,8 +1201,86 @@ function diagnosticsCard(s, status) {
     + 'loading a conversation, drawing it, decrypting through the tunnel), written to '
     + 'logs\\timings-<date>.jsonl on this machine. Durations, sizes and request paths only - never '
     + 'content. Switches itself off after 24 hours.',
-    [until, h('div', { class: 'form-row' }, timings)].filter(Boolean),
+    [until, h('div', { class: 'form-row' }, timings), processesPanel()].filter(Boolean),
     () => ({ 'debug.timings': timings.querySelector('input').checked }));
+}
+
+// Processes (spec 2026-10-24-session-lifecycle-instrumentation.md): memory, each session's processes as its job
+// counts them, anything left behind with no owner, the last pause (a host asleep freezes this VM), and the lifecycle
+// log's recent events. Read only. The log itself is logs\lifecycle-<host>-<date>.jsonl.
+const LIFECYCLE_WORDS = {
+  'session-start': 'started', 'stop-requested': 'stop asked', 'stop-result': 'stopped', kill: 'killed',
+  'cli-exit': 'Claude Code ended', 'broker-hold': 'held for work in hand', 'broker-hold-timeout': 'hold ended (time limit)',
+  'broker-exit': 'broker ended',
+  'limit-hit': 'reached its cap', pause: 'paused', orphan: 'left behind', gone: 'ended', 'proxy-start': 'aicleaner started', 'proxy-stop': 'aicleaner stopped',
+};
+
+function eventDetail(e) {
+  if (e.event === 'stop-result') return `${e.how} in ${e.seconds} s (${e.why})`;
+  if (e.event === 'stop-requested') return e.why || '';
+  if ((e.event === 'proxy-stop' || e.event === 'broker-exit') && e.why) return `(${e.why})`;
+  if (['cli-exit', 'broker-exit', 'broker-hold', 'broker-hold-timeout'].includes(e.event)) {
+    const left = (e.left || []).length;
+    return `${e.exit_code !== undefined ? `exit ${e.exit_code}, ` : ''}${left} process${left === 1 ? '' : 'es'} still running`;
+  }
+  if (e.event === 'limit-hit') return `${e.limit} (${(e.job || {}).active} processes, ${(e.job || {}).peak_job_mb} MB peak)`;
+  if (e.event === 'pause') return `${Math.round(e.wall_s / 60)} min (${e.kind})`;
+  if (e.event === 'orphan') return `${e.name} pid ${e.pid}, ${e.tree_mb} MB with ${(e.tree || []).length} below it, ${e.age_min} min old`;
+  if (e.event === 'gone') return `${e.name} pid ${e.pid}`;
+  return '';
+}
+
+function processesPanel() {
+  const body = h('div', { class: 'processes-body' }, h('p', { class: 'hint' }, 'Loading...'));
+  const refresh = h('button', { type: 'button', class: 'processes-refresh' }, 'Look again');
+  const load = async (fresh) => {
+    refresh.disabled = true;
+    try {
+      const data = await getJSON(`/api/diagnostics/processes${fresh ? '?fresh=1' : ''}`);
+      body.replaceChildren(...processesView(data));
+    } catch (error) {
+      body.replaceChildren(h('p', { class: 'error-text' }, String(error.message || error)));
+    } finally {
+      refresh.disabled = false;
+    }
+  };
+  refresh.addEventListener('click', () => load(true));
+  setTimeout(() => load(false), 0);
+  return h('div', { class: 'processes' }, h('h3', {}, 'Processes'), body, refresh);
+}
+
+function processesView(data) {
+  if (!data.on) return [h('p', { class: 'hint' }, 'Not watching: this aicleaner is not an installed copy.')];
+  const snap = data.snapshot || {};
+  const mem = snap.memory || {};
+  const sessions = snap.sessions || [];
+  const orphans = snap.orphans || [];
+  const out = [h('p', { class: 'processes-memory' },
+    `Memory committed ${Math.round((mem.commit_mb || 0) / 1024)} of ${Math.round((mem.commit_limit_mb || 0) / 1024)} GB `
+    + `(peak ${Math.round((mem.commit_peak_mb || 0) / 1024)} GB), ${Math.round((mem.available_mb || 0) / 1024)} GB free; `
+    + `${mem.processes || 0} processes, ${mem.handles || 0} handles. Job cleanup ${data.job_cleanup ? 'on' : 'off'}; `
+    + `each new session capped at ${data.max_processes || 'unlimited'} processes and `
+    + `${data.max_memory_mb ? `${Math.round(data.max_memory_mb / 1024)} GB` : 'unlimited memory'}.`)];
+  out.push(h('table', { class: 'processes-sessions' },
+    h('thead', {}, h('tr', {}, ['Session', 'Processes', 'Peak MB', 'Broker', 'Claude Code'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, sessions.length ? sessions.map((sv) => h('tr', {},
+      h('td', {}, sv.name), h('td', {}, sv.job ? String(sv.job.active) : (sv.broker_error ? 'no answer' : '-')),
+      h('td', {}, sv.job ? String(sv.job.peak_job_mb) : '-'), h('td', {}, String(sv.broker_pid || '-')),
+      h('td', {}, String(sv.cli_pid || '-'))))
+      : [h('tr', {}, h('td', { colspan: '5', class: 'muted' }, 'No session running.'))])));
+  out.push(orphans.length
+    ? h('div', { class: 'processes-orphans' }, h('p', { class: 'chip warn' },
+      `${orphans.length} left behind, ${snap.orphan_mb} MB`),
+    h('ul', {}, orphans.map((o) => h('li', { class: 'mono' }, eventDetail({ ...o, event: 'orphan' }), ` - ${o.path || ''}`))))
+    : h('p', { class: 'hint processes-orphans' }, 'Nothing left behind.'));
+  if (snap.last_pause) out.push(h('p', { class: 'hint' }, `Last pause: ${eventDetail(snap.last_pause)} from ${snap.last_pause.since}.`));
+  const events = data.events || [];
+  if (events.length) {
+    out.push(h('details', { class: 'processes-events' }, h('summary', {}, `Recent lifecycle events (${events.length})`),
+      h('ul', {}, events.map((e) => h('li', {}, `${(e.ts || '').slice(5, 16).replace('T', ' ')} `,
+        h('strong', {}, LIFECYCLE_WORDS[e.event] || e.event), e.session ? ` ${e.session}` : '', ` ${eventDetail(e)}`)))));
+  }
+  return out;
 }
 
 // The escape hatch, and it looks like one: a false positive in the canary refuses every request,
@@ -834,7 +1289,7 @@ function diagnosticsCard(s, status) {
 // nothing to it. First card on the page, because everything below it is moot while it is on.
 function bypassCard(s) {
   const on = checkbox('bypass', 'TEMPORARY: forward every request untouched (no filtering at all)', s['proxy.bypass']);
-  const section = card('bypass', 'Debugging: bypass the proxy',
+  const section = card('bypass', 'Bypass filtering',
     'On: model traffic passes straight through. Nothing is replaced, nothing is held back, secrets are not redacted, images and documents are not withheld, the canary does not check, and replies are not restored - so real client names, and anything else in a prompt, reach the AI provider exactly as written. Every request is logged as PROXY BYPASS. This exists so the filter can be switched off without an uninstall while its own faults are worked through, and is to be removed before the tool is relied on.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'proxy.bypass': on.querySelector('input').checked }));
@@ -843,7 +1298,7 @@ function bypassCard(s) {
 
 function failOpenCard(s) {
   const on = checkbox('fail-open', 'EMERGENCY: send requests the canary would refuse', s['canary.fail_open']);
-  const section = card('fail-open', 'Emergency: canary fail open',
+  const section = card('fail-open', 'Send what the canary refuses',
     'Only for getting past a false 403 ("a real client identifier survived tokenisation"). While this is on, a request the canary would refuse is sent anyway - if the match was real, that client name reaches the AI provider. Every such request is written to the evidence log as FAIL-OPEN, and each match - with the text around it - goes to the newest logs/proxy-stderr-*.log and the Log page. It can be turned on from the phone, because a false positive stays in the conversation and would otherwise refuse every request until you are back at this machine. Turn it off as soon as you are past the problem.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'canary.fail_open': on.querySelector('input').checked }));
@@ -867,7 +1322,7 @@ function restartCard() {
     }
   });
   const since = view.ctx.status && view.ctx.status.started_at;
-  const section = card('restart', 'Restart the proxy',
+  const section = card('restart', 'Restart',
     'Runs Stop-AiCleaner.ps1, then Start-AiCleaner.ps1 -Detach (or the logon task) on this machine. Requests in flight are cut off, and Claude sessions started from the Session page stop. Output goes to logs/restart.log.',
     [h('div', { class: 'form-row' }, button)], null);
   // Beside the title, because Restart is the remedy suggested for several things and a time that
@@ -879,13 +1334,132 @@ function restartCard() {
   return section;
 }
 
+// Running aicleaner (feature 107, decided 2026-10-24): started with the computer, before anyone signs in, as you -
+// a start-up task with your password kept by Windows. Local only: it needs an administrator prompt and your
+// password on this machine. Through remote access the card is shown, locked, saying why ("remote shows everything").
+const SERVICE_MODAL = {
+  title: 'Start aicleaner when this computer starts?',
+  parts: [
+    ['What changes', [
+      'A start-up task runs aicleaner as you when the computer starts - before anyone signs in - and remote access with it, when that is set up.',
+      'Windows keeps your password for the task, encrypted, as it does for any service that runs as a person.',
+      'If aicleaner stops, it is started again within seconds; Restart and Stop work as today.',
+      'The start at sign-in stays, as a fallback: it finds aicleaner already running and leaves it be.',
+    ]],
+    ['Benefits', [
+      'Remote access works after a reboot without anyone signing in - for a VM or a machine you reach from elsewhere.',
+      'It keeps running when you sign out.',
+    ]],
+    ['Things to consider', [
+      'Your Windows password is stored by Windows for the task.',
+      'When you change your password, the start-up task cannot sign in until you enter the new one here. Meanwhile aicleaner starts at your sign-in, as now, and says so.',
+      'It runs with your limited token, as today - not elevated, even if your account is an administrator.',
+      'Windows asks for administrator now, on this machine, and then a window asks for your password.',
+    ]],
+  ],
+};
+
+function askService(on) {
+  return new Promise((resolve) => {
+    let answered = false;
+    const finish = (yes) => {
+      if (answered) return;
+      answered = true;
+      dialog.close();
+      dialog.remove();
+      resolve(yes);
+    };
+    const cancel = h('button', { type: 'button', class: 'service-cancel' }, 'Cancel');
+    const proceed = h('button', { type: 'button', class: 'primary service-proceed' }, 'Proceed');
+    cancel.addEventListener('click', () => finish(false));
+    proceed.addEventListener('click', () => finish(true));
+    const body = on
+      ? SERVICE_MODAL.parts.map(([heading, items]) => h('div', { class: 'service-part' },
+        h('h3', {}, heading), h('ul', {}, items.map((item) => h('li', {}, item)))))
+      : [h('p', {}, 'The start-up task is removed and aicleaner starts at your sign-in again, as before. Windows forgets '
+        + 'the password it kept for the task. Windows asks for administrator on this machine.')];
+    const dialog = h('dialog', { class: 'sheet confirm-dialog service-modal', 'aria-label': on ? SERVICE_MODAL.title : 'Stop starting with the computer?' },
+      h('h2', {}, on ? SERVICE_MODAL.title : 'Stop starting aicleaner with the computer?'),
+      ...body,
+      h('div', { class: 'fb-footer' }, cancel, proceed));
+    dialog.addEventListener('cancel', (event) => { event.preventDefault(); finish(false); });
+    document.body.append(dialog);
+    arrangeSheet(dialog, { dirty: () => false });
+    dialog.showModal();
+    cancel.focus();
+  });
+}
+
+function serviceCard() {
+  const remote = Boolean(view.config.remote);
+  const status = h('p', { class: 'service-status' }, 'Checking...');
+  const box = h('input', { type: 'checkbox', name: 'run_as_service', disabled: true });
+  const label = h('label', { class: 'check' }, box, ' ', 'Start aicleaner when this computer starts, before anyone signs in');
+  const again = h('button', { type: 'button', class: 'service-password', hidden: true }, 'Enter the password again');
+  // Feature 107: the start-up task gives an administrator account its full token; aicleaner lowers it at start. If
+  // that ever fails, this says so rather than leaving it to be found in /healthz.
+  const elevated = h('p', { class: 'callout bad service-elevated', hidden: true },
+    'This copy of aicleaner is running with an administrator token, and so would the sessions it starts. It should '
+    + 'have lowered it at start - see the newest logs\\proxy-stderr log, or switch this off until it is fixed.');
+  const problem = h('p', { class: 'callout bad service-problem', hidden: true },
+    'aicleaner\'s start-up task could not sign in - has your Windows password changed? aicleaner starts at your sign-in '
+    + 'meanwhile. Enter the password again to put it right.');
+  let current = { mode: 'off' };
+  const show = (state) => {
+    current = state;
+    const on = state.mode === 'user';
+    box.checked = on;
+    box.disabled = remote;
+    const task = state.task || {};
+    status.textContent = on
+      ? `On: aicleaner starts with this computer, as ${state.user || 'you'}${task.state ? ` (start-up task: ${task.state.toLowerCase()})` : ''}.`
+        + (state.running_as_service ? ' This copy was started by it.' : '')
+      : 'Off: aicleaner starts when you sign in.';
+    problem.hidden = !state.password_problem;
+    elevated.hidden = state.elevated !== true;
+    again.hidden = !state.password_problem;
+    again.disabled = remote;
+  };
+  const load = () => getJSON('/api/service').then(show)
+    .catch((error) => { status.textContent = `Could not check: ${error.message || error}`; });
+  const ask = async (on) => {
+    const result = await postJSON('/api/service', { on });
+    say(result.said, 'ok');
+    status.textContent = on ? 'Waiting for the administrator prompt and your password on this machine...'
+      : 'Waiting for the administrator prompt on this machine...';
+  };
+  box.addEventListener('change', async () => {
+    const on = box.checked;
+    box.checked = !on;                   // stays as it was until the change is confirmed
+    if (!(await askService(on))) return;
+    box.checked = on;
+    try { await ask(on); } catch (error) { box.checked = !on; sayError(error); }
+  });
+  again.addEventListener('click', async () => {
+    try { await ask(true); } catch (error) { sayError(error); }
+  });
+  load();
+  const section = card('service', 'Start with the computer',
+    'Normally aicleaner starts when you sign in. It can start with the computer instead, before anyone signs in, still as you - so remote access works after a reboot. Changed on this machine only: Windows asks for administrator and your password.',
+    [status, h('div', { class: 'form-row' }, label), elevated, problem, h('div', { class: 'form-row' }, again)], null);
+  if (remote) {
+    section.classList.add('local-only');
+    section.title = LOCAL_ONLY;
+    box.title = LOCAL_ONLY;
+    again.title = LOCAL_ONLY;
+    section.querySelector('h2').after(h('p', { class: 'chip local-only-note' },
+      `${LOCAL_ONLY}: it needs an administrator prompt and your Windows password there.`));
+  }
+  return section;
+}
+
 // What each AI client on this machine is currently pointed at. Read-only, and read fresh on every
 // status poll: the values change outside the application, which is the whole reason to show them.
 function routingCard() {
   const routing = (view.ctx.status && view.ctx.status.routing) || {};
   const rows = routing.clients || [];
   if (!rows.length) {
-    return card('routing', 'What your AI clients are pointed at',
+    return card('routing', 'Where your AI apps point',
       'No client settings file was found on this machine, so there is nothing to report.', [], null);
   }
   // A path or URL has no spaces to wrap at: on a phone it pushed the whole page sideways.
@@ -899,7 +1473,7 @@ function routingCard() {
   const overrides = (routing.overrides || []).map((o) => h('p', { class: 'callout bad routing-override' },
     h('b', {}, 'Routes around aicleaner: '), h('span', { class: 'mono' }, o.file), ` - ${o.why}.`));
   const seen = (view.ctx.status && view.ctx.status.requests_seen) || 0;
-  return card('routing', 'What your AI clients are pointed at',
+  return card('routing', 'Where your AI apps point',
     'Read from each client\'s own settings file, and from each session folder\'s .claude settings. A client '
     + 'sending directly to the AI service is not filtered by aicleaner, whatever this page says about the mapping.',
     [table, ...overrides, h('p', { class: 'hint' },
@@ -1012,7 +1586,7 @@ async function waitForProxy() {
 function toolsCard(s) {
   const area = h('textarea', { name: 'tools', rows: '3', 'aria-label': 'Tool name patterns, one per line' });
   area.value = (s.keep_tokenised_tools || []).join('\n');
-  return card('tools', 'Tool arguments kept tokenised',
+  return card('tools', 'Names kept in tool calls',
     'Remote MCP servers whose arguments must not carry real names (one glob per line, for example mcp__*learn*__*). Local tools (az, git, Serena) are swapped back to real names.',
     [area], () => ({ keep_tokenised_tools: area.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) }));
 }
@@ -1053,7 +1627,7 @@ function publicListCard() {
             ? h('div', { class: 'hint' }, `seen with ${row.clients.join(', ')}`)
             : null)))))));
   }).catch(() => { numbers.textContent = 'The shipped list could not be read.'; });
-  return card('public-list', 'Identifiers that belong to nobody',
+  return card('public-list', 'Shared identifiers',
     'Microsoft first-party application ids, built-in role and policy ids, Graph permission ids, '
     + 'vendor hosts and standards-body domains. Every one is the same in every tenant, so it names '
     + 'no client: these are never queued for review, never stood in for by a placeholder and never '
@@ -1130,7 +1704,7 @@ function contactCard(contact) {
   const body = contact.source
     ? h('p', {}, ...parts, ...links.flatMap((link) => [' | ', link]))
     : h('p', { class: 'muted' }, 'No contact file. Add a contact-*.json beside the aicleaner folder (see contact.example.json).');
-  return card('contact', 'Contact', contact.source ? `From ${contact.source}; edit that file to change it.` : null, [body], null);
+  return card('contact', 'Your details', contact.source ? `From ${contact.source}; edit that file to change it.` : null, [body], null);
 }
 
 function advancedCard(status, config, dialects) {
@@ -1155,8 +1729,13 @@ export async function render(main, ctx) {
     sayError(error);
     return;
   }
-  view.host = h('div', { class: 'settings-columns' });
-  view.jump = h('nav', { class: 'settings-jump', 'aria-label': 'Go to a setting' });
+  // One column of cards beside the groups. Two columns were tried for the whole page; with a
+  // group open there are two to eight cards, read top to bottom, and the wide ones (the AI tools
+  // table, the kinds table) want the width more than a second column wants the space.
+  view.host = h('div', { class: 'settings-cards' });
+  view.empty = h('p', { class: 'muted settings-none', hidden: true }, 'No setting matches. Try fewer or other words.');
+  view.offer = h('div', { class: 'settings-add-word', hidden: true, 'data-unsaved-ignore': true });
+  view.side = sidePanel();
   // Through remote access (J4, Brad 2026-10-20): why some controls are shown but cannot be used here.
   const remoteNote = view.config.remote ? h('p', { class: 'callout settings-remote-note' },
     h('b', {}, 'Through remote access: '),
@@ -1164,16 +1743,8 @@ export async function render(main, ctx) {
     + 'service unfiltered, those that trigger a prompt on the machine where aicleaner is deployed, and those that could '
     + 'give access to other systems (such as reading stored secrets). They are greyed out, saying so; change them at that machine.')
     : null;
-  main.append(...[view.jump, remoteNote, view.host].filter(Boolean));
+  main.append(...[remoteNote, h('div', { class: 'settings-layout' }, view.side,
+    h('div', { class: 'settings-main' }, view.empty, view.offer, view.host))].filter(Boolean));
   paintCards();
-  paintJump();
-  showCard(ctx.route && ctx.route.id);
-  // One listener for the life of the page module, which does nothing once this page has been
-  // navigated away from: the alternative is a teardown hook the router does not have.
-  if (!view.watching) {
-    view.watching = true;
-    window.addEventListener('resize', () => {
-      if (view.host && view.host.isConnected) dealCards(view.host, view.cards);
-    });
-  }
+  openFromAddress(ctx.route && ctx.route.id);
 }

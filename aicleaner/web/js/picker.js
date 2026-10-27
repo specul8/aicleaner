@@ -273,7 +273,7 @@ export function noFoldersYet(editable) {
     editable
       ? ['No folders are allowed yet, so none can be chosen. ',
          h('a', { href: '#/settings/folders' }, 'Add one under Settings'),
-         ', in "Folders the pages may reach".']
+         ', in "Folders the pages can open".']
       : ['No folders are allowed yet. They are set on the machine the proxy runs on, under ',
          h('a', { href: '#/settings/folders' }, 'Settings'), '.']);
 }

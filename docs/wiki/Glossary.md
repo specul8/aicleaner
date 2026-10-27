@@ -15,7 +15,7 @@ reused.
 
 **Auto-add** - Adding an unknown value to a client without asking, only where the value proves its
 owner: an email at the client's mapped domain, a resource name carrying the client's name, a name
-carrying the client's token. Set per kind in [What happens to something new](Settings.md#card-kinds).
+carrying the client's token. Set per kind in [New names found](Settings.md#card-kinds).
 
 **Auto-tokenise** - A per-kind choice: unknown values of that kind are replaced automatically and not
 offered in Review. IP addresses default to this.

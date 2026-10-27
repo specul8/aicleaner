@@ -13,11 +13,12 @@ import hashlib
 import ipaddress
 import json
 import re
+from bisect import bisect_right
 from collections import Counter
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 # Tokens must survive shells, HCL, URLs and JSON without quoting surprises.
 SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._@-]*$")
@@ -620,18 +621,25 @@ class MatchRule:
 
     `followed_by` / `preceded_by` match only next to a corroborating word, which is stronger and
     more work to maintain. Both are case-insensitive and are satisfied by any one of their words.
+
+    `whole_word` matches only where the text is the entire word - no letter, digit or underscore
+    touching either end - so AZ is the client and the "az" in "azure" or a base64 run is not. It
+    combines with the others.
     """
 
     cased: bool = False
     followed_by: tuple[str, ...] = ()
     preceded_by: tuple[str, ...] = ()
+    whole_word: bool = False
 
     def as_json(self) -> Any:
-        if self.cased and not self.followed_by and not self.preceded_by:
+        if self.cased and not self.followed_by and not self.preceded_by and not self.whole_word:
             return "cased"
         out: dict[str, Any] = {}
         if self.cased:
             out["cased"] = True
+        if self.whole_word:
+            out["whole_word"] = True
         if self.followed_by:
             out["followed_by"] = list(self.followed_by)
         if self.preceded_by:
@@ -664,10 +672,10 @@ def parse_match(value: Any) -> "MatchRule | None":
         return MatchRule(cased=True)
     if not isinstance(value, dict):
         raise MappingError(f"a matching rule is 'cased' or an object, not {type(value).__name__}")
-    unknown = set(value) - {"cased", "followed_by", "preceded_by"}
+    unknown = set(value) - {"cased", "followed_by", "preceded_by", "whole_word"}
     if unknown:
         raise MappingError(f"unknown matching rule {sorted(unknown)[0]!r}",
-                           why="Allowed: cased, followed_by, preceded_by.")
+                           why="Allowed: cased, followed_by, preceded_by, whole_word.")
 
     def words(key: str) -> tuple[str, ...]:
         raw = value.get(key) or []
@@ -680,9 +688,9 @@ def parse_match(value: Any) -> "MatchRule | None":
             raise MappingError(f"{key} takes single words (letters and digits), not phrases")
         return clean
 
-    rule = MatchRule(cased=bool(value.get("cased")),
-                     followed_by=words("followed_by"), preceded_by=words("preceded_by"))
-    if not rule.cased and not rule.followed_by and not rule.preceded_by:
+    rule = MatchRule(cased=bool(value.get("cased")), followed_by=words("followed_by"),
+                     preceded_by=words("preceded_by"), whole_word=bool(value.get("whole_word")))
+    if not rule.cased and not rule.followed_by and not rule.preceded_by and not rule.whole_word:
         return None
     return rule
 
@@ -717,6 +725,8 @@ def rule_allows(rule: "MatchRule | None", text: str, start: int, end: int, real:
     found = text[start:end]
     if rule.cased and found != real:
         return False
+    if rule.whole_word and inside_word(text, start, end):
+        return False
     if rule.followed_by:
         after = _WORD_RE.search(text[end:end + NEIGHBOUR_CHARS])
         if after is None or after.group(0).lower() not in {w.lower() for w in rule.followed_by}:
@@ -726,6 +736,83 @@ def rule_allows(rule: "MatchRule | None", text: str, start: int, end: int, real:
         if not before or before[-1].lower() not in {w.lower() for w in rule.preceded_by}:
             return False
     return True
+
+
+def inside_word(text: str, start: int, end: int) -> bool:
+    """Whether [start:end) touches a letter, digit or underscore on either side: part of a longer
+    word, so a `whole_word` rule would decline it."""
+    before = text[start - 1] if start > 0 else ""
+    after = text[end] if end < len(text) else ""
+    return any(c.isalnum() or c == "_" for c in (before, after))
+
+
+# A base64-like run (D207): inline fonts and images in CSS, a JWT's parts, a blob in minified JS.
+# Its mixed case gives a case boundary every few characters, so a short real ("Qx") turned up inside
+# one as if it were glued into an identifier (D77), was tokenised - corrupting the data - and made
+# the canary refuse the request.
+#
+# Conservative on purpose, because what it lets through is not checked again:
+# - a maximal run of the standard alphabet [A-Za-z0-9+/], at least BASE64_MIN_RUN long. `=` padding
+#   only ever ends a run, so it changes nothing here. `-` and `_` (the URL-safe alphabet) are left
+#   out: they are what joins identifiers (Get-Acme..., snake_case), and with them a long hyphenated
+#   name would read as base64 and stop matching on its case boundaries;
+# - upper and lower case letters and digits - at least one digit in BASE64_DIGIT_EVERY characters
+#   (two at the least) - and no more than one `/` or `+` in BASE64_SLASH_EVERY. Random base64 is about
+#   one digit in six and one `/` or `+` in thirty-two; a path such as /Repos/Projects/GetAcmeTool/v2
+#   is all slashes and hardly any digits, and is not mistaken for one;
+# - counted WITHOUT the match itself, so a name cannot make plain hex or lowercase text look mixed;
+# - and only for a match the run surrounds, with a letter or digit touching it on at least one side
+#   (in_base64_run). A whole word is never skipped.
+BASE64_MIN_RUN = 40
+BASE64_DIGIT_EVERY = 20
+BASE64_SLASH_EVERY = 10
+_BASE64_RUN = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{%d,}" % BASE64_MIN_RUN)
+_DROP_UPPER = str.maketrans("", "", "ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+_DROP_LOWER = str.maketrans("", "", "abcdefghijklmnopqrstuvwxyz")
+_DROP_DIGIT = str.maketrans("", "", "0123456789")
+_DROP_SLASH = str.maketrans("", "", "+/")
+
+
+def _classes(part: str) -> tuple[int, int, int, int]:
+    """(upper, lower, digit, `/` or `+`) counts in `part`, which is all base64 alphabet."""
+    n = len(part)
+    return (n - len(part.translate(_DROP_UPPER)), n - len(part.translate(_DROP_LOWER)),
+            n - len(part.translate(_DROP_DIGIT)), n - len(part.translate(_DROP_SLASH)))
+
+
+class _Base64Runs:
+    """The long alphabet runs in one text, found the first time a match needs them (most texts never
+    ask: a whole-word match does not), then looked up by position."""
+
+    __slots__ = ("_text", "_runs", "_starts")
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self._runs: list[tuple[int, int, tuple[int, int, int, int]]] | None = None
+        self._starts: list[int] = []
+
+    def covers(self, start: int, end: int) -> bool:
+        """Whether [start:end) lies inside one run that, less the match, reads as base64."""
+        if self._runs is None:
+            self._runs = [(r.start(), r.end(), _classes(r.group(0))) for r in _BASE64_RUN.finditer(self._text)]
+            self._starts = [r[0] for r in self._runs]
+        i = bisect_right(self._starts, start) - 1
+        if i < 0 or end > self._runs[i][1]:
+            return False
+        run_start, run_end, counts = self._runs[i]
+        upper, lower, digit, slash = (a - b for a, b in zip(counts, _classes(self._text[start:end])))
+        rest = (run_end - run_start) - (end - start)
+        return (upper > 0 and lower > 0 and digit >= max(2, rest // BASE64_DIGIT_EVERY)
+                and slash <= rest // BASE64_SLASH_EVERY)
+
+
+def in_base64_run(runs: "_Base64Runs", text: str, start: int, end: int) -> bool:
+    """Whether a match at [start:end) is glued inside a base64-like run, and so is not a name (D207).
+
+    A match that is a whole word is never skipped, whatever surrounds it: only one that a letter or
+    digit touches - matched on a case boundary (D77) - can be base64 noise. Not a match rule, so it is
+    not reported by rule_declined: the text is data, not a name a person chose to let through."""
+    return inside_word(text, start, end) and runs.covers(start, end)
 
 
 def _declined(form: "Form", m: "re.Match[str]") -> bool:
@@ -1322,8 +1409,11 @@ class Mapper:
 
     def tokenise(self, text: str, counter: Counter[str] | None = None) -> str:
         pairs = getattr(counter, "pairs", None)
+        runs = _Base64Runs(text)
 
         def repl(m: re.Match[str]) -> str:
+            if in_base64_run(runs, m.string, m.start(), m.end()):
+                return m.group(0)   # data, not a name (D207)
             disguised = self._disguise(m.group(0))
             f = disguised[0] if disguised else self.forward(m.group(0))
             # A form with a matching rule is still MATCHED here - the pattern is the unrestricted
@@ -1387,9 +1477,12 @@ class Mapper:
     def tokenise_json_text(self, text: str, counter: Counter[str] | None = None) -> str:
         """Tokenise text that is itself JSON (tool-call arguments): plain and escaped reals."""
         pairs = getattr(counter, "pairs", None)
+        runs = _Base64Runs(text)
 
         def repl(m: re.Match[str]) -> str:
             key = m.group(0)
+            if in_base64_run(runs, m.string, m.start(), m.end()):
+                return key   # data, not a name (D207)
             # An escaped spelling as written, or as JSON writes it (a regex's backslash doubled).
             disguised = self._disguise(key)
             in_json = None if disguised else self._disguised_json.get(key)
@@ -1473,6 +1566,17 @@ class Mapper:
 
         return _WORD_RUN.sub(repl, text)
 
+    def _canary_matches(self, text: str) -> Iterator["re.Match[str]"]:
+        """The canary's pattern over `text`, less what sits glued inside a base64-like run (D207).
+
+        Tokenisation leaves those alone, so the canary must too or it refuses its own output. They
+        are not a leak, and not a rule's decline either (rule_declined reports what a person's rule
+        let through; this is data, such as an inline font, that only looks like it holds a name)."""
+        runs = _Base64Runs(text)
+        for m in self._canary_re.finditer(text):
+            if not in_base64_run(runs, text, m.start(), m.end()):
+                yield m
+
     def real_forms(self, text: str) -> list[Form]:
         """The canary's matches as forms, in order."""
         return [f for f, _start, _end in self.real_spans(text)]
@@ -1480,7 +1584,7 @@ class Mapper:
     def real_spans(self, text: str) -> list[tuple[Form, int, int]]:
         """The canary's matches with where each sits in `text`, for showing a refusal in context."""
         out = []
-        for m in self._canary_re.finditer(text):
+        for m in self._canary_matches(text):
             key = m.group(0)
             f = self._canary_form(key)
             if f is not None and not _declined(f, m):
@@ -1491,7 +1595,7 @@ class Mapper:
         """Canary: which client ids still have a real form present in text, plain or JSON-escaped
         (once for a string in the body, twice for JSON inside a string such as tool arguments)."""
         found = set()
-        for m in self._canary_re.finditer(text):
+        for m in self._canary_matches(text):
             key = m.group(0)
             f = self._canary_form(key)
             if f is not None and not _declined(f, m):
@@ -1507,7 +1611,7 @@ class Mapper:
         if not any(f.match is not None for f in self.forms):
             return []
         out = []
-        for m in self._canary_re.finditer(text):
+        for m in self._canary_matches(text):
             key = m.group(0)
             f = self._canary_form(key)
             if f is not None and _declined(f, m):

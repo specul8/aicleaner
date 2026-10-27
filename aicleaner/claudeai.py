@@ -309,6 +309,9 @@ class ClaudeAI:
         try:
             async for chunk in upstream.content.iter_any():
                 await response.write(chunk)
+        except (aiohttp.ClientPayloadError, aiohttp.ClientConnectionError) as exc:
+            from .proxy import cut_short
+            return cut_short(request, response, f"claude.ai {request.method} {request.path}", exc)
         finally:
             upstream.release()
         await response.write_eof()

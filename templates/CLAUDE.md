@@ -70,4 +70,12 @@ A token you see in something you wrote - a file name, a path, code, a command, a
 correct: the proxy put the real name in when you wrote it, and it is on disk with the real name. You
 see the token only because your context is filtered. Never rename, rewrite or "correct" anything
 because it shows a token, and never swap a token for a generic or made-up name.
+
+## Commands that start worker processes
+
+Never run a test runner or build tool through `node -e`, `node -p` or `python -c` - write the script to a file and
+run the file, or use the tool's own command line. Jest is the known case: its workers start with the parent's
+arguments, so each one runs the whole `-e` script again and starts its own workers - thousands of processes in a
+minute, enough to freeze the machine. When a single run is enough, ask for it (`--runInBand` / `runInBand: true`,
+`-n 0`, `--workers=1`).
 <!-- aicleaner:end -->

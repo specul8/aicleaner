@@ -34,6 +34,7 @@ import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
   viewableFiles } from '../treeselect.js';
 import { arrangeSheet } from '../sheet.js';
+import { mountPresets } from '../presets.js';
 
 const view = { stream: null, state: null, name: '', poll: null, editing: false, profiles: null,
   past: [], commands: null, slashRows: [], slashAt: 0, transition: false };
@@ -452,6 +453,18 @@ function compactedText(meta) {
 
 // Thinking blocks the reader closed (J7): open by default, so only the closed ones are remembered.
 const closedThinking = new Set();
+// session.show_thinking (2026-10-27): on, thinking is drawn expanded; off, folded to its "thinking" line until opened.
+// Either way a box the person opened or closed stays as they left it.
+const openedThinking = new Set();
+let showThinking = true;
+getJSON('/api/config').then((config) => {
+  const s = config.settings || {};
+  if ('session.show_thinking' in s) showThinking = s['session.show_thinking'] !== false;
+}).catch(() => {});
+window.addEventListener('aicleaner:settings', (event) => {
+  const s = event.detail || {};
+  if ('session.show_thinking' in s) showThinking = s['session.show_thinking'] !== false;
+});
 
 function transcript(events, { after = null, placeholder = true } = {}) {
   const lines = [];
@@ -481,9 +494,12 @@ function transcript(events, { after = null, placeholder = true } = {}) {
         // withRestoredNames.
         const key = String((event.message || {}).id || event.uuid || event.seq || thoughts[0].slice(0, 80));
         const text = h('div', { class: 'thinking-text' }, prettyJsonIn(thoughts.join('\n\n')));
-        const box = h('details', { class: 'thinking', open: closedThinking.has(key) ? null : true },
+        const open = openedThinking.has(key) || (showThinking && !closedThinking.has(key));
+        const box = h('details', { class: 'thinking', open: open ? true : null },
           h('summary', {}, 'thinking'), text);
-        box.addEventListener('toggle', () => { if (box.open) closedThinking.delete(key); else closedThinking.add(key); });
+        box.addEventListener('toggle', () => {
+          if (box.open) { closedThinking.delete(key); openedThinking.add(key); } else { closedThinking.add(key); openedThinking.delete(key); }
+        });
         lines.push(h('div', { class: 'turn tool thinking-turn' }, h('span', { class: 'who' }, ''), box));
       }
       const parts = ((event.message || {}).content || []).filter((c) => c.type === 'text').map((c) => c.text);
@@ -1240,9 +1256,18 @@ async function renderTree(panel, name, roots, current, share) {
 // A running session, as a button (feature 53). No state chip: membership of this list IS the
 // state, which is the whole point - three stopped sessions used to say "stopped" three times,
 // the least informative thing on the page taking a third of its rows.
+// A session's memory as the row shows it (stability spec S2): what its processes hold now, from the job that
+// counts them. Absent for a session started before jobs (v0.9.320) and for the first minute.
+function memoryText(mb) {
+  if (mb === null || mb === undefined) return '';
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+}
+
 function sessionRow(profile, state) {
   const session = (state.sessions || {})[profile.name] || {};
   const waiting = (session.pending || []).length;
+  const res = (state.resources || {})[profile.name] || {};
+  const memory = memoryText(res.memory_mb);
   return h('button', {
     type: 'button',
     class: `session-row${profile.name === view.name ? ' selected' : ''}`,
@@ -1253,7 +1278,28 @@ function sessionRow(profile, state) {
     // No client chip (the user, 2026-10-16): the profile name already says which project it is.
     // The one chip that survives: a session paused on a permission prompt is the only thing on
     // this page that needs answering, and it can only ever happen to a running one.
-    waiting ? h('span', { class: 'chip warn' }, `${waiting} waiting`) : null);
+    waiting ? h('span', { class: 'chip warn' }, `${waiting} waiting`) : null,
+    memory ? h('span', { class: 'session-memory muted', title: `${res.processes} processes; peak ${memoryText(res.peak_mb)}` },
+      memory) : null);
+}
+
+// Stability spec S2: a session left running for hours holds its memory for nothing - the sessions left from 21-23
+// October were live, not lost. After session.idle_offer_hours idle, the page OFFERS to stop it; it never stops one
+// itself. "Keep running" holds until the session does something again.
+const IDLE_KEPT = 'aicleaner.session.idle-kept';
+
+function idleHours(session, hours) {
+  if (!session || !session.running || !hours || session.busy) return 0;
+  const idle = (Date.now() / 1000 - (Number(session.last_active) || 0)) / 3600;
+  return idle >= hours ? idle : 0;
+}
+
+function idleKept(name, lastActive) {
+  try { return localStorage.getItem(`${IDLE_KEPT}.${name}`) === String(Math.floor(lastActive)); } catch (error) { return false; }
+}
+
+function keepIdle(name, lastActive) {
+  try { localStorage.setItem(`${IDLE_KEPT}.${name}`, String(Math.floor(lastActive))); } catch (error) { /* offered again */ }
 }
 
 // A picker and the running ones, taskbar-style (feature 53, decided 2026-09-27).
@@ -1385,10 +1431,18 @@ function sharedTitles(groups) {
   return new Set([...seen].filter(([, n]) => n > 1).map(([title]) => title));
 }
 
-function pastOptions(past, project) {
+// `fromSelected` is how many chats were chosen in "Start a new chat from existing chats": the list
+// then says so under the plain new conversation (the user, 2026-10-24). Its value is '' as well -
+// it IS a new conversation, so Start, Switch and the title box treat it as one with no extra case.
+function pastOptions(past, project, fromSelected = 0) {
   const groups = (past || []).filter((entry) => (entry.sessions || []).length);
   const total = groups.reduce((n, entry) => n + entry.sessions.length, 0);
   const first = [h('option', { value: '' }, total ? 'Start a new conversation' : 'Nothing to continue here')];
+  if (fromSelected) {
+    first.push(h('option', { value: '', dataset: { fromSelected: String(fromSelected) } },
+      fromSelected === 1 ? 'Start a new conversation from the selected conversation'
+        : `Start a new conversation from the ${fromSelected} selected`));
+  }
   if (!total) return first;
   const shared = sharedTitles(groups);
   // One folder's worth reads as a plain list; several need saying which is which - and a folder
@@ -2543,6 +2597,7 @@ export async function render(main, context = {}) {
   const heading = h('h2', { id: 'session-heading' }, view.name || 'No session');
   const clientChip = h('span', { id: 'session-client', class: 'chip' }, '');
   const runningLine = h('div', { class: 'hint', id: 'session-running' }, '');
+  const idleOffer = h('div', { class: 'callout warn session-idle', id: 'session-idle', hidden: true });
   // The conversation's title beside the profile's name (item E, the user 2026-10-17): the one running,
   // else the one chosen in Continue; its title when it has one, else what it opened with.
   const conversationTitle = h('span', { id: 'session-conversation-title', class: 'session-conversation-title', hidden: true });
@@ -2704,6 +2759,35 @@ export async function render(main, context = {}) {
     chat.disabled = !session.running;
     runningLine.textContent = session.running
       ? `running in ${session.project}` : (view.name ? 'not running' : 'nothing selected');
+    {
+      const idle = idleHours(session, state_ && state_.idle_offer_hours);
+      const res = ((state_ && state_.resources) || {})[view.name] || {};
+      const offer = idle && !idleKept(view.name, session.last_active);
+      idleOffer.hidden = !offer;
+      if (offer && idleOffer.dataset.for !== `${view.name}:${Math.floor(idle)}`) {
+        idleOffer.dataset.for = `${view.name}:${Math.floor(idle)}`;
+        const name = view.name;
+        const lastActive = session.last_active;
+        const stop = h('button', { type: 'button', class: 'idle-stop' }, 'Stop it');
+        const keep = h('button', { type: 'button', class: 'idle-keep link' }, 'Keep running');
+        stop.addEventListener('click', async () => {
+          stop.disabled = true;
+          try {
+            await postJSON('/api/session/stop', { name });
+            say(`${name} stopped.`, 'ok');
+            await refresh();
+          } catch (error) {
+            stop.disabled = false;
+            sayError(error);
+          }
+        });
+        keep.addEventListener('click', () => { keepIdle(name, lastActive); idleOffer.hidden = true; });
+        const memory = memoryText(res.memory_mb);
+        idleOffer.replaceChildren(
+          h('span', {}, `Idle for ${Math.floor(idle)} hours${memory ? `, holding ${memory}` : ''}. Stop it?`),
+          ' ', stop, ' ', keep);
+      }
+    }
     // Painted from the session's own state, so a mode changed elsewhere - another tab, the
     // config file, a second session - shows here rather than the page keeping its own idea.
     // Skipped while the select has focus, or the poll would move the value under the pointer.
@@ -2713,11 +2797,15 @@ export async function render(main, context = {}) {
       MODE_WHY[modeSelect.value] + (session.running ? '' : ' Applies when a session starts.');
     // The poll repaints every few seconds, so a choice already made has to survive the rebuild.
     const held = resume.value;
+    // Chats chosen in the dialog stay on offer until another choice is made or the session starts.
+    const fromSelected = !session.running && view.startFrom ? view.startFrom.get(view.name) : null;
     // Said while it loads (D86): a cold list took seconds, and an empty select read as "nothing".
     repaint(resume, view.pastLoading
       ? [h('option', { value: '' }, 'Loading conversations...')]
-      : pastOptions(view.past, homeFolder));
-    if (held && Array.from(resume.options).some((option) => option.value === held)) resume.value = held;
+      : pastOptions(view.past, homeFolder, fromSelected ? fromSelected.ids.length : 0));
+    const fromOption = resume.querySelector('option[data-from-selected]');
+    if (fromOption) fromOption.selected = true;      // by index: its value is the plain new conversation's
+    else if (held && Array.from(resume.options).some((option) => option.value === held)) resume.value = held;
     // The newest conversation chosen to start from (the user, 2026-10-17), until the person makes a
     // choice of their own - "Start a new conversation" included - or the session runs. Only from
     // this profile's own folders, never the "not in this profile yet" group.
@@ -2900,6 +2988,8 @@ export async function render(main, context = {}) {
   // brief show there only - switching away hides them, switching back shows them again. One note
   // element per session name; showConsolidation() puts the one for the session on screen in place.
   view.consolidations = view.consolidations || new Map();
+  // Per session name: { ids, job } of the chats last chosen to start a new conversation from.
+  view.startFrom = view.startFrom || new Map();
   const consolidateNote = h('div', { id: 'session-consolidate-note', class: 'callout consolidate-note', hidden: true });
   showConsolidation = () => {
     const mine = view.consolidations.get(view.name);
@@ -2924,19 +3014,32 @@ export async function render(main, context = {}) {
     try {
       job = (await postJSON('/api/session/consolidate', { name: started, ids: chosen.map((r) => r.id) })).job;
     } catch (error) { sayError(error); return; }
+    // The conversation list offers these chats from here on (the user, 2026-10-24); choosing it again
+    // with a different set replaces the set, and the earlier job's result is no longer wanted.
+    view.startFrom.set(started, { ids: chosen.map((r) => r.id), job });
+    if (started === view.name) { view.resumeChosen = started; paint(); }
+    const superseded = () => view.startFrom.has(started) && view.startFrom.get(started).job !== job;
     const titles = chosen.map((r) => r.label || r.title);
     setConsolidation(started, h('span', {}, `Summarising ${chosen.length} conversations for a new chat...`));
     const runningThere = () => Boolean(((view.state && view.state.sessions) || {})[started] && view.state.sessions[started].running);
     const poll = async () => {
+      if (superseded()) return;
       let state;
       try { state = await getJSON(`/api/session/consolidate?job=${encodeURIComponent(job)}`); }
-      catch (error) { setConsolidation(started, h('span', {}, `Starting a new chat stopped: ${error.message || error}`)); return; }
+      catch (error) {
+        setConsolidation(started, h('span', {}, `Starting a new chat stopped: ${error.message || error}`));
+        view.startFrom.delete(started);
+        if (started === view.name) paint();
+        return;
+      }
+      if (superseded()) return;
       if (state.status !== 'done') {
         setConsolidation(started, h('span', {}, `Summarising ${Math.min(state.done + 1, state.total)} of ${state.total} for a new chat...`));
         setTimeout(poll, 2000);
         return;
       }
-      if (started === view.name) { resume.value = ''; view.resumeChosen = started; paint(); }
+      // Not if another conversation was chosen meanwhile: that choice is the person's to undo.
+      if (started === view.name && view.startFrom.has(started)) { view.resumeChosen = started; paint(); }
       if (view.setDraftFor) view.setDraftFor(started, state.brief);
       const remove = h('button', { type: 'button', class: 'consolidate-delete' }, `Delete the ${chosen.length} originals`);
       const keep = h('button', { type: 'button', class: 'consolidate-keep' }, 'Keep them');
@@ -2995,7 +3098,16 @@ export async function render(main, context = {}) {
   };
   const consolidateButton = h('button', { type: 'button', id: 'session-consolidate', class: 'conv-action',
     title: 'Start a new conversation from summaries of several earlier ones' }, 'Start a new chat from existing chats...');
-  consolidateButton.addEventListener('click', (event) => { event.preventDefault(); openSearch(true); });
+  // Opened again, it starts from the chats chosen last time, so changing the set is a tick or two.
+  consolidateButton.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const held = view.startFrom.get(view.name);
+    await openSearch(true);
+    for (const id of (held ? held.ids : [])) {
+      const pick = document.querySelector(`#conv-search .conv-pick[data-id='${CSS.escape(id)}']`);
+      if (pick && !pick.disabled && !pick.checked) pick.click();
+    }
+  });
   const searchButton = h('button', { type: 'button', id: 'session-search-conversations', class: 'conv-action',
     title: 'Find a conversation by what it was about (Ctrl+K)' }, 'Search conversations');
   // Deleting a conversation (2026-10-16, item D): to Recently deleted for 30 days, put back from there.
@@ -3282,6 +3394,7 @@ export async function render(main, context = {}) {
     // Continue | Folder | Asks in thirds.
     h('div', { class: 'form-row session-head' }, heading, conversationTitle, clientChip, runningLine,
       h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start'), chat),
+    idleOffer,
     h('div', { class: 'session-controls' },
       h('label', { class: 'field' }, 'Continue', resume, newName, switchButton, showAll),
       h('div', { class: 'field' }, h('span', {}, 'Starts in (home folder)'), homeShown),
@@ -3404,7 +3517,12 @@ export async function render(main, context = {}) {
   // band, exactly one viewport tall, holding only the files, the transcript and the prompt (with
   // what Claude is doing, and any question waiting on you, inside it); and tool usage below.
   // Start scrolls the band into view. Scroll up to stop, down for tool usage.
-  const top = h('div', { class: 'session-top' }, list, sessionCard);
+  // Start Work and Start Personal (feature 152), under the picker, in their own slot: the list above is
+  // repainted by every poll, and these keep their own state and poll.
+  const presetsSlot = h('div', { id: 'session-presets', class: 'session-presets', hidden: true });
+  if (view.presets) view.presets.stop();
+  view.presets = mountPresets(presetsSlot, { onRun: () => { refresh().catch(() => {}); } });
+  const top = h('div', { class: 'session-top' }, h('div', { class: 'session-left' }, list, presetsSlot), sessionCard);
   // Between the transcript and the prompt (the user, 2026-09-30): what was started in the
   // background, with Claude's questions and permission requests to its right.
   // File tabs over the transcript (DECISIONS 50): the conversation is the first tab; a file tab
@@ -3563,7 +3681,14 @@ export async function render(main, context = {}) {
   // Picking a conversation no longer moves a Folder choice: every session starts in the home, and
   // a conversation filed elsewhere is found where it is (DECISIONS 64).
   // A choice made here - "Start a new conversation" included - is kept until the session changes.
-  resume.addEventListener('change', () => { view.resumeChosen = view.name; paint(); });
+  // Any other choice lets go of chats chosen in the dialog: the option would otherwise come back
+  // selected on the next repaint. The summaries already under way still reach the prompt box.
+  resume.addEventListener('change', () => {
+    const option = resume.options[resume.selectedIndex];
+    if (!(option && option.dataset.fromSelected)) view.startFrom.delete(view.name);
+    view.resumeChosen = view.name;
+    paint();
+  });
   switchButton.addEventListener('click', async () => {
     switchButton.disabled = true;
     try {
@@ -3949,9 +4074,28 @@ export async function render(main, context = {}) {
         say(`${view.name} stopped.`, 'ok');
         await refresh();
       } else {
-        await postJSON('/api/session/start',
-          { name: view.name, resume: resume.value, title: resume.value ? '' : newName.value.trim() });
+        const request = { name: view.name, resume: resume.value, title: resume.value ? '' : newName.value.trim() };
+        try {
+          await postJSON('/api/session/start', request);
+        } catch (error) {
+          // Short of memory (stability spec S2): the server asks first. Its toast carries "Start anyway".
+          if (error && error.offer && error.offer.action === 'start_low_memory') {
+            sayError(error, { start_low_memory: async () => {
+              try {
+                await postJSON('/api/session/start', { ...request, low_memory_ok: true });
+                say(`${request.name} started.`, 'ok');
+                await refresh();
+                subscribe(request.name, refresh, applyEvent);
+              } catch (again) {
+                sayError(again);
+              }
+            } });
+            return;
+          }
+          throw error;
+        }
         newName.value = '';
+        view.startFrom.delete(view.name);    // used: the new conversation is the one now running
         say(resume.value ? `${view.name} picked up where it left off.` : `${view.name} started.`, 'ok');
         await refresh();
         subscribe(view.name, refresh, applyEvent);
@@ -4181,6 +4325,8 @@ export function leave() {
   view.stream = null;
   if (view.poll) clearInterval(view.poll);
   view.poll = null;
+  if (view.presets) view.presets.stop();
+  view.presets = null;
   if (view.offConnection) view.offConnection();
   view.offConnection = null;
   view.editing = false;

@@ -30,10 +30,15 @@ from typing import Any
 
 from aiohttp import web
 
+from . import lifecycle, lowertoken, shutdown, winjob
+
 TOKEN_HEADER = "X-Broker-Token"
 # How long a broker stays after Claude Code exits, so a proxy that is restarting can still collect
 # the last lines and the exit code.
 LINGER_S = 600
+# With job cleanup on, the longest a broker holds its job for work in hand after Claude Code has gone. A tool that
+# never ends (a dev server, a watcher) would otherwise keep the broker - and itself - for ever.
+HOLD_S = 1800
 LINE_LIMIT = 64 * 1024 * 1024
 
 
@@ -69,6 +74,51 @@ class Broker:
         self.exit_delivered = asyncio.Event()       # a proxy has the exit: no reason to linger
         self.published: dict[str, Any] = {}
         self._log = (folder / "events.jsonl").open("a", encoding="utf-8")
+        # Every process of this session, counted and measured: the broker joins a job before it starts Claude Code,
+        # so everything below joins too (spec 2026-10-24-session-lifecycle-instrumentation.md). With job_cleanup the
+        # kernel ends them all when the broker goes - including when it crashes or is killed.
+        self.job = winjob.Job(kill_on_close=bool(self.launch.get("job_cleanup")))
+        # D208: caps on the session as a whole, so a runaway (a fork bomb, a leak) is refused inside it and the
+        # machine stays up. Set before the broker joins, so they hold from the first process.
+        self.job.set_limits(int(self.launch.get("max_processes") or 0), int(self.launch.get("max_memory_mb") or 0))
+        self.in_job = self.job.add_self()
+        self._limits_hit: set[str] = set()
+        self.lifecycle_dir = self.launch.get("lifecycle_dir") or None
+
+    def _on_windows_exit(self, kind: str) -> None:
+        """Logoff or shutdown (stability spec S4): the record of why, the event log flushed, then the process goes.
+        Claude Code is told by Windows itself; a kill-on-close job ends whatever it leaves."""
+        self._event("broker-exit", why=kind, left=self._others())
+        try:
+            self._log.flush()
+        except (OSError, ValueError):
+            pass
+
+    def _event(self, event: str, **fields: Any) -> None:
+        lifecycle.record(event, self.lifecycle_dir, session=self.launch.get("profile", ""),
+                         session_folder=self.folder.name, broker_pid=os.getpid(), **fields)
+
+    async def _watch_limits(self) -> None:
+        """Log, once each, a session reaching its process or memory cap - the moment the kernel starts refusing
+        it. Near the cap rather than at it: the count is read every few seconds, and a runaway moves fast."""
+        while True:
+            await asyncio.sleep(3)
+            stats = self.job.stats()
+            if not stats:
+                return
+            near = []
+            if self.job.max_processes and stats["active"] >= self.job.max_processes * 0.95:
+                near.append("processes")
+            if self.job.max_memory_mb and stats["peak_job_mb"] >= self.job.max_memory_mb * 0.95:
+                near.append("memory")
+            for kind in near:
+                if kind not in self._limits_hit:
+                    self._limits_hit.add(kind)
+                    self._event("limit-hit", limit=kind, job={k: v for k, v in stats.items() if k != "pids"})
+
+    def _others(self) -> list[int]:
+        """The job's processes other than the broker itself: Claude Code's tree, or what it left."""
+        return [pid for pid in self.job.pids() if pid != os.getpid()]
 
     def _record(self, stream: str, line: str) -> None:
         record = {"seq": len(self.records) + 1, "s": stream, "line": line, "t": time.time()}
@@ -88,7 +138,8 @@ class Broker:
                 self._record(name, text)
 
     async def run(self) -> None:
-        env = {**os.environ, **self.launch.get("env", {})}
+        shutdown.install(self._on_windows_exit)
+        env = {**lowertoken.session_environment(), **self.launch.get("env", {})}
         self.process = await asyncio.create_subprocess_exec(
             *self.launch["command"], cwd=self.launch.get("cwd") or None, env=env,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -109,6 +160,10 @@ class Broker:
         self.published = {"pid": os.getpid(), "port": port, "token": self.token,
                      "cli_pid": self.process.pid, "started": time.time(), "exit_code": None}
         _write_json(self.folder / "broker.json", self.published)
+        self._event("session-start", cli_pid=self.process.pid, job=self.in_job, job_error=self.job.error,
+                    job_cleanup=self.job.kill_on_close, max_processes=self.job.max_processes,
+                    max_memory_mb=self.job.max_memory_mb, command=self.launch["command"][:1])
+        watch = asyncio.ensure_future(self._watch_limits())
         pumps = [asyncio.ensure_future(self._pump(self.process.stdout, "out")),
                  asyncio.ensure_future(self._pump(self.process.stderr, "err"))]
         self.exit_code = await self.process.wait()
@@ -116,13 +171,28 @@ class Broker:
         self.published["exit_code"] = self.exit_code
         _write_json(self.folder / "broker.json", self.published)
         self.changed.set()
+        # What Claude Code left running when it ended: tools still finishing, or the start of an orphaned tree.
+        self._event("cli-exit", exit_code=self.exit_code, ran_s=round(time.time() - self.published["started"]),
+                    left=self._others(), job=self.job.stats())
         try:
             await asyncio.wait_for(self.exit_delivered.wait(), timeout=LINGER_S)
             await asyncio.sleep(1)
         except asyncio.TimeoutError:
             pass
+        if self.job.kill_on_close and self._others():
+            # D112: a Stop lets work in hand finish. Closing a kill-on-close job would end it, so the broker stays
+            # until the job holds nothing but itself; only a broker that dies takes the tree with it.
+            self._event("broker-hold", left=self._others(), hold_s=HOLD_S)
+            deadline = time.monotonic() + float(self.launch.get("hold_s", HOLD_S))
+            while self._others() and time.monotonic() < deadline:
+                await asyncio.sleep(2)
+            if self._others():
+                self._event("broker-hold-timeout", left=self._others())     # closing the job ends them
+        watch.cancel()
+        self._event("broker-exit", left=self._others(), job=self.job.stats())
         await runner.cleanup()
         self._log.close()
+        self.job.close()
 
     def _allowed(self, request: web.Request) -> bool:
         return secrets.compare_digest(request.headers.get(TOKEN_HEADER, ""), self.token)
@@ -173,6 +243,7 @@ class Broker:
         if not self._allowed(request):
             return web.Response(status=403)
         if self.process is not None and self.process.returncode is None:
+            self._event("kill", cli_pid=self.process.pid, job=self.job.stats())
             self.process.kill()
         return web.json_response({"ok": True})
 
@@ -180,7 +251,7 @@ class Broker:
         if not self._allowed(request):
             return web.Response(status=403)
         return web.json_response({**{k: v for k, v in self.published.items() if k != "token"},
-                                  "exit_code": self.exit_code, "seq": len(self.records)})
+                                  "exit_code": self.exit_code, "seq": len(self.records), "job": self.job.stats()})
 
 
 def main(argv: list[str]) -> int:

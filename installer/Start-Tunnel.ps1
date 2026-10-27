@@ -23,10 +23,9 @@
 [CmdletBinding()]
 param(
     [AllowEmptyString()][string]$LogPath = '',
-    # Feature 107: run as SYSTEM by the service task - the token is the machine-scoped copy Set-AiCleanerService.ps1
-    # made (readable by SYSTEM and administrators only), not the one encrypted to the user's account.
-    [string]$TokenPath = '',
-    [ValidateSet('CurrentUser', 'LocalMachine')][string]$TokenScope = 'CurrentUser'
+    # Another stored token (encrypted to this account, as the default is). Default:
+    # %USERPROFILE%\.aicleaner\cloudflare-tunnel.dpapi.
+    [string]$TokenPath = ''
 )
 
 Set-StrictMode -Version Latest
@@ -39,9 +38,9 @@ if (-not $LogPath) { $LogPath = Join-Path $script:AppFolder 'logs\cloudflared.lo
 function Read-TunnelToken {
     <# The run token Enable-RemoteControl.ps1 stored, as plain text for the child's environment only. #>
     [OutputType([string])]
-    param([Parameter(Mandatory)][string]$Path, [string]$Scope = 'CurrentUser')
+    param([Parameter(Mandatory)][string]$Path)
     Add-Type -AssemblyName System.Security
-    $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($Path), $null, $Scope)
+    $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($Path), $null, 'CurrentUser')
     try { return [Text.Encoding]::UTF8.GetString($bytes) }
     finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 }
@@ -61,6 +60,43 @@ function Find-Cloudflared {
     return ''
 }
 
+# One tunnel at a time (feature 107): with aicleaner started with the computer, aicleaner-tunnel-service runs this
+# before anyone signs in, and the sign-in task aicleaner-tunnel runs it again at sign-in. The second finds the
+# first and leaves it be.
+# Only this account's: another user's cloudflared is not this tunnel, and must not stop it starting (security review).
+$me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$already = @(Get-CimInstance Win32_Process -Filter "Name = 'cloudflared.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { [string]$_.CommandLine -match '\stunnel\b.*\srun\b' } |
+    Where-Object {
+        $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+        $owner -and $owner.Sid -eq $me
+    })
+if ($already.Count -gt 0) {
+    Write-Host "==> the tunnel is already running (cloudflared pid $($already[0].ProcessId)); not starting another" -ForegroundColor Green
+    exit 0
+}
+# D215: from a sign-in session, Windows hides the command line of the start-up task's cloudflared (it runs in
+# session 0), so the check above never saw it and a second copy started at every sign-in. The task itself is
+# readable by this account: while it runs, the start-up copy owns the tunnel and this one stands down.
+$mySession = (Get-Process -Id $PID).SessionId
+if ($mySession -ne 0) {
+    # Only the task this installer registers for this account: at the root, run as this user, running this script.
+    # A task of the same name made by someone else must not keep this account's tunnel from starting (security review).
+    $startupTunnel = @(Get-ScheduledTask -TaskName 'aicleaner-tunnel-service' -TaskPath '\' -ErrorAction SilentlyContinue)
+    $ours = $false
+    if ($startupTunnel.Count -eq 1) {
+        $principal = [string]$startupTunnel[0].Principal.UserId
+        try { $principalSid = (New-Object Security.Principal.NTAccount($principal)).Translate([Security.Principal.SecurityIdentifier]).Value }
+        catch { $principalSid = '' }
+        $runsTunnel = @($startupTunnel[0].Actions | Where-Object { "$($_.Execute) $($_.Arguments)" -match 'Start-Tunnel\.ps1' }).Count -gt 0
+        $ours = ($principalSid -eq $me) -and $runsTunnel
+    }
+    if ($ours -and [string]$startupTunnel[0].State -eq 'Running') {
+        Write-Host '==> the tunnel runs from the start-up task (aicleaner-tunnel-service); not starting another' -ForegroundColor Green
+        exit 0
+    }
+}
+
 $tokenPath = if ($TokenPath) { $TokenPath } else { Join-Path $env:USERPROFILE '.aicleaner\cloudflare-tunnel.dpapi' }
 if (-not (Test-Path -LiteralPath $tokenPath)) {
     Write-Error "No tunnel token at ${tokenPath}: run Enable-RemoteControl.ps1 to set remote access up."
@@ -74,7 +110,7 @@ if (-not $exe) {
 $folder = Split-Path -Parent $LogPath
 if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
 
-$env:TUNNEL_TOKEN = Read-TunnelToken -Path $tokenPath -Scope $TokenScope
+$env:TUNNEL_TOKEN = Read-TunnelToken -Path $tokenPath
 try {
     # cloudflared reads TUNNEL_TOKEN for `tunnel run`; the token never appears in the process list.
     & $exe tunnel --no-autoupdate --logfile $LogPath run

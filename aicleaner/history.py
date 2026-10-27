@@ -25,7 +25,7 @@ import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 BUSY_WINDOW_S = 300             # written this recently: something may still have it open
 MAX_TITLE = 140
@@ -34,7 +34,11 @@ MAX_LINE = 200_000              # one pasted file should not become the title
 SKIP_PREFIXES = ("<command-name>", "<command-message>", "<local-command-stdout>",
                  "<system-reminder>", "<user-prompt-submit-hook>", "Caveat:",
                  # written ahead of a /clear or a slash command's output (the user, 2026-10-01)
-                 "<local-command-caveat>", "<local-command-stderr>")
+                 "<local-command-caveat>", "<local-command-stderr>",
+                 # a background task's notice: the harness's message, not the person's (D212)
+                 "<task-notification>")
+NOTICE = "<task-notification>"
+_NOTICE_FIELD = re.compile(r"<(task-id|tool-use-id|status|summary)>(.*?)</\1>", re.DOTALL)
 CONTINUED = "This session is being continued from a previous conversation"
 ROBOT_ENTRYPOINTS = ("sdk-py", "sdk-ts", "sdk", "sdk-cli")   # a program asked, not a person
 OPEN_FACTOR = 8                 # files read per row asked for, before the search gives up
@@ -347,17 +351,44 @@ def replay(project: str | Path, session_id: str, limit: int = 200,
         return []
     events: list[dict[str, Any]] = []
     try:
-        with path.open(encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                event = _event_of(line)
-                if event is None:
-                    continue
-                if before is not None and float(event.get("at") or 0) >= before:
-                    continue
-                events.append(event)
+        # From the end backwards (2026-10-27): only the tail is kept, and parsing all of a 160 MB conversation to
+        # keep its last 500 events held a resumed session's start for up to 28 s.
+        for line in _lines_from_end(path):
+            event = _event_of(line)
+            if event is None:
+                continue
+            if before is not None and float(event.get("at") or 0) >= before:
+                continue
+            events.append(event)
+            if limit and len(events) >= limit:
+                break
     except OSError:
         return []
-    return events[-limit:] if limit and len(events) > limit else events
+    events.reverse()
+    return events
+
+
+TAIL_BLOCK = 1024 * 1024
+
+
+def _lines_from_end(path: Path) -> Iterator[str]:
+    """A file's lines, last first, read a block at a time from the end. Split on bytes, so a character cut by a
+    block boundary is whole again before it is decoded."""
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        carry = b""
+        while position > 0:
+            step = min(TAIL_BLOCK, position)
+            position -= step
+            handle.seek(position)
+            parts = (handle.read(step) + carry).split(b"\n")
+            carry = parts[0]                     # may continue in the block before
+            for part in reversed(parts[1:]):
+                if part.strip():
+                    yield part.decode("utf-8", errors="replace")
+        if carry.strip():
+            yield carry.decode("utf-8", errors="replace")
 
 
 def holding(projects: Iterable[str | Path], session_id: str, root: Path | None = None) -> str:
@@ -447,6 +478,12 @@ def _event_of(line: str) -> dict[str, Any] | None:
         return {"type": "assistant", "message": record["message"], **stamp}
     if kind == "user":
         text = SPACES.sub(" ", _text_of(record.get("message"))).strip()
+        if text.startswith(NOTICE):
+            # D212: the transcript keeps a background task's notice as a user message; live, the stream sends it as
+            # its own system event. Replayed in the stream's shape, so a resumed session neither shows it as
+            # something the person said nor loses the "job finished" it carries.
+            fields = {name.replace("-", "_"): value.strip() for name, value in _NOTICE_FIELD.findall(text)}
+            return {"type": "system", "subtype": "task_notification", **fields, **stamp}
         if text and not text.startswith(SKIP_PREFIXES):
             return {"type": "prompt", "text": text, **stamp}
     if kind == "system" and record.get("subtype") == "compact_boundary":

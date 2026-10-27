@@ -104,7 +104,7 @@ address. The **Email rules** card lists each of the client's domain and tenant e
 `*@<domain>`; **Make a rule** says every address there is the client's. From then on:
 
 - each address is replaced the first time it is seen, whatever the email setting in
-  [What happens to something new](Settings.md#card-kinds);
+  [New names found](Settings.md#card-kinds);
 - its token comes from the address itself (eight hex digits of its hash), so every machine sharing
   the client derives the same one, in whatever order it meets the addresses - two copies of the
   client file merge without disagreeing;
@@ -153,7 +153,7 @@ path to find. If the folder is not in OneDrive the card says so.
 ## Repo scan
 
 The scan card reads every text file in a folder on the machine the proxy runs on (pick it with the
-folder picker; only folders under [Folders the pages may reach](Settings.md#card-folders) can be chosen):
+folder picker; only folders under [Folders the pages can open](Settings.md#card-folders) can be chosen):
 
 | Button | What it does |
 |---|---|

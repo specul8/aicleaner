@@ -934,6 +934,22 @@ try {
 
     # --- 2. Stop the proxy and remove the tasks ------------------------------------
     Write-Status 'Stopping the proxy and removing scheduled tasks'
+    # Feature 107: the start-up tasks (as you, from boot). Their launcher loop is told to stop first; removing them
+    # needs an administrator, so without one the way to do it is said.
+    $stoppedMarker = Join-Path $env:USERPROFILE '.aicleaner\stopped-on-purpose'
+    foreach ($task in 'aicleaner-service', 'aicleaner-tunnel-service') {
+        if (-not (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue)) { continue }
+        if ($PSCmdlet.ShouldProcess($task, 'Stop and unregister the start-up task')) {
+            Set-Content -LiteralPath $stoppedMarker -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
+            try {
+                Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+                Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction Stop
+                Write-Status "Removed task $task" -Level Detail
+            } catch {
+                Write-Status "Could not remove the start-up task $task ($($_.Exception.Message)); from an elevated PowerShell: Unregister-ScheduledTask -TaskName $task -Confirm:`$false" -Level Warn
+            }
+        }
+    }
     foreach ($task in 'aicleaner-proxy', 'aicleaner-claude-backup', 'aicleaner-claude-update') {
         if (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue) {
             if ($PSCmdlet.ShouldProcess($task, 'Unregister scheduled task')) {

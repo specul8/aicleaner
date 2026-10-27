@@ -654,6 +654,7 @@ th.sorted-desc::after { content: " \2193"; }
   border-bottom: 0;
 }
 tr.entry td.real { cursor: pointer; }
+tr.entry td.real .whole-word-label { display: block; font-size: 0.8em; cursor: pointer; white-space: nowrap; }
 tr.entry.editing td { background: var(--surface-2); }
 tr.entry.invalid td { background: var(--bad-bg); }
 tr.entry.invalid td.reason { color: var(--bad-text); font-size: 12.5px; }
@@ -956,6 +957,11 @@ button.link { background: none; border: 0; color: var(--accent); cursor: pointer
 .identity-label { color: var(--muted); font-size: 12px; }
 .identity-value { overflow-wrap: anywhere; }
 .identity-why { margin-top: 2px; }
+/* Names in other systems (feature 150): a short list under the names, and one row to add to it. */
+.external-names { margin-top: 12px; }
+.external-names-table { width: auto; }
+.external-names .external-system { width: 10rem; }
+.external-names .external-name { flex: 1 1 16rem; min-width: 0; }
 button.slash-row { display: grid; grid-template-columns: minmax(8rem, auto) auto 1fr; gap: .5rem;
   align-items: baseline; width: 100%; padding: .35rem .5rem; border: 0; border-bottom: 1px solid var(--border);
   background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
@@ -1024,17 +1030,54 @@ dialog.sheet .field { margin-bottom: .7rem; }
 .bad-list { margin: 0; padding-left: 1.2rem; color: var(--bad-text); }
 .bad-list li { margin: .15rem 0; }
 
-/* Settings: two columns that pack independently. The outer grid holds one item per column, so a
-   tall card can never set a row height and push a gap into the column beside it; the spacing
-   between every pair of cards is the one gap below, everywhere on the page. */
-.settings-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
-  align-items: start; }
-.settings-column { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-/* A button per card, to jump to it (the user, 2026-10-15). Wraps to as many rows as it needs. */
-.settings-jump { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
-.settings-jump .settings-jump-to { cursor: pointer; font: inherit; font-size: 12.5px; }
-.settings-jump .settings-jump-to:hover { border-color: var(--accent); }
-@media (max-width: 1000px) { .settings-columns { grid-template-columns: minmax(0, 1fr); } }
+/* Settings: a sidebar of groups beside the open group's cards (Brad, 2026-10-27, like Windows
+   Settings). The sidebar stays in view while the cards scroll. One column of cards: a group holds
+   two to eight, read top to bottom. */
+.settings-layout { display: grid; grid-template-columns: 13.5rem minmax(0, 1fr); gap: 18px; align-items: start; }
+.settings-side { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.settings-search { width: 100%; box-sizing: border-box; }
+.settings-groups { display: flex; flex-direction: column; gap: 2px; }
+.settings-group { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;
+  padding: 7px 10px; border: 1px solid transparent; border-radius: var(--radius); background: none;
+  color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.settings-group:hover { border-color: var(--border); background: var(--surface); }
+.settings-group[aria-current="true"] { border-color: var(--accent); background: var(--surface); font-weight: 600; }
+.settings-group.bad { color: var(--bad-text); }
+.settings-group.bad[aria-current="true"] { border-color: var(--bad-border); }
+.settings-group-mark { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--bad-text); }
+/* The drop-down stands in for the list on a narrow screen only. */
+.settings-group-select { display: none; width: 100%; box-sizing: border-box; }
+.settings-group-select.bad { border-color: var(--bad-border); color: var(--bad-text); }
+.settings-main { min-width: 0; }
+.settings-cards { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+/* Hidden cards and labels must stay hidden whatever display a card's own rules give it. */
+.settings-cards > [hidden], .settings-none[hidden] { display: none !important; }
+/* While searching, each card found says which group it belongs to, just above it. */
+.settings-found-in { margin: 4px 0 -8px; font-size: 12.5px; color: var(--muted); }
+.settings-none { margin: 0 0 14px; }
+/* Your own words for a setting (feature 153): the offer when nothing matches, and each card's Words
+   line - small and quiet, at the foot, so it does not compete with the card's own controls. */
+.settings-add-word { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 14px; }
+.settings-add-word[hidden] { display: none !important; }
+.setting-words { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-top: 12px;
+  padding-top: 8px; border-top: 1px solid var(--border); font-size: 12px; color: var(--faint); }
+.setting-words-label { color: var(--muted); }
+.setting-word { display: inline-flex; align-items: center; gap: 2px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface-2); }
+.setting-word.builtin { color: var(--faint); }
+.setting-word.own { color: var(--text); border-color: var(--accent); }
+.setting-word-remove { padding: 0 3px; border: 0; background: none; color: var(--muted); font: inherit;
+  line-height: 1; cursor: pointer; }
+.setting-word-remove:hover { color: var(--bad-text); }
+.setting-words .setting-word-input { width: 9rem; padding: 2px 6px; font-size: 12px; }
+.setting-words .setting-word-add { padding: 2px 8px; font-size: 12px; }
+@media (max-width: 50rem) {
+  .settings-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .settings-side { position: static; flex-direction: row; flex-wrap: wrap; }
+  .settings-side > * { flex: 1 1 12rem; }
+  .settings-groups { display: none; }
+  .settings-group-select { display: block; }
+}
 
 /* Scan progress. The bar is sized from the bytes that will really be read, so it moves evenly
    rather than sprinting through small files and stalling on one large one. */
@@ -1201,6 +1244,35 @@ dialog.picker-dialog::backdrop { background: rgba(0, 0, 0, .55); }
    and only widened as they filled (the user, 2026-10-01). */
 .session-shell { display: flex; flex-direction: column; gap: 1rem; align-items: stretch; }
 .session-top { display: grid; grid-template-columns: minmax(14rem, 22rem) minmax(0, 1fr); gap: 1rem; align-items: start; }
+/* The picker, and Start Work / Start Personal under it side by side (feature 152); stacked on a phone. */
+.session-left { display: flex; flex-direction: column; gap: .6rem; min-width: 0; }
+.session-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; align-items: start; }
+.session-presets[hidden] { display: none; }
+.preset-panel { display: flex; flex-direction: column; gap: .4rem; min-width: 0; padding: .6rem .7rem; margin: 0; }
+.preset-head { display: flex; align-items: flex-start; justify-content: space-between; gap: .4rem; }
+.preset-name { margin: 0; font-size: .95rem; overflow-wrap: anywhere; }
+.preset-more { flex: none; padding: 0 .45rem; line-height: 1.4; background: none; color: inherit;
+  border: 1px solid var(--border); border-radius: 5px; cursor: pointer; }
+.preset-more:hover { border-color: var(--accent); }
+.preset-chips { display: flex; flex-wrap: wrap; gap: .3rem; }
+.preset-chip { max-width: 100%; overflow-wrap: anywhere; }
+.preset-empty { margin: 0; font-size: .85rem; }
+.preset-go { align-self: flex-start; min-width: 4rem; }
+.preset-run { border-top: 1px solid var(--border); padding-top: .4rem; font-size: .85rem; }
+.preset-run-head { display: flex; justify-content: space-between; align-items: center; gap: .4rem; }
+.preset-run-state { font-weight: 600; }
+.preset-progress { list-style: none; margin: .3rem 0 0; padding: 0; display: flex; flex-direction: column; gap: .2rem; }
+.preset-item { display: flex; flex-wrap: wrap; gap: 0 .4rem; }
+.preset-item-name { font-weight: 600; overflow-wrap: anywhere; }
+.preset-item-state.warn { color: var(--warn-border); }
+.preset-item-reason { flex-basis: 100%; font-size: .8rem; overflow-wrap: anywhere; }
+.preset-restart-note { margin: .3rem 0 0; }
+.preset-pick-list { list-style: none; margin: .3rem 0; padding: 0; display: flex; flex-direction: column; gap: .25rem; }
+.preset-pick-row { display: flex; align-items: center; gap: .5rem; cursor: pointer; }
+.preset-pick-row:has(input:disabled) { opacity: .55; cursor: default; }
+@media (max-width: 40rem) {
+  .session-presets { grid-template-columns: minmax(0, 1fr); }
+}
 .session-band {
   height: 100dvh; box-sizing: border-box; padding: .5rem 0; min-height: 0;
   display: grid; grid-template-columns: var(--files-w, 22rem) 6px minmax(0, 1fr);
@@ -1584,3 +1656,11 @@ input[type="checkbox"].row-tick { width: 26px; height: 26px; margin: 0 .35rem 0 
 
 /* Move conversation (J3): each destination on its own line (Brad, 2026-10-20). */
 .move-targets .move-target { display: block; margin: 4px 0; }
+
+/* The Log page's fix for a canary match: whole word only, or ignore for a client or everyone. */
+.log-table .canary-fix { margin-top: 0.4em; padding: 0.4em 0.6em; border-left: 3px solid var(--warn-border); font-family: inherit; white-space: normal; }
+.log-table .canary-fix label { margin-right: 0.8em; }
+
+/* Stability spec S2: each running session's memory, and the offer to stop one left idle. */
+.session-row .session-memory { margin-left: 0.4em; font-size: 0.8em; }
+.session-idle { margin: 0.4em 0; padding: 0.4em 0.6em; border-left: 3px solid var(--warn-border); }

@@ -28,7 +28,7 @@ For each request, in this order:
    removed, so the AI service never sees them.
 5. **Attachments.** PDFs, Office documents and images become text (Poppler, the standard library,
    OCR) which is then filtered like everything else, or are withheld and replaced with a notice.
-   Images are only sent as images if [Images](Settings.md#card-images) allows it, and then they go unfiltered.
+   Images are only sent as images if [Pictures](Settings.md#card-images) allows it, and then they go unfiltered.
 6. **Tokenise.** Every string in the JSON - and every key - has each known real value replaced with
    its token.
 7. **Detect.** The tokenised text is swept for anything still shaped like an identifier (email,
@@ -92,7 +92,7 @@ identifier (at a case boundary, as in `newContoso`) is matched too.
 ## Placeholders
 
 An identifier the mapping does not know cannot have a token yet - nobody has said whose it is. For
-the kinds set to "Tokenise & Review" ([What happens to something new](Settings.md#card-kinds)), a high-confidence find is replaced by a
+the kinds set to "Tokenise & Review" ([New names found](Settings.md#card-kinds)), a high-confidence find is replaced by a
 **placeholder** and queued for Review (`make_placeholder` in `aicleaner/detect.py`):
 
 | Kind | Placeholder |
@@ -139,7 +139,7 @@ where it matched.
 
 The canary does **not** find unmapped identifiers - it only knows declared ones. Finding unknown
 identifiers is the detectors' job (step 7). A per-entry match rule that declines a match is honoured
-and logged rather than refused. Settings has an emergency switch, [Emergency: canary fail open](Settings.md#card-fail-open) (`canary.fail_open`), that sends a
+and logged rather than refused. Settings has an emergency switch, [Send what the canary refuses](Settings.md#card-fail-open) (`canary.fail_open`), that sends a
 refused request anyway, logged loudly; it is off by default.
 
 ## Last-good copies and fail-closed states

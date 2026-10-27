@@ -772,6 +772,17 @@ def main(argv: list[str] | None = None) -> int:
 
     from .proxy import run
 
+    # Feature 107: started by the start-up task, an administrator account's full token is what Windows gives. Run as
+    # a standard user instead - a copy of this command with the lowered token, whose exit code is this one's.
+    from . import lowertoken, proctree
+    try:
+        dropped = lowertoken.drop_if_elevated(proctree.elevated())
+    except lowertoken.TokenError as exc:
+        dropped = None
+        print(f"aicleaner: could not start with a standard-user token ({exc}); running with the token it was "
+              "given - /healthz and Settings say elevated", file=sys.stderr)
+    if dropped is not None:
+        return dropped
     try:
         run(cfg)
     except MappingError as exc:
