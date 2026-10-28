@@ -583,14 +583,22 @@ async function guardedRoute() {
   await route();
 }
 
+// Which drawing of a page is the current one (2026-10-28, the user): a page still loading when the menu took you
+// elsewhere - Review, a few seconds on a first visit - finished later and drew itself over the page you went to.
+let drawing = 0;
+
 async function route() {
   shownHash = location.hash;
   // A page may hold something open (the session page has an event stream); let it close it.
   if (app.page && typeof app.page.leave === 'function') app.page.leave();
   app.route = parseRoute();
   app.page = PAGES[app.route.name];
-  const main = document.getElementById('page');
-  main.replaceChildren();
+  const page = app.page;
+  const mine = ++drawing;
+  // Each drawing gets its own holder, laid out as if it were not there (display: contents), so one that finishes
+  // late writes into a holder already taken off the screen rather than over the page now showing.
+  const main = h('div', { class: 'page-view' });
+  document.getElementById('page').replaceChildren(main);
   // Which route is showing, so the stylesheet can give the ones that want width the width. The
   // 1280px measure suits prose and forms; it does not suit a table of several hundred entries,
   // and the two controls in the toolbar sat out past the right edge of every card beneath them
@@ -602,11 +610,17 @@ async function route() {
   // this way, rebuilding the whole Session page, where the Active Sessions buttons only switch.
   const drawn = begin('route', { page: app.route.name });
   try {
-    await app.page.render(main, { route: app.route, status: app.status, refresh: refreshStatus });
+    await page.render(main, { route: app.route, status: app.status, refresh: refreshStatus });
   } catch (error) {
-    sayError(error);
+    if (mine === drawing) sayError(error);
   }
   drawn.end();
+  if (mine !== drawing) {
+    // Overtaken while it loaded: whatever it started on the way (a poll, a stream) is closed too - unless it is the
+    // same page drawn again, whose leave() would close what the newer drawing holds.
+    if (page !== app.page && typeof page.leave === 'function') page.leave();
+    return;
+  }
   if (app.status) renderNav(app.status);
   // Arriving where a notice points is looking at it (44): the entry goes now, not a poll later.
   if (app.status) {

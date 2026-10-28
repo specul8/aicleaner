@@ -21,7 +21,7 @@ import { openMoveConversation } from '../convmovedialog.js';
 import { begin } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { openSuggestTitles } from '../titlesdialog.js';
-import { attachImageReading, imageButton, isReadable, readInto } from '../imagetext.js';
+import { attachImageReading, imageButton, isReadable, readInto, readingImages } from '../imagetext.js';
 import { codeEditor } from '../codeeditor.js';
 import { openConversationSearch } from '../convsearch.js';
 import { openClaudeImport } from '../claudeimport.js';
@@ -35,6 +35,7 @@ import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, ne
   viewableFiles } from '../treeselect.js';
 import { arrangeSheet } from '../sheet.js';
 import { mountPresets } from '../presets.js';
+import { scrollToChat } from '../chatscroll.js';
 
 const view = { stream: null, state: null, name: '', poll: null, editing: false, profiles: null,
   past: [], commands: null, slashRows: [], slashAt: 0, transition: false };
@@ -3380,7 +3381,7 @@ export async function render(main, context = {}) {
   // while the selected session is running; there is nothing to chat to otherwise.
   const chat = h('button', { type: 'button', id: 'session-chat', disabled: true }, 'Start chatting');
   chat.addEventListener('click', () => {
-    document.getElementById('session-band')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    scrollToChat();
     box.focus({ preventScroll: true });
   });
   // Nothing picked: the card says what the picker says, instead of controls for no project (the
@@ -3710,6 +3711,11 @@ export async function render(main, context = {}) {
   async function sendPrompt() {
     const text = promptValue().trim();
     if (!text) return;
+    // Enter as well as the button: an image still being read would go out as its "[reading ...]" mark.
+    if (readingImages()) {
+      say('An image is still being read - Send works once its text is in the prompt.', 'warn');
+      return;
+    }
     const sentFrom = view.name;
     try {
       await postJSON('/api/session/prompt', { name: sentFrom, text });
@@ -3891,7 +3897,7 @@ export async function render(main, context = {}) {
   if (view.name) noteAddress(`#/session/${encodeURIComponent(view.name)}`);
   if (toChat && view.name) {
     requestAnimationFrame(() => {
-      document.getElementById('session-band')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      scrollToChat();
       if (!box.disabled) box.focus({ preventScroll: true });
     });
   }
@@ -4104,7 +4110,7 @@ export async function render(main, context = {}) {
         // Start, and only Start, brings the working band into view (DECISIONS 35). Arriving on
         // the page with a session running does not scroll: whoever came to stop it would be
         // chasing the Stop button up the screen.
-        document.getElementById('session-band')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        scrollToChat();
         box.focus({ preventScroll: true });
       }
     } catch (error) {
@@ -4114,6 +4120,18 @@ export async function render(main, context = {}) {
     }
   }, { busyLabel: 'Working...', settle: 600 });
   document.getElementById('session-send').addEventListener('click', () => { sendPrompt(); });
+  // Send waits while an image is read into the prompt (2026-10-28); one listener per visit, taken off in leave().
+  const showReading = () => {
+    const send = document.getElementById('session-send');
+    if (!send) return;
+    const count = readingImages();
+    send.disabled = count > 0;
+    send.title = count ? 'Waiting for the text of an image being read' : '';
+  };
+  if (view.offReading) view.offReading();
+  document.addEventListener('aicleaner:image-reading', showReading);
+  view.offReading = () => document.removeEventListener('aicleaner:image-reading', showReading);
+  showReading();
   // On this render's shell, not on `main`: `main` outlives the page, so a listener added to it on
   // every visit piled up, and one click on Answer sent the answer once per visit - the second
   // refused with "that request is not waiting for an answer" (2026-09-30). Each request is also
@@ -4329,6 +4347,8 @@ export function leave() {
   view.presets = null;
   if (view.offConnection) view.offConnection();
   view.offConnection = null;
+  if (view.offReading) view.offReading();
+  view.offReading = null;
   view.editing = false;
   view.openSearch = null;            // Ctrl+K belongs to the Session page only
 }

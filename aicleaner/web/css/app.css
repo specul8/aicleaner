@@ -342,6 +342,8 @@ body { display: grid; grid-template-columns: 228px minmax(0, 1fr); }
 .segmented label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 main#page { padding: 14px 22px 40px; display: flex; flex-direction: column; gap: 14px; max-width: 1280px; }
+/* One drawing of a page (app.js route()): its children lay out as the page's own. */
+main#page > .page-view { display: contents; }
 /* The toolbar takes the same measure, so Log out and the cog line up with the right edge of the
    cards instead of floating past them - which is what made a row that costs no horizontal space
    look like it was holding the strip open (37). */

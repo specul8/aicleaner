@@ -8,6 +8,7 @@
 import { getJSON, postJSON, say, sayError } from './api.js';
 import { h, tickRows } from './dom.js';
 import { arrangeSheet } from './sheet.js';
+import { keepChatInPlace } from './chatscroll.js';
 
 const STATE_TEXT = {
   stopping: 'stopping',
@@ -136,16 +137,11 @@ export function mountPresets(slot, { onRun = () => {} } = {}) {
     // A run moving sessions on: the page's own picker and transcript catch up.
     if (lastSig) onRun();
     lastSig = sig;
-    // The panels sit above the chat band and arrive after the page may have scrolled to it ("Start chatting", a
-    // session opened from the menu): whatever they add or take in height is scrolled away, so the band stays put.
-    const band = document.getElementById('session-band');
-    const before = band ? band.getBoundingClientRect().top : null;
-    slot.replaceChildren(...(view.presets || []).map((preset) => panel(view, preset)));
-    slot.hidden = !(view.presets || []).length;
-    if (band && before !== null && before < window.innerHeight) {
-      const moved = band.getBoundingClientRect().top - before;
-      if (moved) window.scrollBy(0, moved);
-    }
+    // The panels sit above the chat band and arrive after the page may have scrolled, or be scrolling, to it.
+    keepChatInPlace(() => {
+      slot.replaceChildren(...(view.presets || []).map((preset) => panel(view, preset)));
+      slot.hidden = !(view.presets || []).length;
+    });
   };
   const schedule = () => {
     if (stopped) return;

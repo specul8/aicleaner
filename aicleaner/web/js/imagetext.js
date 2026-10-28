@@ -9,6 +9,18 @@ const READABLE = /\.(png|jpe?g|gif|bmp|tiff?|webp|pdf)$/i;
 const MAX_BYTES = 20 * 1024 * 1024;
 let counter = 0;
 let queue = Promise.resolve();
+// Reads not yet back (2026-10-28, the user): Send waits for them, or the prompt goes out with a "[reading ...]" mark
+// in place of the text. The page hears of each change through the `aicleaner:image-reading` event.
+let reading = 0;
+
+export function readingImages() {
+  return reading;
+}
+
+function setReading(count) {
+  reading = Math.max(0, count);
+  document.dispatchEvent(new CustomEvent('aicleaner:image-reading', { detail: { count: reading } }));
+}
 
 export function isReadable(name) {
   return READABLE.test(String(name || ''));
@@ -61,9 +73,11 @@ export async function readInto(box, what, sessionName, say, format = null) {
   }
   const mark = placeholderAt(box, label);
   box.promptScope = box.closest('.prompt-box-parts');  // kept: the box may be gone when the text arrives
+  setReading(reading + 1);
   // One read at a time, in the order asked (the server reads one at a time per session and turns
   // a second away); each placeholder is in the box at once, so the order is visible.
-  const turn = queue.then(() => readNow(box, what, sessionName, say, mark, label, format));
+  const turn = queue.then(() => readNow(box, what, sessionName, say, mark, label, format))
+    .finally(() => setReading(reading - 1));
   queue = turn.catch(() => {});
   return turn;
 }
