@@ -42,6 +42,7 @@ from typing import Any, Awaitable, Callable
 
 from . import lifecycle
 from .fileio import network_path
+from .promptpictures import PictureError, blocks, checked, image_blocks_in, names
 
 log = logging.getLogger("aicleaner.session")
 
@@ -456,6 +457,7 @@ KEPT_EVENTS = frozenset({
     "prompt", "assistant", "user", "brief", "result", "text",
     "permission", "permission_timeout", "permission_answered", "permission_mode",
     "interrupt_pending", "interrupted", "interrupt_refused", "exited", "stopped",
+    "picture_note",              # what the proxy did with an attached picture, when not what was asked (D216)
 })
 KEPT_SYSTEM = frozenset({
     "init", "task_started", "task_notification", "task_updated", "background_tasks_changed",
@@ -885,7 +887,7 @@ class Session(_FindsClaude):
             # Why the conversation cannot be switched now (item J); "" when it can, or not running.
             "switch_blocked": work_in_progress(self) if self.running else "",
             "doing": self.doing,
-            "queued": [dict(item) for item in self.queued],
+            "queued": self.queued_view(),
             "events": list(self.events),
             "error": self.last_error,
         }
@@ -1089,13 +1091,17 @@ class Session(_FindsClaude):
             return
         if message.get("type") != "user":
             return
-        text = " ".join(b.get("text", "") for b in (message.get("message") or {}).get("content") or []
+        content = (message.get("message") or {}).get("content") or []
+        text = " ".join(b.get("text", "") for b in content
                         if isinstance(b, dict) and b.get("type") == "text")
-        if text:
+        # Pictures sent with it (D216): shown by count, as the broker kept the blocks and not the names.
+        pictures = image_blocks_in(content)
+        if text or pictures:
             # A turn was asked for before the restart; a replayed result after it means it ended.
             # Whatever is left when the replay ends is whether a turn is still running (D179).
             self.busy = True
-            self._emit({"type": "prompt", "text": text, "at": at})
+            self._emit({"type": "prompt", "text": text, "at": at,
+                        **({"images": [{"name": "picture"}] * pictures} if pictures else {})})
 
     async def reattach(self, folder: Path, launch: dict[str, Any], published: dict[str, Any]) -> None:
         """Pick up a session a previous proxy started, still running in its broker (DECISIONS 49).
@@ -1362,24 +1368,40 @@ class Session(_FindsClaude):
             raise SessionError("no project folders are configured (session.projects)")
         return SearchWalk(needle, self._allowed_roots(share)[1])
 
-    async def prompt(self, text: str) -> str:
+    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
         """Send one user message; the reply arrives as events. While a turn is running it waits
-        in `queued` instead (D176) and goes when the turn ends. Returns "sent" or "queued"."""
+        in `queued` instead (D176) and goes when the turn ends. Returns "sent" or "queued".
+        `images`: pictures attached on the page (D216), already checked (promptpictures.checked)."""
         if not self.running or self._process is None or self._process.stdin is None:
             raise SessionError("no session is running")
-        if not text.strip():
+        images = list(images or [])
+        if not text.strip() and not images:
             raise SessionError("nothing to send")
+        # A slash command goes as typed, text only, or the CLI does not take it for one.
+        if images and text.lstrip().startswith("/"):
+            raise SessionError("a slash command is sent as text only - remove the pictures, or send them with the next prompt")
+        # Another agent's bridge passes words only (agents/bridge.py): the pictures would be dropped without a word.
+        if images and self.agent != "claude":
+            raise SessionError("pictures can be attached in a Claude Code session only - remove them, or choose "
+                               "Convert to text under Settings, Pictures, On the Session page")
         if self.busy:
-            self.queued.append({"id": uuid.uuid4().hex[:12], "text": text, "at": time.time(), "held": False})
+            item: dict[str, Any] = {"id": uuid.uuid4().hex[:12], "text": text, "at": time.time(), "held": False}
+            if images:
+                item["images"] = images          # kept with it in queued.json, across a proxy restart
+            self.queued.append(item)
             self._queue_changed()
             return "queued"
-        await self._send(text)
+        await self._send(text, images)
         return "sent"
+
+    def queued_view(self) -> list[dict[str, Any]]:
+        """The waiting prompts as the page sees them: a picture by its name, never its bytes (D216)."""
+        return [{**item, "images": names(item["images"])} if item.get("images") else dict(item) for item in self.queued]
 
     def _queue_changed(self) -> None:
         """Keep the waiting prompts on disk beside the broker, and tell watchers the list changed."""
         self._save_queue()
-        self._emit({"type": "queue", "queued": [dict(item) for item in self.queued]})
+        self._emit({"type": "queue", "queued": self.queued_view()})
 
     def _queue_file(self) -> Path | None:
         return self.folder / "queued.json" if self.folder is not None else None
@@ -1408,16 +1430,26 @@ class Session(_FindsClaude):
             return
         for item in items if isinstance(items, list) else []:
             if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("id"):
-                self.queued.append({"id": str(item["id"]), "text": item["text"],
-                                    "at": float(item.get("at") or 0), "held": bool(item.get("held"))})
+                kept = {"id": str(item["id"]), "text": item["text"],
+                        "at": float(item.get("at") or 0), "held": bool(item.get("held"))}
+                if item.get("images"):
+                    # Checked again: the file is on disk, and a picture the API would refuse costs the turn (D216).
+                    try:
+                        kept["images"] = checked(item["images"])
+                    except PictureError as exc:
+                        log.warning("a waiting prompt's pictures in %s were dropped: %s", path, exc)
+                if kept["text"].strip() or kept.get("images"):
+                    self.queued.append(kept)
 
-    async def cancel_queued(self, item_id: str) -> None:
-        """Drop one waiting prompt."""
-        before = len(self.queued)
-        self.queued = [item for item in self.queued if item["id"] != item_id]
-        if len(self.queued) == before:
+    async def cancel_queued(self, item_id: str) -> list[dict[str, str]]:
+        """Drop one waiting prompt. Its pictures are handed back (D216), so the page can attach them again as it puts
+        the words back."""
+        found = [item for item in self.queued if item["id"] == item_id]
+        if not found:
             raise SessionError("that prompt is no longer waiting")
+        self.queued = [item for item in self.queued if item["id"] != item_id]
         self._queue_changed()
+        return list(found[0].get("images") or [])
 
     async def send_queued_now(self, item_id: str) -> str:
         """Send one waiting prompt now: to the front, and the running turn interrupted so it goes
@@ -1430,7 +1462,7 @@ class Session(_FindsClaude):
         if not self.busy:
             self.queued.pop(0)
             self._queue_changed()
-            await self._send(item["text"])
+            await self._send(item["text"], item.get("images"))
             return "sent"
         self._queue_changed()
         if self.background:
@@ -1446,11 +1478,12 @@ class Session(_FindsClaude):
     def take_waiting(self) -> list[str]:
         """The waiting prompts, handed to Claude between tool calls (feature 119): every one not
         held, in order, off the queue and shown as sent. Asked for by the PostToolUse hook, so only
-        mid-turn; a held prompt and everything after it stay, as they would at the turn's end."""
+        mid-turn; a held prompt and everything after it stay, as they would at the turn's end.
+        So does one with pictures (D216): the hook hands Claude text, so it waits for the turn's end."""
         if not self.busy or not self.running:
             return []
         taken: list[str] = []
-        while self.queued and not self.queued[0].get("held"):
+        while self.queued and not self.queued[0].get("held") and not self.queued[0].get("images"):
             taken.append(self.queued.pop(0)["text"])
         if taken:
             self._queue_changed()
@@ -1476,14 +1509,14 @@ class Session(_FindsClaude):
         item = self.queued.pop(0)
         self._queue_changed()
         try:
-            await self._send(item["text"])
+            await self._send(item["text"], item.get("images"))
         except (SessionError, OSError) as exc:
             # Put back rather than lost: it is still on screen, and Send now can try again.
             self.queued.insert(0, {**item, "held": True})
             self.last_error = f"a waiting prompt could not be sent: {exc}"
             self._queue_changed()
 
-    async def _send(self, text: str) -> None:
+    async def _send(self, text: str, images: list[dict[str, str]] | None = None) -> None:
         if not self.running or self._process is None or self._process.stdin is None:
             raise SessionError("no session is running")
         sent = text
@@ -1493,10 +1526,15 @@ class Session(_FindsClaude):
             # What this engagement is, and what not to touch. Sent with the first prompt rather
             # than as a turn of its own, so it costs no extra reply, and shown in the transcript,
             # because what went out is what the transcript has to say went out.
-            sent = f"{brief}\n\n{text}"
+            sent = f"{brief}\n\n{text}" if text.strip() else brief
             self._briefed = True
             self._emit({"type": "brief", "text": brief})
-        content = [{"type": "text", "text": sent}]
+        # Pictures first, then the words (D216), as the API's guidance has it; the proxy redacts them, sends them as
+        # they are, or puts their text in their place, per Pictures (feature 114). A prompt may be pictures alone:
+        # the API refuses an empty text block, so there is none then.
+        content = blocks(images or [])
+        if sent.strip() or not images:
+            content.append({"type": "text", "text": sent})
         # Not with a slash command: sent as typed, or the CLI does not recognise it as one (the user,
         # 2026-10-18: /ralph-loop:help arrived as an ordinary message with the note after it).
         if self.origin and not text.lstrip().startswith("/"):
@@ -1505,7 +1543,8 @@ class Session(_FindsClaude):
         message = {"type": "user", "message": {"role": "user", "content": content}}
         self._process.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
         await self._process.stdin.drain()
-        self._emit({"type": "prompt", "text": text})
+        # The page hears the pictures' names, never their bytes: the event is kept and polled.
+        self._emit({"type": "prompt", "text": text, **({"images": names(images)} if images else {})})
 
     async def interrupt(self, cancel_queued: bool = True) -> None:
         """Stop the turn that is running, and keep the session alive.
@@ -1866,6 +1905,17 @@ class Session(_FindsClaude):
             raise ValueError("answers must be question text, each with a text answer")
         self._emit({"type": "permission_answered", "id": request_id, "allow": bool(allow),
                     "answers": dict(answers), "late": True})
+
+
+SWITCH_FINISH_MESSAGE = ("Please finish what you are doing now - wrap up and stop at a safe point, summarise where "
+                         "things are, and do not start anything new. This session is being switched to another "
+                         "conversation as soon as you are done.")
+SWITCH_FINISH_WAIT_S = 2 * 60 * 60
+
+
+def switch_ready(session: Any) -> bool:
+    """Nothing in progress, background tasks included: a switch asked to wait for a wrap-up goes now."""
+    return not work_in_progress(session) and not getattr(session, "background", 0)
 
 
 def work_in_progress(session: Any) -> str:
@@ -2294,21 +2344,63 @@ class SessionHost(_FindsClaude):
         return await session.start(project=str(home) if home else project, resume=resume,
                                    model=model or profile.model)
 
-    async def switch(self, name: str = "", resume: str = "", title: str = "") -> dict[str, Any]:
+    async def switch(self, name: str = "", resume: str = "", title: str = "", when: str = "") -> dict[str, Any]:
         """Another conversation in a running session (item J): the current one stopped - titled as a
-        stop titles it - and the chosen one started, or a new one when `resume` is empty. Refused
-        while there is work in progress. Not running: an ordinary start."""
+        stop titles it - and the chosen one started, or a new one when `resume` is empty. Not running: an
+        ordinary start.
+
+        `when` (feedback #6, 2026-10-28): "" refuses while there is work in progress; "now" switches anyway,
+        ending the turn and any background tasks; "finish" asks Claude to wrap up and switches once the
+        session is idle - background tasks included."""
         profile = self.profile(name)
         existing = self.sessions.get(profile.name)
+        self._drop_finishing_switch(profile.name)
         if existing is None or not existing.running:
             return await self.start(profile.name, resume=resume, title=title)
         if resume and resume == existing.session_id:
             return existing.state()
+        if when == "finish" and not switch_ready(existing):
+            await existing.prompt(SWITCH_FINISH_MESSAGE)
+            waits = getattr(self, "_finishing_switches", None)
+            if waits is None:
+                waits = self._finishing_switches = {}
+            waits[profile.name] = asyncio.ensure_future(self._switch_when_idle(profile.name, resume, title))
+            state = existing.state()
+            state["switch_waiting"] = True
+            return state
         why = work_in_progress(existing)
-        if why:
+        if why and when != "now":
             raise SessionError(f"{profile.name}: {why}")
-        await self.stop(profile.name)
+        await self.stop(profile.name, reason="switch")
         return await self.start(profile.name, resume=resume, title=title)
+
+    def _drop_finishing_switch(self, name: str) -> None:
+        """A switch asked for later gives way to a newer one, or to a stop."""
+        task = (getattr(self, "_finishing_switches", None) or {}).pop(name, None)
+        if task is not None and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+
+    async def _switch_when_idle(self, name: str, resume: str, title: str) -> None:
+        """The wrap-up asked for, then the switch: checked every second, for up to SWITCH_FINISH_WAIT_S."""
+        deadline = time.monotonic() + SWITCH_FINISH_WAIT_S
+        try:
+            await asyncio.sleep(2)                            # the wrap-up prompt has begun its turn
+            while time.monotonic() < deadline:
+                session = self.sessions.get(name)
+                if session is None or not session.running:
+                    return                                    # stopped meanwhile: nothing to switch from
+                if switch_ready(session):
+                    (getattr(self, "_finishing_switches", None) or {}).pop(name, None)
+                    await self.stop(name, reason="switch")
+                    await self.start(name, resume=resume, title=title)
+                    return
+                await asyncio.sleep(1)
+            log.warning("%s did not finish within %d s; the switch it was waiting for was dropped",
+                        name, SWITCH_FINISH_WAIT_S)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - said in the log; the session is left as it is
+            log.warning("switching %s after it finished failed: %s", name, exc)
 
     def agent_root(self, profile: Profile | None) -> Path | None:
         """Where this profile's agent files its conversations: None for Claude Code (its own folder)."""
@@ -2399,17 +2491,25 @@ class SessionHost(_FindsClaude):
                  target.name, len(moved_files), len(left_files))
         return {"ok": True, "to": target.name, "home": str(home), "files_moved": moved_files, "files_left": left_files}
 
-    async def prompt(self, text: str, name: str = "", origin: str = "") -> str:
+    async def prompt(self, text: str, name: str = "", origin: str = "",
+                     images: list[dict[str, str]] | None = None) -> str:
         session = self._session(name)
         if origin:
             session.origin = origin
-        return await session.prompt(text)
+        return await session.prompt(text, images)
+
+    def picture_note(self, name: str, text: str) -> None:
+        """What the proxy did with a picture this session sent, when it is not what was asked (D216): kept back
+        because a name stayed legible, or the reader failed - said in the transcript, where the reader is looking."""
+        session = self.sessions.get(name)
+        if session is not None:
+            session._emit({"type": "picture_note", "text": text})
 
     async def send_queued_now(self, item_id: str, name: str = "") -> str:
         return await self._session(name).send_queued_now(item_id)
 
-    async def cancel_queued(self, item_id: str, name: str = "") -> None:
-        await self._session(name).cancel_queued(item_id)
+    async def cancel_queued(self, item_id: str, name: str = "") -> list[dict[str, str]]:
+        return await self._session(name).cancel_queued(item_id)
 
     def take_waiting(self, session_id: str) -> list[str]:
         """Feature 119: the waiting prompts of the running session with this conversation id, or
@@ -2430,6 +2530,8 @@ class SessionHost(_FindsClaude):
 
     async def stop(self, name: str = "", reason: str = "user") -> None:
         session = self._session(name)
+        if session.profile is not None:
+            self._drop_finishing_switch(session.profile.name)   # a stop overrides a switch waiting for a wrap-up
         conv_id = session.session_id
         await session.stop(reason)
         # The conversation that just ended gets a title when it grew (item E, session.auto_titles).

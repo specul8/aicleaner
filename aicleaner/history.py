@@ -27,10 +27,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
+from .promptpictures import image_blocks_in
+
 BUSY_WINDOW_S = 300             # written this recently: something may still have it open
 MAX_TITLE = 140
 SCAN_LINES = 500                # past the tool results that a resumed conversation opens with
 MAX_LINE = 200_000              # one pasted file should not become the title
+MAX_PICTURE_LINE = 64 * 1024 * 1024    # a prompt with pictures in it (D216); a prompt's are at most 20 MB
 SKIP_PREFIXES = ("<command-name>", "<command-message>", "<local-command-stdout>",
                  "<system-reminder>", "<user-prompt-submit-hook>", "Caveat:",
                  # written ahead of a /clear or a slash command's output (the user, 2026-10-01)
@@ -461,7 +464,8 @@ def _transcript(project: str | Path, session_id: str, root: Path | None) -> Path
 def _event_of(line: str) -> dict[str, Any] | None:
     """One transcript line as the event the Session page renders, or None for everything else
     (replay's rules)."""
-    if len(line) > MAX_LINE:
+    # A prompt with pictures attached (D216) is a long line - the pictures are in it - and is still a prompt.
+    if len(line) > (MAX_PICTURE_LINE if '"image"' in line else MAX_LINE):
         return None
     try:
         record = json.loads(line)
@@ -484,8 +488,14 @@ def _event_of(line: str) -> dict[str, Any] | None:
             # something the person said nor loses the "job finished" it carries.
             fields = {name.replace("-", "_"): value.strip() for name, value in _NOTICE_FIELD.findall(text)}
             return {"type": "system", "subtype": "task_notification", **fields, **stamp}
+        # Pictures sent with it (D216), shown as the live prompt shows them; the record keeps no names.
+        pictures = image_blocks_in((record.get("message") or {}).get("content")) \
+            if isinstance(record.get("message"), dict) else 0
+        shown = {"images": [{"name": "picture"}] * pictures} if pictures else {}
         if text and not text.startswith(SKIP_PREFIXES):
-            return {"type": "prompt", "text": text, **stamp}
+            return {"type": "prompt", "text": text, **shown, **stamp}
+        if pictures and not text:
+            return {"type": "prompt", "text": "", **shown, **stamp}
     if kind == "system" and record.get("subtype") == "compact_boundary":
         # Where the conversation was compacted (E5.1): the transcript writes its numbers in camelCase,
         # the stream in snake_case - replayed in the stream's shape, so the page reads one form.

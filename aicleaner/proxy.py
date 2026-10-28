@@ -26,6 +26,7 @@ import os
 import socket
 import re
 import shutil
+import threading
 import time
 import uuid
 from collections import Counter
@@ -122,6 +123,9 @@ _NOT_UI_ACTIONS = ("/api/tokenise", "/api/rehydrate", "/api/session/tree-state",
 _LOGGED_READS = ("/api/session/file", "/api/session/file/raw", "/api/session/file/download")
 _FILE_WRITE = "/api/session/file/write"
 _READ_IMAGE = "/api/session/read-image"
+_PROMPT = "/api/session/prompt"
+PICTURE_CACHE = 32          # redacted pictures kept by hash (D216): a conversation's worth
+_PICTURE_LOCK = threading.Lock()
 # Where a body value is a credential. Everything on the Secrets endpoints is; elsewhere, a key
 # that names one. "token" is withheld except where it is a client's token, which is not a secret.
 _SECRET_PATHS = ("/api/secrets",)
@@ -199,6 +203,10 @@ def _withheld(body: Any, path: str) -> Any:
     # An image read for the prompt (feature 113) is logged by name and size, not as base64.
     if path == _READ_IMAGE and isinstance(logged, dict) and isinstance(logged.get("data"), str):
         logged = {**logged, "data": f"({len(logged['data']) * 3 // 4} bytes)"}
+    # So is a picture attached to a prompt (D216).
+    if path == _PROMPT and isinstance(logged, dict) and isinstance(logged.get("images"), list):
+        logged = {**logged, "images": [{**p, "data": f"({len(str(p.get('data') or '')) * 3 // 4} bytes)"}
+                                       if isinstance(p, dict) else p for p in logged["images"]]}
     return logged
 
 
@@ -1162,8 +1170,14 @@ class Proxy:
         found = next((c for c in clients if c.get("id") == client), None)
         return None if found is None else len([f for f in (found.get("forms") or []) if f.get("real")])
 
-    def _picture(self, mapper: Any) -> Any:
-        """Feature 114: (image bytes) -> picture.Redacted while pictures go with client names blacked out; else None."""
+    def _picture(self, mapper: Any, said: list[tuple[str, str]] | None = None) -> Any:
+        """Feature 114: (image bytes) -> picture.Redacted while pictures go with client names blacked out; else None.
+
+        D216: a picture attached on the Session page stays in the conversation, and Claude Code sends the whole
+        conversation with every request - each read three times (read, fill, read again) on every tool call of every
+        turn. So the outcome is kept by the picture's hash, for as long as the mapping and the ignore list are the
+        same (they decide what is blacked out). `said` collects (hash, why) for a picture that did not go as a picture
+        - held back, or the reader failed - so the session that sent it can be told, once."""
         if not self.cfg.redact_images or self.cfg.allow_images:
             return None
         if getattr(self, "_picture_readers", None) is None:
@@ -1171,16 +1185,54 @@ class Proxy:
             self._picture_readers = windows_readers(self.cfg.ocr_timeout_s) or False
         if not self._picture_readers:
             return None
+        import hashlib
+
         from .detect import find_candidates
         from .picture import redact_picture
         read_boxes, fill_boxes = self._picture_readers
         ignored = {v.lower() for v in self.store.ignore_set()} if self.store is not None else set()
+        cache: dict[str, Any] = self.__dict__.setdefault("_picture_cache", {})
+        ignoring = frozenset(ignored)
 
         def candidates(text: str) -> list[str]:
             # Identifiers the detectors find that are not mapped yet (emails, IPs, tenants, hosts...), less the ignored.
             return [value for value, *_rest in find_candidates(text, mapper) if value.lower() not in ignored]
 
-        return lambda raw: redact_picture(raw, mapper, read_boxes, fill_boxes, candidates)
+        def redacted(raw: bytes) -> Any:
+            key = hashlib.sha256(raw).hexdigest()
+            with _PICTURE_LOCK:                      # requests are filtered on worker threads
+                kept = cache.get(key)
+            if kept is not None and kept[0] is mapper and kept[1] == ignoring:
+                result = kept[2]
+            else:
+                try:
+                    result = redact_picture(raw, mapper, read_boxes, fill_boxes, candidates)
+                except Exception as exc:  # noqa: BLE001 - said, then handled as before: the picture goes as text
+                    if said is not None:
+                        said.append((key, f"the picture reader failed ({str(exc)[:120]})"))
+                    raise
+                with _PICTURE_LOCK:
+                    cache.pop(key, None)
+                    cache[key] = (mapper, ignoring, result)
+                    while len(cache) > PICTURE_CACHE:
+                        cache.pop(next(iter(cache)))
+            if result.image is None and said is not None:
+                said.append((key, result.withheld))
+            return result
+
+        return redacted
+
+    def _say_pictures(self, session_name: str, said: list[tuple[str, str]]) -> None:
+        """D216: a Session-page session hears, once a picture, that it went as its text and not as a picture."""
+        if self.session is None:
+            return
+        told: set[tuple[str, str]] = self.__dict__.setdefault("_pictures_told", set())
+        for key, why in said:
+            if (session_name, key) in told:
+                continue
+            told.add((session_name, key))
+            self.session.picture_note(session_name, f"a picture was not sent as a picture ({why}); its text went in its "
+                                                    "place, where any could be read")
 
     def editor_services(self) -> dict[str, dict[str, Any]]:
         """Each suggestion service, whether it can answer here (installed and signed in), and what it costs - for the
@@ -1895,13 +1947,16 @@ class Proxy:
                     read.append(fixed)
                     return fixed
 
+                said: list[tuple[str, str]] = []
                 obj, attach_counts = await asyncio.to_thread(
-                    lambda: scrub(obj, self.cfg.allow_images, self._pdf_to_text, picture=self._picture(mapper),
+                    lambda: scrub(obj, self.cfg.allow_images, self._pdf_to_text, picture=self._picture(mapper, said),
                                   image_to_text=self._image_to_text, repair=repair,
                                   ocr_max_pages=self.cfg.ocr_max_pages,
                                   ocr_timeout_s=self.cfg.ocr_timeout_s,
                                   ocr_max_bytes=self.cfg.ocr_max_bytes))
                 attach = dict(attach_counts)
+                if said and session_name:
+                    self._say_pictures(session_name, said)
                 original = obj
                 project = request_project(obj)
                 request[_REQ]["project"] = project

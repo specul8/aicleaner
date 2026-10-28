@@ -22,8 +22,10 @@ import { begin } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { openSuggestTitles } from '../titlesdialog.js';
 import { attachImageReading, imageButton, isReadable, readInto, readingImages } from '../imagetext.js';
+import { attachments, pictureKind, readOnlyType } from '../pictures.js';
 import { codeEditor } from '../codeeditor.js';
 import { openConversationSearch } from '../convsearch.js';
+import { askSwitch } from '../switchask.js';
 import { openClaudeImport } from '../claudeimport.js';
 import { attachFileDrop } from '../filedrop.js';
 import { attachTreeDrag } from '../treedrag.js';
@@ -458,14 +460,23 @@ const closedThinking = new Set();
 // Either way a box the person opened or closed stays as they left it.
 const openedThinking = new Set();
 let showThinking = true;
-getJSON('/api/config').then((config) => {
-  const s = config.settings || {};
+// What a picture pasted, dropped, uploaded or read from the tree becomes (D216), and whether pictures leave at all.
+const pictureSettings = { mode: 'text', sends: false };
+const noteSettings = (s) => {
   if ('session.show_thinking' in s) showThinking = s['session.show_thinking'] !== false;
-}).catch(() => {});
-window.addEventListener('aicleaner:settings', (event) => {
-  const s = event.detail || {};
-  if ('session.show_thinking' in s) showThinking = s['session.show_thinking'] !== false;
-});
+  if ('session.picture_mode' in s) pictureSettings.mode = s['session.picture_mode'] || 'text';
+  if ('attachments.allow_images' in s || 'attachments.redact_images' in s) {
+    pictureSettings.sends = Boolean(s['attachments.allow_images'] || s['attachments.redact_images']);
+  }
+};
+window.addEventListener('aicleaner:settings', (event) => noteSettings(event.detail || {}));
+
+// What this session does with a picture now: attaching needs pictures to leave at all (Pictures not on Text only)
+// and a Claude Code session (another agent's bridge passes words only).
+function pictureMode() {
+  const profile = ((view.state && view.state.profiles) || []).find((p) => p.name === view.name) || {};
+  return pictureSettings.sends && (profile.agent || 'claude') === 'claude' ? pictureSettings.mode : 'text';
+}
 
 function transcript(events, { after = null, placeholder = true } = {}) {
   const lines = [];
@@ -480,7 +491,10 @@ function transcript(events, { after = null, placeholder = true } = {}) {
     }
     wasReplayed = Boolean(event.replayed);
     if (event.type === 'prompt') {
-      lines.push(h('div', { class: 'turn you' }, h('span', { class: 'who' }, 'you'), promptBody(event.text)));
+      lines.push(h('div', { class: 'turn you' }, h('span', { class: 'who' }, 'you'), promptWithPictures(event)));
+    } else if (event.type === 'picture_note') {
+      // What the proxy did with an attached picture, when it is not what was asked (D216).
+      lines.push(h('div', { class: 'turn tool picture-note' }, h('span', { class: 'who' }, 'session'), h('div', {}, event.text)));
     } else if (event.type === 'assistant') {
       // Claude's reasoning, collapsed above the reply (the user, 2026-10-01): open it to see how a
       // request is being read and steer early. Summarised by the CLI (--thinking-display); an empty
@@ -685,6 +699,16 @@ function promptBody(text) {
     ? snippetBlock(part.snippet) : h('div', { class: 'prompt-text' }, part.text))));
 }
 
+// A prompt sent with pictures (D216): a small "picture: <name>" chip for each, above its words. The page is told
+// names only; a resumed conversation's pictures have none, so they read "picture".
+function promptWithPictures(event) {
+  const pictures = Array.isArray(event.images) ? event.images : [];
+  if (!pictures.length) return promptBody(event.text);
+  const chips = h('div', { class: 'prompt-pictures' }, ...pictures.map((picture) => h('span', { class: 'chip prompt-picture' },
+    picture.name && picture.name !== 'picture' ? `picture: ${picture.name}` : 'picture')));
+  return h('div', {}, chips, event.text ? promptBody(event.text) : null);
+}
+
 function snippetBlock(snippet) {
   const lines = snippet.code.split('\n');
   const first = snippet.lines ? snippet.lines[0] : 1;
@@ -703,6 +727,9 @@ function queueChips(queued) {
   const head = h('div', { class: 'hint queue-head' },
     `${items.length} waiting - sent when the current turn ends, one at a time`);
   const chips = items.map((item) => h('div', { class: `queue-chip${item.held ? ' held' : ''}`, 'data-id': item.id },
+    // Its pictures by name (D216); the bytes stay on the server.
+    (item.images || []).length ? h('span', { class: 'queue-pictures', title: item.images.map((p) => p.name).join(', ') },
+      `${item.images.length} picture${item.images.length === 1 ? '' : 's'}`) : null,
     h('span', { class: 'queue-text', title: item.text }, item.text.length > 140 ? `${item.text.slice(0, 140)}...` : item.text),
     item.held ? h('span', { class: 'hint' }, ' (held after a restart)') : null,
     h('button', { type: 'button', class: 'queue-send', 'data-action': 'send', 'data-id': item.id }, 'Send now'),
@@ -929,10 +956,16 @@ function treeMenu(name, full, file, about = null) {
   const download = downloadLink(view.name, file.root, file.path, '', {
     role: 'menuitem', class: 'tree-download', 'aria-label': `Download ${name}`, title: 'Download this file' });
   download.append(h('span', { 'aria-hidden': 'true' }, '\u2b07'), ' Download');
-  // An image, TIFF or PDF: its text read on this machine into the prompt (feature 113).
-  const read = isReadable(name) ? h('button', { type: 'button', class: 'tree-read', role: 'menuitem', 'aria-label': `Read the text in ${name} into the prompt`,
-    title: 'Read the text in this file on this machine and put it in the prompt to check', dataset: { root: file.root, path: file.path, name } },
-  h('span', { 'aria-hidden': 'true' }, 'T'), ' Read text') : null;
+  // An image, TIFF or PDF: its text read on this machine into the prompt (feature 113); a picture attached instead,
+  // or as well, as Pictures on the Session page says (D216).
+  const attaching = pictureMode() !== 'text' && pictureKind({ name, type: '' }) === 'attach';
+  const both = attaching && pictureMode() === 'image_text';
+  const read = isReadable(name) ? h('button', { type: 'button', class: 'tree-read', role: 'menuitem',
+    'aria-label': attaching ? `Attach ${name} to the prompt${both ? ' and read its text into it' : ''}` : `Read the text in ${name} into the prompt`,
+    title: attaching ? `Attach this picture to the prompt${both ? ', and read its text into it' : ''}`
+      : 'Read the text in this file on this machine and put it in the prompt to check',
+    dataset: { root: file.root, path: file.path, name } },
+  h('span', { 'aria-hidden': 'true' }, attaching ? '+' : 'T'), attaching ? (both ? ' Attach + text' : ' Attach') : ' Read text') : null;
   if (file.view === 'download') return placed(h('div', { class: 'tree-menu', role: 'menu' }, prompt, read, download));
   const open = h('button', { type: 'button', class: 'tree-view', role: 'menuitem', 'aria-label': `Open ${name} in a tab`,
     title: 'Open this file in a tab', dataset: { root: file.root, path: file.path, name, view: file.view } },
@@ -2441,6 +2474,8 @@ function setLink(state) {
 
 export async function render(main, context = {}) {
   loadMonaco();                        // feature 139: the file editor's module, ready before the first tab
+  // Read again on each visit (D216): a setting saved from another device, or before this module loaded, is not missed.
+  getJSON('/api/config').then((config) => noteSettings(config.settings || {})).catch(() => {});
   // `#/session/<name>` opens on that session (D118): a notice's Open, and a status-stack entry,
   // name the session they are about. The name goes to the server, which answers for it when it is
   // a profile and falls back to its own choice when it is not.
@@ -2641,6 +2676,8 @@ export async function render(main, context = {}) {
         saveDraft();
         box.focus();
       }
+      // And its pictures, attached again (D216).
+      if (cancelling && Array.isArray(answer.images) && answer.images.length) view.pictures.restore(answer.images);
       await refresh();
     } catch (error) {
       button.disabled = false;
@@ -2888,7 +2925,8 @@ export async function render(main, context = {}) {
   // fragment, so the cost that mattered is not in them.
   const RELOADS = new Set(['exited', 'stopped', 'permission', 'permission_timeout',
                            'permission_answered']);
-  const DRAWN = new Set(['prompt', 'assistant', 'brief', 'interrupted', 'interrupt_pending', 'interrupt_refused']);
+  const DRAWN = new Set(['prompt', 'assistant', 'brief', 'interrupted', 'interrupt_pending', 'interrupt_refused',
+    'picture_note']);
 
   // What Claude is doing, from the fragments that were being thrown away.
   //
@@ -2967,7 +3005,7 @@ export async function render(main, context = {}) {
   const pastCount = (past) => (past || []).reduce((n, entry) => n + (entry.sessions || []).length, 0);
   // Finding a conversation by topic (2026-10-16): the dialog hands back the one chosen, which is
   // added to the Continue list when it is older than the conversations listed, and selected.
-  const chooseConversation = (result) => {
+  const chooseConversation = (result, quiet = false) => {
     if (!view.past) view.past = [];
     let group = view.past.find((entry) => entry.project === result.project);
     if (!group) { group = { project: result.project, sessions: [] }; view.past.push(group); }
@@ -2977,10 +3015,49 @@ export async function render(main, context = {}) {
     }
     paint();
     resume.value = result.id;
+    view.resumeChosen = view.name;
     paint();
+    if (quiet) return;
     say(current().running
       ? 'Chosen in Continue. Stop this session to pick that conversation up.'
       : 'Chosen in Continue: press Start to pick it up.', 'ok');
+  };
+  // Each search card's own button (feedback #6; Brad, 2026-10-28): Start when the session is not running, Switch to
+  // this conversation when it is - asking first while a turn, a queued prompt, a question or background tasks are
+  // under way: wrap up then switch, switch now, or cancel.
+  const openLabel = (result) => {
+    const session = current();
+    if (!session.running) return 'Start';
+    return result.id === session.session_id ? 'Running' : 'Switch to this conversation';
+  };
+  const openFromSearch = async (result) => {
+    const session = current();
+    chooseConversation(result, true);
+    if (!session.running) {
+      const run = document.getElementById('session-run');
+      if (run && !run.disabled) run.click();
+      return;
+    }
+    if (result.id === session.session_id) { say('That conversation is the one running.', 'ok'); return; }
+    const tasks = Number(session.background || 0);
+    const why = session.switch_blocked
+      || (tasks ? `${tasks} background ${tasks === 1 ? 'task is' : 'tasks are'} still running.` : '');
+    let when = '';
+    if (why) {
+      when = await askSwitch(view.name, why);
+      if (!when) return;
+    }
+    try {
+      const answer = await postJSON('/api/session/switch', { name: view.name, resume: result.id, title: '', when });
+      view.resumeChosen = '';
+      say(answer.switch_waiting
+        ? `${view.name} was asked to wrap up; it switches to that conversation once it is idle.`
+        : `${view.name} switched conversation.`, 'ok');
+      await refresh();
+      subscribe(view.name, refresh, applyEvent);
+    } catch (error) {
+      sayError(error);
+    }
   };
   // Consolidating (2026-10-16, item F): the chosen conversations are summarised in the background, and
   // the brief goes into the prompt box of a new conversation - nothing is sent until Start and Send.
@@ -3095,7 +3172,7 @@ export async function render(main, context = {}) {
       try { initial = await allRows(); } catch (error) { initial = recentRows(Infinity); }
     }
     if (document.getElementById('conv-search')) return;
-    openConversationSearch({ name: () => view.name, choose: chooseConversation, action, initial });
+    openConversationSearch({ name: () => view.name, choose: chooseConversation, open: openFromSearch, openLabel, action, initial });
   };
   const consolidateButton = h('button', { type: 'button', id: 'session-consolidate', class: 'conv-action',
     title: 'Start a new conversation from summaries of several earlier ones' }, 'Start a new chat from existing chats...');
@@ -3356,6 +3433,7 @@ export async function render(main, context = {}) {
     // when it names another one (D118). Replaced, not pushed: switching is not a page to go back to.
     noteAddress(name ? `#/session/${encodeURIComponent(name)}` : '#/session');
     loadDraft();
+    if (view.pictures) view.pictures.paint();          // that session's attached pictures, as its draft (D216)
     if (view.resumeSnippet) view.resumeSnippet();      // a snippet being written in that session (feature 116)
     tree.open.clear();
     clearSelection();
@@ -3416,7 +3494,8 @@ export async function render(main, context = {}) {
   const makeBox = () => {
     const more = h('textarea', { class: 'prompt-text-box', rows: '1', 'aria-label': 'Prompt (continued)' });
     const element = autocorrect.attach(more);
-    attachImageReading(more, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
+    attachImageReading(more, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet,
+      take: takeFile });
     wireKeys(more);
     return { box: more, element };
   };
@@ -3443,8 +3522,31 @@ export async function render(main, context = {}) {
   // Image text arrives as a snippet: the reader lines columns up by counting characters, which only
   // holds unwrapped and in monospace - the code view and the transcript's snippets, not the box.
   const imageSnippet = (text, filename) => makeSnippet({ code: text, lang: 'text', number: snippetNumber(), image: filename });
-  attachImageReading(firstBox, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet });
-  const readButton = imageButton((files) => { for (const file of files) readInto(box, { file }, view.name, say, imageSnippet); });
+  // D216: a picture is read to text, attached, or both, as Settings > Pictures > On the Session page says. Attaching
+  // needs pictures to leave at all (Pictures not on Text only) and a Claude Code session (a bridge passes words only).
+  const pictureHolder = h('div', { id: 'session-pictures', class: 'prompt-pictures-attached', hidden: true });
+  const pictures = attachments({ holder: pictureHolder, session: () => view.name, say });
+  view.pictures = pictures;
+  pictures.paint();                    // this session's, kept from before a reload or a visit to another page
+  // One file pasted, dropped or uploaded: a PDF is read to text whatever the mode, as the proxy would; a BMP or TIFF
+  // is a picture the AI service does not take, so its text is read instead, and that is said.
+  const sayReadInstead = (file) => say(`${file.name || 'The picture'} is a ${readOnlyType(file)} picture, which the AI `
+    + 'service does not take: its text is read into the prompt instead.', 'warn');
+  function takeFile(file, into = box) {
+    const read = () => readInto(into, { file }, view.name, say, imageSnippet);
+    const mode = pictureMode();
+    const kind = pictureKind(file);
+    if (mode === 'text' || kind === 'other') return read();
+    if (kind === 'read') {
+      sayReadInstead(file);
+      return read();
+    }
+    pictures.add(file);
+    return mode === 'image_text' ? read() : null;
+  }
+  attachImageReading(firstBox, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet,
+    take: takeFile });
+  const readButton = imageButton((files) => { for (const file of files) takeFile(file); });
   // The row made room for the AI service drop-down (the user, 2026-10-18): Feedback is the menu's
   // item and autocorrect the Settings card's switch; Insert code snippet is </>.
   const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
@@ -3478,6 +3580,7 @@ export async function render(main, context = {}) {
   };
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
     codeSlot,
+    pictureHolder,
     prompt.element,
     slash,
     readChip,
@@ -3710,16 +3813,23 @@ export async function render(main, context = {}) {
   // What Send does, so the key and the button cannot drift apart (feature 48).
   async function sendPrompt() {
     const text = promptValue().trim();
-    if (!text) return;
+    // Pictures attached (D216) go with the words; a prompt may be pictures alone.
+    const images = pictures.payload();
+    if (!text && !images.length) return;
     // Enter as well as the button: an image still being read would go out as its "[reading ...]" mark.
     if (readingImages()) {
       say('An image is still being read - Send works once its text is in the prompt.', 'warn');
       return;
     }
+    if (pictures.pending()) {
+      say('A picture is still being attached - Send works once it shows above the prompt.', 'warn');
+      return;
+    }
     const sentFrom = view.name;
     try {
-      await postJSON('/api/session/prompt', { name: sentFrom, text });
+      await postJSON('/api/session/prompt', { name: sentFrom, text, ...(images.length ? { images } : {}) });
       if (view.name === sentFrom) { setPrompt(''); if (view.autocorrect) view.autocorrect.clear(); }
+      if (images.length) pictures.clear(sentFrom);
       saveDraft(sentFrom);
       view.historyAt = null;
       await refresh();
@@ -4189,6 +4299,29 @@ export async function render(main, context = {}) {
     if (skipped) say(`${skipped} cannot be shown in a tab - left out.`);
     if (window.matchMedia(PHONE).matches && band.classList.contains('rail-open')) setFilesOpen(false, false);
   };
+  // The file tree's read action on a picture (D216): attached in an attach mode - fetched as the file tab fetches it,
+  // sealed through the tunnel - and its text read by path as before where the mode says so.
+  const readFromTree = async (d) => {
+    const named = { root: d.root, path: d.path, filename: d.name };
+    const read = () => readInto(box, named, view.name, say, imageSnippet);
+    const mode = pictureMode();
+    const kind = pictureKind({ name: d.name, type: '' });
+    if (mode === 'text' || kind === 'other') { read(); return; }
+    if (kind === 'read') {
+      sayReadInstead({ name: d.name });
+      read();
+      return;
+    }
+    if (mode === 'image_text') read();
+    try {
+      const response = await fetch(`/api/session/file/raw?${new URLSearchParams({ name: view.name, root: d.root, path: d.path })}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const blob = await response.blob();
+      await pictures.add(new File([blob], d.name, { type: blob.type || '' }));
+    } catch (error) {
+      say(`Could not attach ${d.name}: ${error.message}`, 'error');
+    }
+  };
   // Feature 120: Files panel rows dragged onto the conversation open in tabs; onto the prompt, their paths go in.
   attachTreeDrag({
     source: panel,
@@ -4235,7 +4368,7 @@ export async function render(main, context = {}) {
       const d = readItem.dataset;
       tree.menu = null;
       showTree();
-      readInto(box, { root: d.root, path: d.path, filename: d.name }, view.name, say, imageSnippet);
+      readFromTree(d);
       return;
     }
     const viewButton = event.target.closest('button.tree-view');

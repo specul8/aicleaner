@@ -20,7 +20,7 @@ API (JSON; writes need Content-Type application/json):
   POST /api/clients/<id>/share             {path} use a folder, {create: true} make one, {path: ""} forget it
   GET  /api/session                        every profile, and the state of each session (?name=)
   POST /api/session/start                  {name, project, resume?, model?}
-  POST /api/session/prompt                 {name, text}
+  POST /api/session/prompt                 {name, text, images?: [{name, media_type, data}]}
   POST /api/session/stop                   {name} end that session
   POST /api/session/interrupt              {name} stop the turn, keep the session
   POST /api/session/queue/send             {name, id} send a waiting prompt now (D176)
@@ -142,6 +142,9 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "session.job_cleanup", "session.max_processes", "session.max_memory_gb",
                    "session.show_thinking", "session.turn_summary",
                    "session.idle_offer_hours",
+                   # What the Session page does with a picture (D216): read, attach or both. The proxy still decides
+                   # what leaves (attachments.*, local only), so this weakens nothing.
+                   "session.picture_mode",
                    # Start Work and Start Personal (feature 152): which sessions a Go starts, like the other
                    # session settings; nothing on the machine is touched by saving them.
                    "session.presets",
@@ -1940,8 +1943,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
 
         body = await request.json()
         try:
+            when = str(body.get("when", ""))
+            if when not in ("", "now", "finish"):
+                raise SessionError(f"when is now, finish or left out, not {when!r}")
             state = await session_host().switch(name=str(body.get("name", "")), resume=str(body.get("resume", "")),
-                                                title=str(body.get("title", ""))[:200])
+                                                title=str(body.get("title", ""))[:200], when=when)
         except SessionError as exc:
             return err(exc, status=409)
         return web.json_response(state)
@@ -2000,13 +2006,21 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     async def session_prompt(request: web.Request) -> web.Response:
         from .session import SessionError
 
+        from .promptpictures import PictureError, checked
+
         body = await request.json()
+        try:
+            # Pictures attached on the page (D216), checked before anything is queued or sent.
+            images = checked(body.get("images"))
+        except PictureError as exc:
+            return err(exc, status=400)
         try:
             # "queued": a turn is running, so it waits on the page until that turn ends (D176).
             from .origin import page_note
             # Where it was typed, said to Claude (the user, 2026-10-18): remote access or this machine.
             note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""))
-            outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")), origin=note)
+            outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")), origin=note,
+                                                  images=images)
         except SessionError as exc:
             return err(exc)
         return web.json_response({"ok": True, "outcome": outcome})
@@ -2027,10 +2041,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
 
         body = await request.json()
         try:
-            await session_host().cancel_queued(str(body.get("id", "")), name=str(body.get("name", "")))
+            images = await session_host().cancel_queued(str(body.get("id", "")), name=str(body.get("name", "")))
         except SessionError as exc:
             return err(exc)
-        return web.json_response({"ok": True})
+        # Its pictures back to the page that cancelled it (D216), to attach again with the words.
+        return web.json_response({"ok": True, **({"images": images} if images else {})})
 
     async def session_deliver(request: web.Request) -> web.Response:
         """Feature 119: asked by the PostToolUse hook after every tool call, with the conversation's

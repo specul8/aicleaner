@@ -20,6 +20,9 @@ INLINE_SERVICES = ("auto", "off", "claude", "copilot", "copilot_filtered", "code
 PREVIEW_DBLCLICK = ("ask", "source", "off")
 # What prompt autocorrect may also leave alone (feature 94); code and paths always are.
 AUTOCORRECT_SKIPS = ("clients", "used", "capitalised")
+# What the Session page does with a picture pasted, dropped, uploaded or read from the file tree (D216): read its
+# text into the prompt, attach it, or both. The proxy still decides what leaves (attachments.*, feature 114).
+PICTURE_MODES = ("text", "image", "image_text")
 REPLACEMENT_RE = re.compile(r"[A-Za-z][A-Za-z'-]{0,39} = [^\r\n=]{1,60}")
 # Your own words for a Settings card (feature 153): ui.setting_keywords = {"<card key>": ["telemetry"]}.
 # A card key is checked by its shape, not against a list: the cards are drawn by the page, so a list
@@ -267,6 +270,8 @@ class Config:
     # The Session page offers to stop a session idle this many hours (0 = never). An offer, never a stop.
     session_idle_offer_hours: int = 8
     session_thinking_display: str = "summarized"   # "" leaves thinking to the CLI (empty blocks)
+    # D216: a picture on the Session page is read to text (text), attached (image), or both (image_text).
+    session_picture_mode: str = "text"
     # Restored names shown in green (see transform.strip_marks). Always on the session page, which
     # draws them; for Claude Code in a terminal or VS Code, only once someone has seen it render.
     highlight_session: bool = True
@@ -372,6 +377,7 @@ class Config:
         "session.max_processes": ("session_max_processes", int),
         "session.max_memory_gb": ("session_max_memory_gb", int),
         "session.idle_offer_hours": ("session_idle_offer_hours", int),
+        "session.picture_mode": ("session_picture_mode", str),
         "detect.placeholder_kinds": ("placeholder_kinds", list),
         "attachments.allow_images": ("allow_images", bool),
         "attachments.redact_images": ("redact_images", bool),
@@ -459,6 +465,8 @@ class Config:
                                      f"characters on one line: {', '.join(odd[:3])}")
             if key == "editor.inline_service" and value not in INLINE_SERVICES:
                 raise ValueError(f"editor.inline_service must be one of: {', '.join(INLINE_SERVICES)}")
+            if key == "session.picture_mode" and value not in PICTURE_MODES:
+                raise ValueError(f"session.picture_mode must be one of: {', '.join(PICTURE_MODES)}")
             if key == "editor.preview_dblclick" and value not in PREVIEW_DBLCLICK:
                 raise ValueError(f"editor.preview_dblclick must be one of: {', '.join(PREVIEW_DBLCLICK)}")
             if key == "session.permission_mode":
@@ -516,6 +524,26 @@ class Config:
             tmp = self.path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
             fileio.replace(tmp, self.path)
+
+    def _load_picture_mode(self, ses: dict[str, Any]) -> None:
+        """session.picture_mode as saved; absent (D216's migration), what the Pictures setting implies - a setup that
+        already sends pictures (redacted or as they are) starts on attaching them - written back at once, so a later
+        change to Pictures does not flip it. A value written by hand that is not one of the modes is read as text."""
+        if "picture_mode" in ses:
+            value = str(ses.get("picture_mode") or "")
+            if value not in PICTURE_MODES:
+                log.warning("session.picture_mode in aicleaner-config.json is %r, not one of %s; using text",
+                            value, ", ".join(PICTURE_MODES))
+                value = "text"
+            self.session_picture_mode = value
+            return
+        self.session_picture_mode = "image" if (self.redact_images or self.allow_images) else "text"
+        if self.path is None:
+            return
+        try:
+            self.update_settings({"session.picture_mode": self.session_picture_mode})
+        except (OSError, ValueError) as exc:
+            log.warning("session.picture_mode not written to %s: %s", self.path, exc)
 
     @property
     def user_secrets_path(self) -> Path:
@@ -661,6 +689,7 @@ class Config:
         cfg.ocr_max_pages = int(att.get("ocr_max_pages", 10))
         cfg.ocr_timeout_s = int(att.get("ocr_timeout_s", 60))
         cfg.ocr_max_bytes = int(att.get("ocr_max_bytes", 20_000_000))
+        cfg._load_picture_mode(ses)
         if "placeholder_kinds" in det:
             cfg.placeholder_kinds = _held_back([str(k) for k in det.get("placeholder_kinds") or []])
         cfg.secrets_mode = str((data.get("secrets") or {}).get("mode", "redact")).lower()

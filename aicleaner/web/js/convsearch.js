@@ -42,7 +42,7 @@ function marked(passage) {
   return h('p', { class: 'conv-passage' }, h('span', { class: 'conv-who' }, `${passage.role} ${when(passage.at)}`), ' ', ...parts);
 }
 
-function card(result, index, several, picked, verb) {
+function card(result, index, several, picked, verb, openLabel) {
   const folder = several ? result.project.split(/[\\/]/).filter(Boolean).pop() : '';
   const head = [when(result.updated), result.branch ? `[${result.branch}]` : '', folder].filter(Boolean).join('  ');
   // A tick to act on it with others (consolidate, item F; delete); a click on it never opens the card.
@@ -54,8 +54,15 @@ function card(result, index, several, picked, verb) {
   const count = typeof result.matches === 'number'
     ? `${result.matches} ${result.matches === 1 ? 'match' : 'matches'} in ${result.turns_matched} ${result.turns_matched === 1 ? 'turn' : 'turns'}`
     : '';
+  // Open, on every card (feedback #6, 2026-10-28): with ticks on, a click on the card ticks it, so a conversation
+  // found could not be opened from here at all.
+  // Its words come from the page: Start, or Switch to this conversation while the session runs.
+  const word = openLabel ? openLabel(result) : 'Open';
+  const open = h('button', { type: 'button', class: 'conv-open', title: `${word}: ${result.label || result.title || 'this conversation'}`,
+    'aria-label': `${word}: ${result.label || result.title || 'this conversation'}` }, word);
   return h('li', { class: 'conv-card', role: 'option', tabindex: '-1', dataset: { index: String(index) } },
-    h('div', { class: 'conv-head muted' }, h('span', {}, pick, ' ', head), h('span', { class: 'conv-count' }, count)),
+    h('div', { class: 'conv-head muted' }, h('span', {}, pick, ' ', head),
+      h('span', { class: 'conv-head-end' }, h('span', { class: 'conv-count' }, count), open)),
     result.label ? h('div', { class: 'conv-label' }, result.label) : null,
     h('div', { class: result.label ? 'conv-title muted' : 'conv-title' }, result.label ? `first: ${result.title}` : result.title),
     result.last && result.last !== result.title ? h('div', { class: 'conv-last muted' }, `latest: ${result.last}`) : null,
@@ -64,6 +71,7 @@ function card(result, index, several, picked, verb) {
 }
 
 // opts: { name: () => profile shown, choose(result), initial: rows shown while nothing is typed (optional),
+//         open(result) and openLabel(result): each card's own button - Start, or Switch to this conversation (optional),
 //         action: { verb, min, run(results), heading?, label?, explain? } (optional) - ticks on the cards, an All tick, and a button
 //         that acts on the ticked ones: Consolidate (item F, 2 or more) or Delete (1 or more) }
 export function openConversationSearch(opts) {
@@ -108,7 +116,7 @@ export function openConversationSearch(opts) {
   };
   const draw = () => {
     const several = new Set(state.results.map((r) => r.project)).size > 1;
-    list.replaceChildren(...state.results.map((result, i) => card(result, i, several, state.picked.has(result.id), verb)));
+    list.replaceChildren(...state.results.map((result, i) => card(result, i, several, state.picked.has(result.id), verb, opts.openLabel)));
     highlight();
     showPicked();
   };
@@ -196,6 +204,14 @@ export function openConversationSearch(opts) {
     }
   });
   list.addEventListener('click', (event) => {
+    const open = event.target.closest('.conv-open');
+    if (open) {
+      const result = state.results[Number(open.closest('.conv-card').dataset.index)];
+      if (!result) return;
+      finish();
+      (opts.open || opts.choose)(result);
+      return;
+    }
     const tick = event.target.closest('.conv-pick');
     if (tick) {
       const result = state.results.find((r) => r.id === tick.dataset.id);

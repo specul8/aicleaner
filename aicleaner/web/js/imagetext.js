@@ -123,14 +123,16 @@ export function pathInFolders(text, roots) {
 
 // The prompt box reads what is pasted or dropped on it. A paste with text in it pastes the text as
 // always (an image alongside is read too); a paste that is only an image is read instead.
-export function attachImageReading(box, { sessionName, roots, say, chip, format = null }) {
+// take(file, box): what is done with each file instead - the Session page attaches a picture (D216).
+export function attachImageReading(box, { sessionName, roots, say, chip, format = null, take = null }) {
+  const handle = take || ((file, into) => readInto(into, { file }, sessionName(), say, format));
   box.addEventListener('paste', (event) => {
     const items = [...(event.clipboardData ? event.clipboardData.items : [])];
     const images = items.filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
       .map((item) => item.getAsFile()).filter(Boolean);
     const text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
     if (images.length && !text) event.preventDefault();
-    for (const file of images) readInto(box, { file }, sessionName(), say, format);
+    for (const file of images) handle(file, box);
     const found = !images.length && pathInFolders(text, roots());
     if (found) chip(found);
   });
@@ -142,7 +144,7 @@ export function attachImageReading(box, { sessionName, roots, say, chip, format 
     if (!files.length) return;
     event.preventDefault();
     box.focus();
-    for (const file of files) readInto(box, { file }, sessionName(), say, format);
+    for (const file of files) handle(file, box);
   });
 }
 

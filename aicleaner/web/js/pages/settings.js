@@ -58,7 +58,9 @@ const BUILTIN_WORDS = {
   'near-miss': ['typos', 'misreadings', 'misspellings', 'fuzzy', 'similar names'],
   'public-list': ['shared identifiers', 'global list', 'common names', 'public names'],
   tools: ['tool calls', 'MCP', 'tool arguments', 'tokens in tools'],
-  images: ['pictures', 'screenshots', 'vision', 'photos', 'attachments', 'redact images'],
+  images: ['pictures', 'screenshots', 'vision', 'photos', 'attachments', 'redact images',
+    // D216: what the Session page does with a picture
+    'attach', 'upload', 'paste', 'clipboard', 'image to text', 'session pictures'],
   ocr: ['scanned', 'text in images', 'PDF', 'scans', 'character recognition'],
   'scan-markers': ['build output', 'generated files', 'node_modules', 'bin', 'skip folders'],
   aitools: ['sign in', 'login', 'accounts', 'AI tools', 'Claude Code', 'Codex'],
@@ -623,9 +625,18 @@ function imagesCard(s) {
   const mode = h('div', { class: 'images-mode' }, ...choices.map(([value, label]) => h('label', { class: 'check' },
     h('input', { type: 'radio', name: 'images_mode', value, checked: value === now ? true : null }), ' ', label)));
   const picked = () => (mode.querySelector('input:checked') || {}).value || 'text';
+  // Through the tunnel the three above stay as they are (they let pictures leave: local only); what the Session page
+  // does with a picture can be changed from anywhere (D216).
+  const remote = Boolean(view.config.remote);
+  if (remote) {
+    for (const radio of mode.querySelectorAll('input')) { radio.disabled = true; radio.title = LOCAL_ONLY; }
+  }
+  const session = sessionPicturesField(s, picked);
+  mode.addEventListener('change', session.follow);
   const section = card('images', 'Pictures',
     'Text only (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. Redacted picture: the picture goes too, with every client name, unmapped identifier and secret the reader can see blacked out, and it is read again before it leaves - a name still legible keeps it back. What the reader cannot read (handwriting, a logo, tiny or rotated text) is not blacked out. Picture as it is: JPEG, PNG, GIF and WebP are sent unfiltered, so any client name in them reaches the provider (replies are still filtered). Other image types are always withheld. PDFs and Office documents are read to text and filtered either way.',
     [mode,
+     session.field,
      // Saying this plainly is part of the decision to do it at all (feature 36). A proxy that
      // edits the agent's own instructions from a settings page should never be a surprise.
      h('p', { class: 'hint' },
@@ -636,9 +647,40 @@ function imagesCard(s) {
        + 'binaries" rule is written into the block between the aicleaner markers. On: the rule is '
        + 'removed. Nothing outside those markers is touched, a backup is taken first, and a file '
        + 'whose markers are damaged is left alone and reported.')],
-    () => ({ 'attachments.allow_images': picked() === 'as_is', 'attachments.redact_images': picked() === 'redacted' }));
+    () => ({ ...(remote ? {} : { 'attachments.allow_images': picked() === 'as_is', 'attachments.redact_images': picked() === 'redacted' }),
+      'session.picture_mode': session.value() }));
   // On, this one sends pictures to the provider unfiltered, which is the same class of thing.
   return danger(section, s['attachments.allow_images'], 'IMAGES ARE SENT UNFILTERED');
+}
+
+// D216: what the Session page does with a picture pasted, dropped, uploaded or read from the file tree. With Pictures on
+// Text only, attaching would only have the proxy put the picture's text in its place, so the two attach choices are
+// off and say so - and Convert to text is what is saved.
+function sessionPicturesField(s, pictures) {
+  const choices = [
+    ['text', 'Convert to text: read on this machine, and the text put in the prompt to check'],
+    ['image', 'Attach image only: the picture goes with the prompt, as Pictures above says'],
+    ['image_text', 'Attach image and text: the picture goes, and its text is read into the prompt as well'],
+  ];
+  const saved = s['session.picture_mode'] || 'text';
+  const group = h('div', { class: 'images-mode session-picture-mode' }, ...choices.map(([value, label]) => h('label', { class: 'check' },
+    h('input', { type: 'radio', name: 'session_picture_mode', value, checked: value === saved ? true : null }), ' ', label)));
+  const why = h('p', { class: 'hint session-picture-why', hidden: true },
+    'Attaching needs Redacted picture or Picture as it is above: on Text only, the proxy would replace the picture with its text anyway.');
+  const field = h('fieldset', { class: 'session-pictures' }, h('legend', {}, 'On the Session page'), group, why);
+  const follow = () => {
+    const textOnly = pictures() === 'text';
+    for (const radio of group.querySelectorAll('input')) {
+      if (radio.value === 'text') continue;
+      radio.disabled = textOnly;
+      radio.title = textOnly ? 'Pictures is on Text only' : '';
+      if (textOnly && radio.checked) group.querySelector('input[value="text"]').checked = true;
+    }
+    why.hidden = !textOnly;
+  };
+  follow();
+  const value = () => (group.querySelector('input:checked') || {}).value || 'text';
+  return { field, follow, value };
 }
 
 function nearMissCard(s) {

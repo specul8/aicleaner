@@ -19,12 +19,17 @@ const STATE_TEXT = {
   starting: 'starting',
   started: 'started',
   running: 'already running',
+  left: 'left running',
   failed: 'failed',
 };
 
 const RUN_TEXT = { running: 'Going...', done: 'Done', cancelled: 'Cancelled', replaced: 'Replaced by another Go' };
 
 const ACTIVE_POLL_MS = 1500;
+// A session that started, was already running, was stopped, or was left running by Cancel says so for this long and
+// then leaves the list (Brad, 2026-10-29). What needs a look - failed, finishing, waiting for an answer or a slot - stays.
+const SETTLED_SHOWN_MS = 5000;
+const SETTLED = new Set(['started', 'running', 'stopped', 'left']);
 const IDLE_POLL_MS = 15000;
 
 function limitText(view) {
@@ -35,8 +40,9 @@ function limitText(view) {
     + 'these can start while another finishes.';
 }
 
-function progressList(run) {
-  return h('ul', { class: 'preset-progress' }, ...(run.items || []).map((item) => h('li', {
+function progressList(run, gone) {
+  const shown = (run.items || []).filter((item) => !gone.has(`${run.id}:${item.name}`));
+  return h('ul', { class: 'preset-progress' }, ...shown.map((item) => h('li', {
     class: `preset-item state-${item.state}`, dataset: { name: item.name, state: item.state } },
   h('span', { class: 'preset-item-name' }, item.name),
   h('span', { class: `preset-item-state${item.state === 'failed' ? ' warn' : ''}` }, STATE_TEXT[item.state] || item.state),
@@ -44,23 +50,25 @@ function progressList(run) {
 }
 
 // The progress of the run this panel started, with Cancel while there is anything left for it to do.
-function progressBox(view, preset) {
+function progressBox(view, preset, gone) {
   const run = view.run;
   if (!run || run.preset !== preset.id) return null;
   const finishing = Object.keys(view.finishing || {}).length;
   const going = run.state === 'running' || finishing > 0;
+  // A run that is over with nothing left to say goes altogether, its sessions' lines having gone.
+  if (!going && (run.items || []).every((item) => gone.has(`${run.id}:${item.name}`))) return null;
   return h('div', { class: 'preset-run', dataset: { state: run.state } },
     h('div', { class: 'preset-run-head' },
       h('span', { class: 'preset-run-state' }, run.state === 'done' && finishing
         ? `Started - ${finishing} still finishing` : (RUN_TEXT[run.state] || run.state)),
       going ? h('button', { type: 'button', class: 'link preset-cancel' }, 'Cancel') : null),
-    progressList(run),
+    progressList(run, gone),
     going ? h('p', { class: 'hint preset-restart-note' },
       'If aicleaner restarts, this ends: a session already asked to finish stays asked, but is not stopped for you.')
       : null);
 }
 
-function panel(view, preset) {
+function panel(view, preset, gone) {
   const profiles = preset.profiles || [];
   return h('section', { class: 'card preset-panel', dataset: { preset: preset.id } },
     h('div', { class: 'preset-head' },
@@ -72,7 +80,7 @@ function panel(view, preset) {
       : h('p', { class: 'muted preset-empty' }, 'Choose projects with ...'),
     h('button', { type: 'button', class: 'primary preset-go', disabled: profiles.length ? null : true,
       title: profiles.length ? `Start ${profiles.join(', ')}; the other sessions stop once they are idle` : null }, 'Go'),
-    progressBox(view, preset));
+    progressBox(view, preset, gone));
 }
 
 // The "..." dialog: the panel's name, and a tick for each project profile, at most `limit` ticked.
@@ -128,18 +136,41 @@ export function mountPresets(slot, { onRun = () => {} } = {}) {
   let timer = null;
   let stopped = false;
   let lastSig = '';
+  let lastData = '';
+  // When each run's session was first seen started or already running (run id:name -> ms), and the timer that takes
+  // the next one off the list.
+  const firstSeen = new Map();
+  let fadeTimer = null;
+  const settledGone = () => {
+    const now = Date.now();
+    const gone = new Set();
+    const run = view && view.run;
+    for (const item of (run && run.items) || []) {
+      const key = `${run.id}:${item.name}`;
+      if (!SETTLED.has(item.state)) { firstSeen.delete(key); continue; }
+      if (!firstSeen.has(key)) firstSeen.set(key, now);
+      if (now - firstSeen.get(key) >= SETTLED_SHOWN_MS) gone.add(key);
+    }
+    clearTimeout(fadeTimer);
+    const next = [...firstSeen.values()].map((at) => at + SETTLED_SHOWN_MS - now).filter((ms) => ms > 0);
+    if (next.length && !stopped) fadeTimer = setTimeout(draw, Math.min(...next) + 20);
+    return gone;
+  };
 
   const active = () => Boolean(view && (view.active || (view.run && view.run.state === 'running')));
   const draw = () => {
     if (!view || !slot.isConnected) return;
-    const sig = JSON.stringify([view.presets, view.run, view.finishing, view.limit]);
+    const gone = settledGone();
+    const data = JSON.stringify([view.presets, view.run, view.finishing, view.limit]);
+    const sig = JSON.stringify([data, [...gone]]);
     if (sig === lastSig) return;
-    // A run moving sessions on: the page's own picker and transcript catch up.
-    if (lastSig) onRun();
+    // A run moving sessions on: the page's own picker and transcript catch up (not a line timing out).
+    if (lastData && data !== lastData) onRun();
     lastSig = sig;
+    lastData = data;
     // The panels sit above the chat band and arrive after the page may have scrolled, or be scrolling, to it.
     keepChatInPlace(() => {
-      slot.replaceChildren(...(view.presets || []).map((preset) => panel(view, preset)));
+      slot.replaceChildren(...(view.presets || []).map((preset) => panel(view, preset, gone)));
       slot.hidden = !(view.presets || []).length;
     });
   };
@@ -181,5 +212,5 @@ export function mountPresets(slot, { onRun = () => {} } = {}) {
   });
 
   load();
-  return { refresh: load, stop: () => { stopped = true; clearTimeout(timer); } };
+  return { refresh: load, stop: () => { stopped = true; clearTimeout(timer); clearTimeout(fadeTimer); } };
 }

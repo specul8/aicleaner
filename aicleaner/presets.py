@@ -34,6 +34,7 @@ FINISH_PREFIX = FINISH_MESSAGE.split(" - ")[0]
 
 # Item states, as the panel names them.
 STOPPING, STOPPED, FINISHING, ANSWER = "stopping", "stopped", "finishing", "answer"
+LEFT = "left"                          # was asked to finish; Cancel left it running
 WAITING, STARTING, STARTED, RUNNING, FAILED = "waiting", "starting", "started", "running", "failed"
 SETTLED = (STARTED, RUNNING, FAILED)
 
@@ -161,7 +162,8 @@ class PresetRunner:
             for name in list(self.finishing):
                 item = self.run.items.get(name)
                 if item is not None and item["state"] in (FINISHING, ANSWER):
-                    self.run.set_item(name, item["state"], "cancelled - no longer stopped by aicleaner")
+                    # Settled, so the panel lets the line go as it does a started one (Brad, 2026-10-29).
+                    self.run.set_item(name, LEFT, "cancelled - no longer stopped by aicleaner")
         names = list(self.finishing)
         self.finishing.clear()
         for name in names:

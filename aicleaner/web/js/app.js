@@ -586,6 +586,10 @@ async function guardedRoute() {
 // Which drawing of a page is the current one (2026-10-28, the user): a page still loading when the menu took you
 // elsewhere - Review, a few seconds on a first visit - finished later and drew itself over the page you went to.
 let drawing = 0;
+// The drawing of each page still under way. A page is drawn one at a time (D217, 2026-10-28): its module keeps state
+// of its own (the Session page's `view`, window hooks, document listeners), and an older drawing of the same page
+// finishing after a newer one left that state pointing at its own copy, now off the screen.
+const underWay = new Map();
 
 async function route() {
   shownHash = location.hash;
@@ -595,6 +599,25 @@ async function route() {
   app.page = PAGES[app.route.name];
   const page = app.page;
   const mine = ++drawing;
+  const earlier = underWay.get(page);
+  if (earlier) {
+    await earlier;
+    if (mine !== drawing) return;                     // a newer address again: that drawing goes instead
+    // What the older drawing started after it was overtaken goes before this one starts its own.
+    if (typeof page.leave === 'function') page.leave();
+  }
+  let finished = () => {};
+  const done = new Promise((resolve) => { finished = resolve; });
+  underWay.set(page, done);
+  try {
+    await drawPage(page, mine);
+  } finally {
+    if (underWay.get(page) === done) underWay.delete(page);
+    finished();
+  }
+}
+
+async function drawPage(page, mine) {
   // Each drawing gets its own holder, laid out as if it were not there (display: contents), so one that finishes
   // late writes into a holder already taken off the screen rather than over the page now showing.
   const main = h('div', { class: 'page-view' });
