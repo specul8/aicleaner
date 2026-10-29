@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import logging
 import re
 from collections import Counter
 from typing import Any
@@ -30,6 +31,8 @@ from urllib.parse import urlsplit
 
 from .convert import (OFFICE_TYPES, ConversionError, ImageToText, OfficeToText, PdfToText,
                       Repair, office_to_text, pdf_pages_to_images, pdftotext_converter, tidy)
+
+log = logging.getLogger("aicleaner")
 
 __all__ = ["ACCEPTED_IMAGE_TYPES", "ConversionError", "PdfToText", "pdftotext_converter", "scrub"]
 
@@ -151,7 +154,11 @@ class _Scrubber:
         request), or None to fall back to text only (the reader failed, or a name stayed legible)."""
         try:
             result = self.picture(raw)
-        except (ConversionError, OSError, ValueError):
+        except (ConversionError, OSError, ValueError) as exc:
+            # Said in the log (D218, 2026-10-29): a failure here fell back to text without a trace, which hid that
+            # redaction had only ever worked for a picture with exactly one box to fill.
+            log.warning("redacting a picture failed, so it went as its text: %s", exc)
+            self.counts["image_redaction_failed"] += 1
             return None
         if result.image is None:
             self.counts["image_redaction_refused"] += 1

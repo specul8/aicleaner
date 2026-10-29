@@ -1493,6 +1493,8 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
 /* D216: pictures attached to the prompt - chips above it - and the ones a sent prompt carried, in the transcript. */
 .prompt-pictures-attached { display: flex; flex-wrap: wrap; gap: .3rem; flex: 0 0 auto; max-height: 6.5rem; overflow-y: auto; }
 .prompt-pictures-attached[hidden] { display: none; }
+.prompt-pictures-attached { align-items: center; }
+.picture-note { font-size: .8rem; font-weight: 600; color: var(--muted, #9aa4b2); padding-right: .2rem; }
 .picture-chip { display: inline-flex; align-items: center; gap: .3rem; max-width: 16rem; padding: .15rem .25rem .15rem .2rem;
   border: 1px solid var(--border); border-radius: .4rem; background: var(--surface-2); font-size: .85em; }
 .picture-thumb { width: 2rem; height: 2rem; object-fit: cover; border-radius: .25rem; flex: 0 0 auto; }

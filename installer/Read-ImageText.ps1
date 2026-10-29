@@ -784,7 +784,11 @@ if ($Engine) {
 } elseif ($Path -and $Fill) {
     # Feature 114: the boxes filled solid in a copy of the image, saved as PNG. Nothing else of the picture changes.
     Add-Type -AssemblyName System.Drawing
-    $rects = @(Get-Content -LiteralPath $Fill -Raw -Encoding UTF8 | ConvertFrom-Json)
+    # Through the pipeline once more: Windows PowerShell's ConvertFrom-Json hands a JSON array on as ONE object, so
+    # @() of it was a list holding the whole list - the loop ran once, and filling failed for no box or for two or
+    # more (D218, 2026-10-29; only a picture with exactly one box was ever redacted).
+    $parsed = Get-Content -LiteralPath $Fill -Raw -Encoding UTF8 | ConvertFrom-Json
+    $rects = @($parsed | Where-Object { $null -ne $_ })
     $source = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $Path).Path)
     try {
         $canvas = New-Object System.Drawing.Bitmap($source.Width, $source.Height)

@@ -51,7 +51,7 @@ function sizeText(chars) {
 }
 
 // The chips in `holder`, for whichever session `session()` names. say(text, kind) is the page's toast.
-export function attachments({ holder, session, say }) {
+export function attachments({ holder, session, say, note = () => '' }) {
   let pending = 0;
   const list = (name = session()) => {
     if (!kept.has(name)) {
@@ -73,7 +73,8 @@ export function attachments({ holder, session, say }) {
   };
   const paint = () => {
     const pictures = list();
-    holder.replaceChildren(...pictures.map((picture, index) => {
+    const said = pictures.length ? note() : '';
+    holder.replaceChildren(said ? h('span', { class: 'picture-note' }, said) : '', ...pictures.map((picture, index) => {
       const remove = h('button', { type: 'button', class: 'picture-remove', 'aria-label': `Remove ${picture.name}`,
         title: `Remove ${picture.name}` }, 'x');
       remove.addEventListener('click', () => {

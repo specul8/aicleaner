@@ -461,12 +461,13 @@ const closedThinking = new Set();
 const openedThinking = new Set();
 let showThinking = true;
 // What a picture pasted, dropped, uploaded or read from the tree becomes (D216), and whether pictures leave at all.
-const pictureSettings = { mode: 'text', sends: false };
+const pictureSettings = { mode: 'text', sends: false, asIs: false };
 const noteSettings = (s) => {
   if ('session.show_thinking' in s) showThinking = s['session.show_thinking'] !== false;
   if ('session.picture_mode' in s) pictureSettings.mode = s['session.picture_mode'] || 'text';
   if ('attachments.allow_images' in s || 'attachments.redact_images' in s) {
     pictureSettings.sends = Boolean(s['attachments.allow_images'] || s['attachments.redact_images']);
+    pictureSettings.asIs = Boolean(s['attachments.allow_images']);
   }
 };
 window.addEventListener('aicleaner:settings', (event) => noteSettings(event.detail || {}));
@@ -3525,7 +3526,9 @@ export async function render(main, context = {}) {
   // D216: a picture is read to text, attached, or both, as Settings > Pictures > On the Session page says. Attaching
   // needs pictures to leave at all (Pictures not on Text only) and a Claude Code session (a bridge passes words only).
   const pictureHolder = h('div', { id: 'session-pictures', class: 'prompt-pictures-attached', hidden: true });
-  const pictures = attachments({ holder: pictureHolder, session: () => view.name, say });
+  // In front of the tiles, how they will leave (Brad, 2026-10-29): Settings > Pictures decides, not this page.
+  const pictures = attachments({ holder: pictureHolder, session: () => view.name, say,
+    note: () => (pictureSettings.asIs ? 'Sent as-is' : 'Sent redacted') });
   view.pictures = pictures;
   pictures.paint();                    // this session's, kept from before a reload or a visit to another page
   // One file pasted, dropped or uploaded: a PDF is read to text whatever the mode, as the proxy would; a BMP or TIFF
@@ -3580,7 +3583,6 @@ export async function render(main, context = {}) {
   };
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
     codeSlot,
-    pictureHolder,
     prompt.element,
     slash,
     readChip,
@@ -3739,7 +3741,8 @@ export async function render(main, context = {}) {
     // Waiting prompts above the prompt card, as the background tools are, not inside it: in the card
     // they pushed Send and the indicators out of its fixed height (the user, 2026-10-12).
     // A new chat being started from earlier ones shows here too, as the background tools do (2026-10-17).
-    h('div', { class: 'session-mid' }, background, consolidateNote, cards, queueBox),
+    // The attached pictures too, above the prompt with the questions and background jobs (Brad, 2026-10-29).
+    h('div', { class: 'session-mid' }, background, consolidateNote, cards, queueBox, pictureHolder),
     promptBar,
     promptPane);
   const band = h('div', { class: `session-band${filesOpen ? ' rail-open' : ''}`, id: 'session-band' },
