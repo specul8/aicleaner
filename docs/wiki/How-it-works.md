@@ -2,7 +2,7 @@
 
 [Home](Home.md) > How it works
 
-aicleaner is one local process (`aicleaner/proxy.py`) listening on `127.0.0.1:8787`. AI tools are
+AI Cleaner is one local process (`aicleaner/proxy.py`) listening on `127.0.0.1:8787`. AI tools are
 pointed at it instead of at the AI service. Everything under a route prefix is forwarded to that
 prefix's upstream, after the request has been cleaned:
 
@@ -24,7 +24,7 @@ For each request, in this order:
 3. **Body must be JSON.** A body that is not JSON is refused (403), because it cannot be inspected.
    The only exception is a path listed in `allow_non_json_paths`; such a request is forwarded
    uninspected and logged as `UNFILTERED`. The list is empty by default.
-4. **Clean the history.** Green marks and review footers that aicleaner added to earlier replies are
+4. **Clean the history.** Green marks and review footers that AI Cleaner added to earlier replies are
    removed, so the AI service never sees them.
 5. **Attachments.** PDFs, Office documents and images become text (Poppler, the standard library,
    OCR) which is then filtered like everything else, or are withheld and replaced with a notice.
@@ -148,10 +148,10 @@ Each client file is checked on its own. Every time one loads cleanly, a copy is 
 `%USERPROFILE%\.aicleaner\lastgood\<client>.json` (per machine, never shared). So one bad edit
 degrades one client, not the proxy:
 
-| State | What happened | What aicleaner does |
+| State | What happened | What AI Cleaner does |
 |---|---|---|
 | ok | The file loaded | Uses it, refreshes the last-good copy |
-| hand-edited | The file is valid but its stamp does not match | Uses it, flags "edited outside aicleaner" |
+| hand-edited | The file is valid but its stamp does not match | Uses it, flags "edited outside AI Cleaner" |
 | edit rejected (fallback) | The file is invalid (a stray quote, a bad merge) | Uses the last-good copy; the client page offers **Restore last good version** |
 | held | The client has a key and the change is not signed with it | Uses the last-good copy until you accept or reject the change |
 | missing | The file is gone (unshared, unsynced, not downloaded) but a last-good copy exists | Keeps protecting with the last-good copy; red on the status bar |

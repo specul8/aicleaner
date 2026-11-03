@@ -22,7 +22,7 @@
   Claude Code sessions per client project, with the conversation, files, questions and approvals in
   one place - from your desk, or from another device through the encrypted tunnel.
 - **Team sharing.** Each client is a folder you can share in OneDrive with exactly the people on
-  that engagement; a key per client stops changes made outside aicleaner from being trusted.
+  that engagement; a key per client stops changes made outside AI Cleaner from being trusted.
 
 ## What it costs
 

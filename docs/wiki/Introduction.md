@@ -8,9 +8,9 @@ AI coding assistants send what you are working on - prompts, file contents, comm
 model hosted by someone else. On client work that means client names, domains, tenant ids, email
 addresses and resource names leave your machine, often in a form you did not choose to share.
 
-## What aicleaner does
+## What AI Cleaner does
 
-aicleaner is a small proxy that runs on your own machine. The assistant (Claude Code, and Claude
+AI Cleaner is a small proxy that runs on your own machine. The assistant (Claude Code, and Claude
 Desktop) is pointed at it instead of at the AI service. On every request it:
 
 1. replaces each client identifier it knows with a **token** - a stable stand-in such as
@@ -24,7 +24,7 @@ On the way back it does the reverse: tokens in the reply become real values agai
 read, and what the assistant writes to disk or runs, uses the real names.
 
 ```
- your files, terminal, repos          aicleaner (your machine)             AI service
+ your files, terminal, repos          AI Cleaner (your machine)             AI service
  real names everywhere   ---------->  tokenise, placeholder, canary  ----> tokens only
                          <----------  rehydrate (tokens -> real)     <---- tokens only
 ```

@@ -2,12 +2,12 @@
 
 [Home](Home.md) > Remote access
 
-aicleaner's pages - including [Project Sessions](Project-Sessions.md) - can be used from another
+AI Cleaner's pages - including [Project Sessions](Project-Sessions.md) - can be used from another
 device, such as a phone or a laptop away from your desk. The device is only a screen: Claude Code
-still runs on the aicleaner machine, and every request it makes is still filtered there.
+still runs on the AI Cleaner machine, and every request it makes is still filtered there.
 
 Claude Code's own Remote Control relays a session through Anthropic's servers, which is what
-aicleaner exists to avoid (and it does not work behind a gateway). This is the replacement.
+AI Cleaner exists to avoid (and it does not work behind a gateway). This is the replacement.
 
 ## How it fits together
 
@@ -16,13 +16,13 @@ aicleaner exists to avoid (and it does not work behind a gateway). This is the r
                                                                     |
                                           (dials out; nothing opened on the machine)
                                                                     v
-                                              aicleaner on 127.0.0.1:8787 (checks the token)
+                                              AI Cleaner on 127.0.0.1:8787 (checks the token)
 ```
 
-- **The tunnel** (`cloudflared`, run as a service) dials out from the aicleaner machine to
+- **The tunnel** (`cloudflared`, run as a service) dials out from the AI Cleaner machine to
   Cloudflare. No port is opened, and the proxy keeps listening on loopback only.
 - **Cloudflare Access** sits in front of the hostname and does the sign-in.
-- **aicleaner verifies** the token Access adds to every request, rather than trusting it.
+- **AI Cleaner verifies** the token Access adds to every request, rather than trusting it.
 
 ## Setting it up
 
@@ -55,7 +55,7 @@ points the hostname at the proxy's port and runs the tunnel as a service. It ask
 | `-Rename -Hostname <new>` | Give this machine's address a new name, keeping the tunnel and Access application |
 | `-Remove` | Stop and remove the service, delete the tunnel, turn remote access off |
 
-One hostname and one tunnel per machine: two aicleaner machines need two names.
+One hostname and one tunnel per machine: two AI Cleaner machines need two names.
 
 After a manual setup, the `remote` block looks like this; restart the proxy after editing it:
 
@@ -69,7 +69,7 @@ After a manual setup, the `remote` block looks like this; restart the proxy afte
 }
 ```
 
-## What aicleaner checks
+## What AI Cleaner checks
 
 Who gets in is decided twice. **Cloudflare first**: the Access application's policy includes only the
 addresses given to `Enable-RemoteControl.ps1` (`-Emails`; yours by default), so someone who can sign
@@ -78,7 +78,7 @@ Cloudflare and never reaches this machine. **Then aicleaner**, which does not ta
 word for it:
 
 Anyone who can reach the hostname can send any headers, so every request arriving at it must carry
-a token Cloudflare Access signed (`Cf-Access-Jwt-Assertion`). aicleaner checks the signature against
+a token Cloudflare Access signed (`Cf-Access-Jwt-Assertion`). AI Cleaner checks the signature against
 your team's published keys, plus the issuer, the audience, the expiry and the email address. An
 empty `allowed_emails` list lets nobody in. Each check that fails is refused with a 403 saying why
 ("the Access token has expired; sign in again", "... is not on the list for this deployment").
@@ -112,12 +112,12 @@ These refusals are made by the server, not just hidden by the page.
 Cloudflare terminates TLS at its edge, so without more, Cloudflare (and any HTTPS-inspecting box on
 the way) could read the rehydrated session. The encrypted tunnel closes that gap.
 
-Through the tunnel, a badge under the aicleaner title always says which state you are in: a green
+Through the tunnel, a badge under the AI Cleaner title always says which state you are in: a green
 closed lock, **End-to-end Encrypted**, or an amber open lock, **Traffic can be Observed** (Cloudflare
 ends the encrypted connection at its edge - SSL termination - and a proxy that decrypts HTTPS to
 inspect it can read it too). Click it to open Settings at the [Encrypted tunnel](Settings.md#card-tunnel) card.
 
-Set it up in Settings, [Encrypted tunnel](Settings.md#card-tunnel), on the aicleaner machine (afterwards the
+Set it up in Settings, [Encrypted tunnel](Settings.md#card-tunnel), on the AI Cleaner machine (afterwards the
 on/off switch also works through the tunnel - switching it off from there only goes through the
 encrypted connection, so only someone holding the code can):
 
@@ -134,7 +134,7 @@ AES-256-GCM), and every API call goes as one sealed, numbered request that canno
 recording stays sealed even if the code leaks later.
 
 In practice: the code is typed once per device; what stays the same is the key derived from it. Each
-**connection** - opening the page, or the page reconnecting after aicleaner restarts or the
+**connection** - opening the page, or the page reconnecting after AI Cleaner restarts or the
 connection sits idle - runs a fresh key exchange, and the key it produces works only for that
 connection and lives only in that page's memory. Signing in to Cloudflare Access is a separate,
 earlier step: it decides who may reach the page at all; the encryption then decides what Cloudflare
@@ -146,10 +146,10 @@ page itself could take the code as you type it.
 While it is on:
 
 - the Session page polls instead of streaming;
-- images, PDFs and file downloads open on the aicleaner machine only;
+- images, PDFs and file downloads open on the AI Cleaner machine only;
 - generating a new code drops every connection, and every device must enter the new one.
 
-On the aicleaner machine itself nothing changes.
+On the AI Cleaner machine itself nothing changes.
 
 ## If it is not acceptable for an engagement
 

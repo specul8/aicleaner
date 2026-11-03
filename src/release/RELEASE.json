@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "minimum": "0.9.349",
+  "deploy": "src/installer",
+  "layout": {
+    "src/": "",
+    "docs/": "docs/",
+    "*": null
+  },
+  "migrations": []
+}

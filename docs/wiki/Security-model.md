@@ -2,8 +2,8 @@
 
 [Home](Home.md) > Security model
 
-aicleaner has one promise: **real client identifiers stay on this machine; the AI service sees
-tokens.** This page says what that covers, what it does not, and what protects aicleaner itself.
+AI Cleaner has one promise: **real client identifiers stay on this machine; the AI service sees
+tokens.** This page says what that covers, what it does not, and what protects AI Cleaner itself.
 The mechanics are in [How it works](How-it-works.md).
 
 ## What is protected
@@ -23,15 +23,15 @@ The mechanics are in [How it works](How-it-works.md).
 
 | Gap | Why |
 |---|---|
-| Tools not pointed at the proxy | aicleaner only sees traffic sent to it. claude.ai in a browser, the mobile apps, Claude Code on the web, Copilot, ChatGPT and the same Claude account on another device all go direct. Use them for client work only under your own policy. |
+| Tools not pointed at the proxy | AI Cleaner only sees traffic sent to it. claude.ai in a browser, the mobile apps, Claude Code on the web, Copilot, ChatGPT and the same Claude account on another device all go direct. Use them for client work only under your own policy. |
 | Identifiers the mapping does not know and no detector recognises | A client's name written as plain words is queued for Review but **travels as written while it waits**. The canary cannot help: it only knows declared values. |
 | Kinds set to "Ignore" | Not queued and not held back, by your choice. (A kind set to "Auto-tokenise" is still replaced.) |
 | A placeholder that could not be made safely | That one value goes out as it is; this is logged in the proxy log. |
-| What, rather than who | Architecture, technology choices, topology and anything not mapped still reach the model. aicleaner hides **who**, not **what**. |
+| What, rather than who | Architecture, technology choices, topology and anything not mapped still reach the model. AI Cleaner hides **who**, not **what**. |
 | Images when [Pictures](Settings.md#card-images) allows them | Sent as images, unfiltered. Off by default. |
 | A path listed in `allow_non_json_paths` | Forwarded uninspected; every such request is logged `UNFILTERED`. Empty by default. |
 | Telemetry the tools send themselves | Outside the model path. The installer reviews OpenTelemetry settings and turns off what it can. |
-| What was sent before aicleaner was in the path | Cannot be undone. |
+| What was sent before AI Cleaner was in the path | Cannot be undone. |
 
 Claude Code refuses its own Remote Control feature when `ANTHROPIC_BASE_URL` points anywhere but
 the AI service, so routing through the proxy also stops a session being relayed around the filter.
@@ -55,15 +55,15 @@ are handled differently:
 
 - **Kept tools.** Hosted MCP servers receive what they are given straight over the internet, so
   their arguments stay tokenised. The default list covers remote Microsoft Learn and Context7;
-  `aicleaner mcp-audit` lists the MCP servers configured on the machine, classes each as hosted,
+  `AI Cleaner mcp-audit` lists the MCP servers configured on the machine, classes each as hosted,
   bridged, egress or local, and `--write` adds the missing patterns.
 - **Tool calls that reach the network** (`WebFetch`, `curl`, `Invoke-WebRequest`) run on this
   machine with the real names, like the same command typed by hand. Their traffic does not pass
-  through aicleaner; Claude Code's own permission prompts are the control there.
+  through AI Cleaner; Claude Code's own permission prompts are the control there.
 
 ## Local data holds real values, by design
 
-Everything below stays on this machine and is never sent anywhere by aicleaner. Real values are kept
+Everything below stays on this machine and is never sent anywhere by AI Cleaner. Real values are kept
 locally on purpose: they are what lets you audit a request afterwards and diagnose a missed match.
 
 | What | Where | Holds |
@@ -82,9 +82,9 @@ Treat these like the client files themselves. They are not for sharing.
 Client files often live in a shared OneDrive folder, which anyone with write access - or any tool,
 or the OneDrive web editor - can change.
 
-- **Stamp** (`aicleaner/stamp.py`). Every file aicleaner writes carries a `_stamp`: a SHA-256 of
+- **Stamp** (`aicleaner/stamp.py`). Every file AI Cleaner writes carries a `_stamp`: a SHA-256 of
   the content, the machine and the time. A file whose stamp no longer matches is flagged "edited
-  outside aicleaner". A checksum can be recomputed by anyone, so on its own it only makes edits
+  outside AI Cleaner". A checksum can be recomputed by anyone, so on its own it only makes edits
   visible.
 - **Client key** (`aicleaner/keys.py`). The first person on an engagement generates a key on the
   client's page and sends it to the others out of band; each pastes it in. With a key, the stamp is
@@ -93,7 +93,7 @@ or the OneDrive web editor - can change.
 - The key is stored DPAPI-encrypted under your Windows profile, readable only by you on this PC,
   and **never** in the shared folder - anyone who can write the folder could read a key kept there.
 - Limit: a key cannot protect against malware running as a colleague on their own PC, which can
-  use their aicleaner and their key.
+  use their AI Cleaner and their key.
 
 See [Sharing a client with a team](Sharing.md).
 
@@ -116,7 +116,7 @@ publishes the UI under a hostname, with Cloudflare Access doing the sign-in. See
 - **Who gets in is decided twice.** First by Cloudflare: the Access application's policy only
   includes the addresses you set up (`Enable-RemoteControl.ps1 -Emails`, or yours by default), so a
   stranger who can sign in to Google - or whichever identity provider you chose - is turned away by
-  Cloudflare before anything reaches this machine. Then by aicleaner, which does not trust that:
+  Cloudflare before anything reaches this machine. Then by AI Cleaner, which does not trust that:
 - **Access is verified, not trusted** (`aicleaner/access.py`). Anyone can send headers, so the
   Access token on each request is checked locally: RS256 signature against the team's published
   keys, issuer, audience, expiry, and the email address against `remote.allowed_emails`. That list

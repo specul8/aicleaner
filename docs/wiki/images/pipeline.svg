@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="1290" viewBox="0 0 880 1290" role="img"
+     aria-labelledby="t d" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <title id="t">How AI Cleaner keeps client names on your computer</title>
+  <desc id="d">Your prompt goes from Claude Desktop, the AI Cleaner app or VS Code through the AI Cleaner engine on your
+    computer, which swaps known and unknown client names for stand-ins and checks nothing real is left. The AI service
+    receives and replies in stand-ins; the engine puts the real names back before you see the reply or a file is
+    written.</desc>
+  <defs>
+    <marker id="down" viewBox="0 0 10 10" refX="5" refY="9" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,0 L5,10 z" fill="#6fae9f"/>
+    </marker>
+    <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6fae9f"/>
+    </marker>
+    <marker id="down-amber" viewBox="0 0 10 10" refX="5" refY="9" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0,0 L10,0 L5,10 z" fill="#c9a85a"/>
+    </marker>
+    <style>
+      .bg { fill: #070d0c; }
+      .zone { fill: #0b1715; stroke: #3a6b60; stroke-width: 2; stroke-dasharray: 8 6; }
+      .zone-ai { fill: #151005; stroke: #6a5420; stroke-width: 2; stroke-dasharray: 8 6; }
+      .label { font-size: 12px; font-weight: 700; letter-spacing: .06em; fill: #7ee0c2; }
+      .label-ai { font-size: 12px; font-weight: 700; letter-spacing: .06em; fill: #ffcf6b; }
+      .box { fill: #10201d; stroke: #2a4a43; stroke-width: 1; }
+      .engine { fill: #0f2622; stroke: #3f7d6f; stroke-width: 1.2; }
+      .canary { fill: #231512; stroke: #7a4a3f; stroke-width: 1.2; }
+      .ai { fill: #1c1708; stroke: #6a5420; stroke-width: 1.2; }
+      .ex { fill: #0b1513; }
+      .ex-ai { fill: #140f04; }
+      .h { font-size: 14px; font-weight: 700; fill: #d9e7e3; }
+      .h-red { font-size: 14px; font-weight: 700; fill: #ff8a7a; }
+      .p { font-size: 12.5px; fill: #c3d4cf; }
+      .m { font-size: 12px; fill: #8fb3aa; }
+      .real { fill: #7fd3ff; }
+      .tok { fill: #ffcf6b; font-family: Consolas, Menlo, monospace; font-size: 12px; }
+      .num { fill: #2fa98a; }
+      .numt { font-size: 11px; font-weight: 700; fill: #04120e; }
+      .tag { fill: #174a3e; }
+      .tagt { font-size: 10.5px; font-weight: 700; fill: #9ff0d6; }
+      .flow { stroke: #6fae9f; stroke-width: 2; fill: none; }
+      .flow-ai { stroke: #c9a85a; stroke-width: 2; fill: none; }
+      .wire { font-size: 12px; fill: #8fb3aa; }
+    </style>
+  </defs>
+
+  <rect class="bg" width="880" height="1290"/>
+
+  <!-- ===================== Your computer: the way out ===================== -->
+  <rect class="zone" x="10" y="16" width="860" height="662" rx="14"/>
+  <rect class="bg" x="26" y="8" width="132" height="16"/>
+  <text class="label" x="34" y="21">YOUR COMPUTER</text>
+
+  <rect class="box" x="30" y="40" width="262" height="54" rx="10"/>
+  <text class="h" x="161" y="63" text-anchor="middle">Claude Desktop</text>
+  <text class="m" x="161" y="82" text-anchor="middle">chat and Cowork</text>
+  <rect class="box" x="309" y="40" width="262" height="54" rx="10"/>
+  <text class="h" x="440" y="63" text-anchor="middle">AI Cleaner app</text>
+  <text class="m" x="440" y="82" text-anchor="middle">Project Sessions</text>
+  <rect class="box" x="588" y="40" width="262" height="54" rx="10"/>
+  <text class="h" x="719" y="63" text-anchor="middle">VS Code</text>
+  <text class="m" x="719" y="82" text-anchor="middle">Claude Code, Copilot</text>
+  <line class="flow" x1="440" y1="96" x2="440" y2="114" marker-end="url(#down)"/>
+
+  <rect class="box" x="230" y="118" width="420" height="92" rx="10"/>
+  <circle class="num" cx="258" cy="140" r="10"/><text class="numt" x="258" y="144" text-anchor="middle">1</text>
+  <text class="h" x="276" y="145">You type, as you would to a colleague</text>
+  <rect class="ex" x="246" y="156" width="388" height="44" rx="6"/>
+  <text class="p" x="256" y="174">Email <tspan class="real">Maria Garcia</tspan> (<tspan class="real">maria.garcia@fabrikam.com</tspan>) and</text>
+  <text class="p" x="256" y="192">check <tspan class="real">fabrikam.onmicrosoft.com</tspan></text>
+  <line class="flow" x1="440" y1="212" x2="440" y2="238" marker-end="url(#down)"/>
+
+  <!-- Known names, beside the engine -->
+  <rect class="box" x="30" y="268" width="200" height="132" rx="10"/>
+  <text class="h" x="44" y="292">Known names</text>
+  <text class="p" x="44" y="314">Everything in your client</text>
+  <text class="p" x="44" y="332">filters (names, people,</text>
+  <text class="p" x="44" y="350">emails, domains, tenants, IP</text>
+  <text class="p" x="44" y="368">addresses, IDs) is swapped</text>
+  <text class="p" x="44" y="386">for its stand-in.</text>
+  <line class="flow" x1="238" y1="334" x2="282" y2="334" marker-start="url(#tip)" marker-end="url(#tip)"/>
+
+  <!-- The engine -->
+  <rect class="engine" x="290" y="242" width="300" height="250" rx="12"/>
+  <circle class="num" cx="318" cy="266" r="10"/><text class="numt" x="318" y="270" text-anchor="middle">2</text>
+  <text class="h" x="336" y="271">The AI Cleaner engine filters</text>
+  <text class="m" x="440" y="296" text-anchor="middle">A local proxy on 127.0.0.1 (Python 3.13, aiohttp).</text>
+  <text class="m" x="440" y="314" text-anchor="middle">Pictures, DOCX, XLSX, PPTX and PDF files are</text>
+  <text class="m" x="440" y="332" text-anchor="middle">converted to text in the engine before being sent</text>
+  <text class="m" x="440" y="350" text-anchor="middle">to the AI service, or (for pictures) sent redacted,</text>
+  <text class="m" x="440" y="368" text-anchor="middle">depending on your chosen configuration.</text>
+  <rect class="ex" x="306" y="384" width="268" height="92" rx="6"/>
+  <text class="p" x="440" y="406" text-anchor="middle">Email <tspan class="tok">Client92_Pty_7c2e</tspan></text>
+  <text class="p" x="440" y="426" text-anchor="middle">(<tspan class="tok">user92a91f@client92.invalid</tspan>)</text>
+  <text class="p" x="440" y="446" text-anchor="middle">and check</text>
+  <text class="p" x="440" y="466" text-anchor="middle"><tspan class="tok">client92.onmicrosoft.invalid</tspan></text>
+
+  <!-- Unknown names, beside the engine and a little lower -->
+  <line class="flow" x1="598" y1="400" x2="642" y2="400" marker-start="url(#tip)" marker-end="url(#tip)"/>
+  <rect class="box" x="650" y="298" width="200" height="204" rx="10"/>
+  <text class="h" x="664" y="322">Unknown names</text>
+  <rect class="tag" x="664" y="330" width="172" height="18" rx="4"/>
+  <text class="tagt" x="750" y="343" text-anchor="middle">learning mode, on by default</text>
+  <text class="p" x="664" y="368">A new email, domain, tenant,</text>
+  <text class="p" x="664" y="386">SharePoint site, DevOps</text>
+  <text class="p" x="664" y="404">name or client resource is</text>
+  <text class="p" x="664" y="422">held back as a placeholder in</text>
+  <text class="p" x="664" y="440">the same request and queued</text>
+  <text class="p" x="664" y="458">for you to add. New IPs and</text>
+  <text class="p" x="664" y="476">IDs always get a stand-in.</text>
+  <line class="flow" x1="440" y1="494" x2="440" y2="520" marker-end="url(#down)"/>
+
+  <!-- The canary -->
+  <rect class="canary" x="230" y="524" width="420" height="70" rx="10"/>
+  <circle class="num" cx="258" cy="546" r="10"/><text class="numt" x="258" y="550" text-anchor="middle">3</text>
+  <text class="h-red" x="276" y="551">The canary: last check</text>
+  <text class="p" x="246" y="576">Is any known real name still in the request? Then it is</text>
+  <text class="p" x="246" y="590">stopped, and nothing is sent.</text>
+  <line class="flow" x1="440" y1="596" x2="440" y2="664" marker-end="url(#down)"/>
+
+  <text class="wire" x="440" y="698" text-anchor="middle">the internet, encrypted (HTTPS)</text>
+  <line class="flow-ai" x1="440" y1="706" x2="440" y2="724" marker-end="url(#down-amber)"/>
+
+  <!-- ===================== The AI service ===================== -->
+  <rect class="zone-ai" x="10" y="734" width="860" height="230" rx="14"/>
+  <rect class="bg" x="26" y="726" width="372" height="16"/>
+  <text class="label-ai" x="34" y="739">THE AI SERVICE (ANTHROPIC, OPENAI, GITHUB COPILOT)</text>
+  <rect class="ai" x="180" y="756" width="520" height="80" rx="10"/>
+  <circle class="num" cx="208" cy="778" r="10"/><text class="numt" x="208" y="782" text-anchor="middle">4</text>
+  <text class="h" x="226" y="783">Receives the prompt in stand-ins</text>
+  <rect class="ex-ai" x="196" y="794" width="488" height="32" rx="6"/>
+  <text class="p" x="206" y="815">Email <tspan class="tok">Client92_Pty_7c2e</tspan> and check <tspan class="tok">client92.onmicrosoft.invalid</tspan></text>
+  <line class="flow-ai" x1="440" y1="838" x2="440" y2="858" marker-end="url(#down-amber)"/>
+  <rect class="ai" x="180" y="862" width="520" height="82" rx="10"/>
+  <circle class="num" cx="208" cy="884" r="10"/><text class="numt" x="208" y="888" text-anchor="middle">5</text>
+  <text class="h" x="226" y="889">Replies in stand-ins</text>
+  <rect class="ex-ai" x="196" y="900" width="488" height="34" rx="6"/>
+  <text class="p" x="206" y="922">Drafted the email to <tspan class="tok">Client92_Pty_7c2e</tspan>; her account is active.</text>
+  <line class="flow-ai" x1="440" y1="946" x2="440" y2="966"/>
+
+  <text class="wire" x="440" y="983" text-anchor="middle">the internet, encrypted (HTTPS)</text>
+
+  <!-- ===================== Your computer: the way back ===================== -->
+  <rect class="zone" x="10" y="1004" width="860" height="276" rx="14"/>
+  <rect class="bg" x="26" y="996" width="132" height="16"/>
+  <text class="label" x="34" y="1009">YOUR COMPUTER</text>
+  <line class="flow" x1="440" y1="992" x2="440" y2="1022" marker-end="url(#down)"/>
+  <rect class="engine" x="230" y="1026" width="420" height="76" rx="12"/>
+  <circle class="num" cx="258" cy="1048" r="10"/><text class="numt" x="258" y="1052" text-anchor="middle">6</text>
+  <text class="h" x="276" y="1053">The engine rehydrates</text>
+  <text class="p" x="246" y="1076">Each stand-in is swapped back for its real name as the reply</text>
+  <text class="p" x="246" y="1092">streams in, including a stand-in split across two pieces.</text>
+  <line class="flow" x1="440" y1="1104" x2="440" y2="1128" marker-end="url(#down)"/>
+
+  <rect class="box" x="30" y="1134" width="400" height="128" rx="10"/>
+  <circle class="num" cx="56" cy="1156" r="10"/><text class="numt" x="56" y="1160" text-anchor="middle">7</text>
+  <text class="h" x="74" y="1161">You see the reply</text>
+  <rect class="ex" x="46" y="1174" width="368" height="74" rx="6"/>
+  <text class="p" x="56" y="1196">Drafted the email to <tspan class="real">Maria Garcia</tspan>; her</text>
+  <text class="p" x="56" y="1216">account in <tspan class="real">fabrikam.onmicrosoft.com</tspan></text>
+  <text class="p" x="56" y="1236">is active.</text>
+  <rect class="box" x="450" y="1134" width="400" height="128" rx="10"/>
+  <circle class="num" cx="476" cy="1156" r="10"/><text class="numt" x="476" y="1160" text-anchor="middle">7</text>
+  <text class="h" x="494" y="1161">Files are written with real names</text>
+  <text class="p" x="466" y="1190">A file the AI writes or edits is put back to</text>
+  <text class="p" x="466" y="1210">real names before it reaches your disk.</text>
+</svg>

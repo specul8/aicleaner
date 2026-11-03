@@ -1,0 +1,4182 @@
+"""The UI: serves the single-page app in web/ and the JSON API behind it. Loopback only (guard.py).
+
+Pages: / (the app shell; /ui, /config and /secrets redirect to its #/ routes), /web/* static files.
+API (JSON; writes need Content-Type application/json):
+  GET  /api/status                         banner, status stack, per-client state, contact
+  GET  /api/clients/<id>                   a client as the UI shows it (entries with tokens and kinds)
+  GET  /api/clients/<id>/raw               the file text and its error (syntax-error view)
+  POST /api/clients/<id>/restore           put the last-good copy back
+  GET  /api/clients/<id>/key               {has_key, key_id} - never the key (DECISIONS 51)
+  POST /api/clients/<id>/key               {action: generate|enter|rotate, key?}; local only
+  POST /api/clients/<id>/held              {accept: bool} - a held change, reviewed
+  POST /api/mcp/approve                    {pattern} - real names for a remote MCP server; local only
+  GET  /api/service                        the start-up task as you (feature 107): mode, state, password_problem
+  POST /api/service                        {on} set it up or take it away (elevated script on this machine); local only
+  POST /api/clients/<id>/salvage           rebuild from the entries still readable in a broken file
+  GET  /api/clients/<id>/external-names    {client, external_names} its names in other systems; this machine only
+  POST /api/clients/<id>/external-names    {external_names} replace them; names not yet entries are added (F150)
+  GET  /api/external-names?system=<s>      {system, clients[{client, label, name}]}; this machine only
+  GET  /api/clients/<id>/share             that client's OneDrive share, and where OneDrive is
+  POST /api/clients/<id>/share             {path} use a folder, {create: true} make one, {path: ""} forget it
+  GET  /api/session                        every profile, and the state of each session (?name=)
+  POST /api/session/start                  {name, project, resume?, model?}
+  POST /api/session/prompt                 {name, text, images?: [{name, media_type, data}]}
+  POST /api/session/stop                   {name} end that session
+  POST /api/session/interrupt              {name} stop the turn, keep the session
+  POST /api/session/queue/send             {name, id} send a waiting prompt now (D176)
+  POST /api/session/queue/cancel           {name, id} drop a waiting prompt (D176)
+  POST /api/session/deliver                {session_id} waiting prompts for the PostToolUse hook (feature 119; this machine only)
+  POST /api/tool/check                     {tool_use_id} stop a call whose spellings collapse to one name (PreToolUse hook; this machine only)
+  POST /api/tool/names                     {tool_use_id} whether real names went into a call (PostToolUse hook, D199; this machine only)
+  POST /api/activity/seen                  {session, turns} a session was looked at: its alerts clear on every page (D200)
+  POST /api/session/suggest                {name, path, language, line, before, after, instruction} code for the editor's cursor (feature 139)
+  POST /api/session/permission-mode        {name, mode} how it asks before it acts
+  POST /api/session/permission             {id, allow} answer a waiting permission request
+  POST /api/session/permission/request     the approval host asking; waits for the answer
+  GET  /api/session/events                 server-sent events for one session (?name=)
+  GET  /api/session/profiles               the profiles, and the clients one can be pointed at
+  POST /api/session/profiles               {profiles: [...]} replace them (validate, then commit)
+  GET  /api/session/presets                Start Work / Start Personal and the current run (feature 152)
+  POST /api/session/presets                {presets: [...]} save them, at most max_running - 1 projects each
+  POST /api/session/preset/go              {id} start a run: the set started, the rest stopped when idle
+  POST /api/session/preset/cancel          end the run; sessions asked to finish are no longer stopped
+  GET  /api/candidates                     pending review items
+  POST /api/candidates/resolve             {value, action: map|ignore, client?, index?, real?}
+  POST /api/candidates/public              {value} the same in every tenant: ignore it everywhere
+  POST /api/candidates/snooze              {kind, undo?} "Not now" on a kind offer, back after 50 more ignores
+                                           and take it out of the client that had it
+  GET  /api/mapping                        clients and forms in use
+  POST /api/mapping/client                 {id, index?, expand_case?}
+  POST /api/mapping/form                   {client, real, token?}   token derived (suffixed if taken)
+  POST /api/mapping/form/copy-to-global    {client, real}   the client entry stays, locked
+  POST /api/mapping/form/from-global       {real, to}   Global gives it back: unlocks, or moves
+  POST /api/mapping/form/move              {client, real, to}   never into Global
+  POST /api/mapping/client/label           {id, label}   display name (empty clears it)
+  POST /api/mapping/form/whole-word        {client, real, on}  "whole word only" on one entry
+  POST /api/canary/ignore                  {client, real, scope}  a canary match's entry, ignored
+  POST /api/mapping/form/update            {client, real, new_real?, new_token?, new_kind?,
+                                           match?}  match absent = leave the rule alone,
+                                           null = remove it (feature 23)
+  POST /api/mapping/form/rederive          {client, real}   derive its token again, today's rules
+  POST /api/mapping/form/delete            {client, real}   leaves a removal record
+  POST /api/mapping/forms/delete           {client, reals[]} the same, in one write
+  POST /api/mapping/forms/restore          {client, entries[{real,token}], unignore?, from_global?}
+                                           put a bulk action back, tokens and all (D42)
+  POST /api/mapping/forms/ignore           {client, reals[], scope} off the token list, onto an ignore list
+  POST /api/mapping/client/email-rule      {client, domain, on} every address at a client domain (F96)
+  GET  /api/ignore, POST /api/ignore, /api/ignore/delete, /api/ignore/move,
+       /api/ignore/tokenise  {value, scope} stop ignoring it and tokenise it instead
+  GET  /api/evidence?n=50                  last n evidence lines from this host
+  GET  /api/folders?path=<p>               folders a picker may show there (folders.roots)
+  GET  /api/folders/roots                  the allowed roots, and whether this side may set them
+  POST /api/folders/new                    {parent, name} a new folder inside an allowed one
+  GET  /api/models[?refresh=1]             model names this machine could use (offered, not enforced)
+  GET  /api/public                         what the shipped public-identifier list holds
+  GET  /api/export/public                  that list itself, as a download
+  /api/config, /api/secrets, /api/secrets/mode, /api/export/*, /api/import
+
+Every mapping write is validated against the other clients as currently usable before the file
+is replaced, so the UI can never leave a client file in a state the proxy would refuse.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import binascii
+import contextlib
+import gzip
+import json
+import logging
+import os
+import re
+import time
+import urllib.parse
+from datetime import datetime
+from pathlib import Path
+
+from .shares import in_onedrive
+from typing import Any
+
+from aiohttp import web
+
+from .config import Config
+from .contact import ContactSource
+from .detect import CandidateStore, extra_words
+from .guard import FILE_CSP, REMOTE, STYLE_NONCE, is_loopback_listen
+
+# What may be changed through the tunnel: the ones that alter how you are TOLD about things, not
+# what is done about them (H3). Everything else is set on the machine, which keeps proxy.bypass,
+# secrets.mode, detect.enabled and attachments.allow_images out of reach of a
+# stolen phone or a mis-scoped Access policy - each of those switches a protection off, persistently
+# and silently, and none of them is something anybody needs to do from a train.
+#
+# Widened 2026-09-27, after asking where the line actually sits. What stays local is what
+# WEAKENS THE FILTER or exposes a credential - proxy.bypass, detect.enabled,
+# keep_tokenised_tools, secrets.mode, remote.enabled, and attachments.allow_images now that it
+# also rewrites the user-level CLAUDE.md. A filter switched off from a phone is a different
+# class of thing from a client file downloaded to one.
+#
+# What moved across is client-data CURATION - what a scan collects, what is auto-added, which
+# projects a session may use. That is the same kind of decision as editing a client file, which
+# has always been allowed remotely, and triaging a noisy scan from somewhere else is a real use.
+#
+# folders.roots moved too, for a stated case: realising at a client site that a folder holding
+# client content was never added. It is de-risked rather than trusted - `folders.blocked_reason`
+# refuses a system folder outright, here and locally, because client work is never in one and a
+# hurried entry from a train is exactly how Program Files ends up behind the picker.
+#
+# Refused by the API, never merely hidden by the page: the page is not the boundary, and a direct
+# POST has to meet the same answer.
+REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_retention_days",
+                   "logs.detail_every_request",
+                   # The canary's emergency switch reaches too (DECISIONS 40, 2026-09-30). The canary
+                   # is a last-ditch check that has never fired. If it ever fires on a false positive
+                   # the real text is already in the conversation, so EVERY later request is refused
+                   # - and someone away from the desk had no way out. That is not the same class as
+                   # bypass or turning detection off: those open a path that is never tokenised;
+                   # this lets through what tokenising has already been applied to, one refusal at a
+                   # time, each one logged with its context and the person who turned it on.
+                   "canary.fail_open",
+                   "highlight.terminal", "session.enabled", "session.max_running", "session.auto_titles", "update.auto",
+                   "session.job_cleanup", "session.max_processes", "session.max_memory_gb",
+                   "session.show_thinking", "session.turn_summary",
+                   "session.idle_offer_hours",
+                   # What the Session page does with a picture (D216): read, attach or both. The proxy still decides
+                   # what leaves (attachments.*, local only), so this weakens nothing.
+                   "session.picture_mode",
+                   # Start Work and Start Personal (feature 152): which sessions a Go starts, like the other
+                   # session settings; nothing on the machine is touched by saving them.
+                   "session.presets",
+                   "detect.auto_map_client_resources",
+                   "detect.near_miss", "detect.placeholder_kinds",
+                   # Accepted from Review's offer, which is where triage happens - on the phone as
+                   # much as the desk. Same standing as placeholder_kinds, which it narrows.
+                   "detect.quiet_kinds",
+                   "detect.owner_add_kinds",
+                   "detect.ignore_add_kinds",
+                   "scan.generated_markers", "session.projects", "folders.roots",
+                   # Every mode, bypassPermissions included (decided 2026-09-28). It is the one
+                   # setting whose absence was felt hardest from the phone: the default is the
+                   # safest mode, and with no control it was also the only reachable one.
+                   "session.permission_mode",
+                   # Diagnostics (feature 91): only records timings, so it reaches as well.
+                   "debug.timings", "debug.timings_since",
+                   # The user, 2026-10-07: on needs a code made on the machine; off arrives only
+                   # sealed (with it on, the tunnel takes nothing else under /api/).
+                   "remote.encrypt",
+                   # A display preference (feature 92), and suggestions as you pause (feature 143): neither
+                   # prompts on the machine.
+                   "editor.preview_dblclick", "editor.inline_suggest", "editor.minimap",
+                   "editor.inline_service",
+                   # Prompt autocorrect (feature 94): a typing aid.
+                   "prompt.autocorrect", "prompt.autocorrect_skip", "prompt.autocorrect_words",
+                   "prompt.autocorrect_replace",
+                   # Copilot in VS Code (Brad, 2026-10-19): on or off from anywhere; only adding its
+                   # certificate needs someone at the machine, so remotely it waits for that.
+                   "copilot.enabled",
+                   # Claude Desktop's chat through aicleaner (route B, 2026-10-22): the Copilot rule - on and off
+                   # from anywhere; trusting its certificate waits for someone at the machine. The structure log
+                   # writes paths and kinds only.
+                   "claudeai.enabled", "claudeai.structure_log", "claudeai.mark_role",
+                   # Where this browser keeps the tunnel key (H2, Brad 2026-10-19): "more about the
+                   # storage than the code itself, is protected either way".
+                   "remote.key_storage",
+                   # Reading text out of images and scanned PDFs (J2, Brad 2026-10-20): its own card.
+                   "attachments.ocr", "attachments.ocr_max_pages", "attachments.ocr_timeout_s",
+                   # The casual-chats folder (item J): it prompts nothing on the machine.
+                   "session.casual_folder",
+                   # Settings review rows 13, 14 and 42 (Brad, 2026-10-20, "as proposed"): none prompts on the
+                   # machine. The rename-collapse guard and remote.enabled stay local.
+                   "claude.bash_guard", "codetab.enabled", "codetab.port", "claude.deliver_between_tools",
+                   # Your own words for a setting (feature 153): they only help "Find a setting" find a card.
+                   "ui.setting_keywords")
+LOCAL_ONLY_SETTINGS = tuple(k for k in Config.EDITABLE if k not in REMOTE_SETTINGS)
+from .mapping import (GLOBAL_ID, SOURCE_MANUAL, SOURCE_REVIEW, MappingError)
+from . import bashguard, lifecycle, rules
+from .models import ModelList
+from .restart import RestartError, restart
+from .store import _UNSET, MappingStore
+
+log = logging.getLogger("aicleaner.ui")
+
+# The model list is cached for the day; one per process (feature 45).
+model_list = ModelList()
+
+
+# The sign-in methods the wizard sets up (D177, feature 110), the first the default: Cloudflare's own
+# sign-in needs nothing registered anywhere. The last three need an OAuth client of their own.
+REMOTE_IDENTITIES = ("Cloudflare", "OneTimePin", "Google", "Microsoft", "GitHub")
+REMOTE_NEEDS_CLIENT = ("Google", "Microsoft", "GitHub")
+
+
+def deliver_lead(count: int, turn_summary: bool) -> str:
+    """What comes before messages handed to Claude between tool calls (feature 119).
+
+    With session.turn_summary (Brad, 2026-10-27): Claude answers what was sent meanwhile in its summary when the task is
+    done - unless the message asks for something now ("quickly do x, then carry on", "write script x now"), which it
+    does at once, says so in a line, and goes back to the task."""
+    them = "this message" if count == 1 else "these messages"
+    if not turn_summary:
+        return (f"The user sent {them} while you were working - read {'it' if count == 1 else 'them'} now and take "
+                f"{'it' if count == 1 else 'them'} into account before you continue:")
+    return (f"The user sent {them} while you were working. Turn summary is on: take {'it' if count == 1 else 'them'} "
+            "into account, but do not stop to reply - carry on with the task and answer in your summary when the task "
+            "is complete. The exception is a message that asks for something now (for example \"quickly change x, "
+            "then continue\", \"write script y now\", \"stop\"): do that first, say so in one line, then go back "
+            "to the task:")
+
+def remote_setup_command(shell: str, script: Path | str, hostname: str, email: str, identity: str = "OneTimePin",
+                         client_id: str = "", account_kind: str = "", directory: str = "",
+                         use_stored: bool = False) -> list[str]:
+    """How the setup wizard runs Enable-RemoteControl.ps1 (D177). Only parameters the script has -
+    it was passed -LogPath, which it never had, so the run stopped before it started - and
+    -AssumeDefaults, so no question is read from a closed input. The token and a provider's client
+    secret travel in the environment, never here."""
+    command = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", str(script),
+               "-Setup", "api", "-Hostname", hostname, "-Email", email, "-Identity", identity, "-AssumeDefaults"]
+    if client_id:
+        command += ["-IdpClientId", client_id]
+    if account_kind:
+        command += ["-IdpAccountKind", account_kind]
+    if directory:
+        command += ["-IdpDirectory", directory]
+    if use_stored:
+        command.append("-UseStoredToken")
+    return command
+
+
+def stored_cloudflare_token() -> Path:
+    """Where Enable-RemoteControl.ps1 keeps the API token (DPAPI, this Windows account): one per device."""
+    return Path.home() / ".aicleaner" / "cloudflare-token.dpapi"
+
+
+def feature_request_url(title: str = "") -> str:
+    """The issues of the repository this install came from - public or -dev (feature 110)."""
+    repo = "https://github.com/specul8/aicleaner"
+    try:
+        record = json.loads((Path.home() / ".aicleaner" / "deployment.json").read_text(encoding="utf-8-sig"))
+        for deployment in record.get("deployments") or []:
+            url = str(deployment.get("repo_url") or "")
+            if re.match(r"^https://github\.com/[^/\s]+/[^/\s]+", url):
+                repo = url
+                break
+    except (OSError, ValueError, AttributeError):
+        pass
+    repo = re.sub(r"\.git$", "", repo).rstrip("/")
+    return f"{repo}/issues/new" + (f"?title={urllib.parse.quote(title)}" if title else "")
+
+
+COPILOT_QUIET_S = 24 * 3600   # nothing from Copilot this long, with it on: the Overview warns
+
+
+def _copilot_status(proxy) -> dict:
+    """Copilot in VS Code for the Overview (release 6): on or not, what is waiting, how many VS Code
+    settings files point here, and whether its traffic has gone quiet (GitHub can change hosts)."""
+    if proxy is None or not proxy.cfg.copilot_enabled:
+        return {"enabled": False}
+    try:
+        info = proxy.copilot_summary()
+    except Exception as exc:  # noqa: BLE001 - the status poll never fails on it
+        return {"enabled": True, "error": str(exc)}
+    vscode = info.get("vscode") or {}
+    heard = max(info.get("last_at") or 0.0, info.get("since") or 0.0)
+    quiet = bool(heard) and not info.get("waiting") and time.time() - heard > COPILOT_QUIET_S
+    return {"enabled": True, "waiting": info.get("waiting", ""), "error": info.get("error", ""),
+            "vscode_found": bool(vscode.get("vscode_found")), "pointed": int(vscode.get("pointed") or 0),
+            "last_at": info.get("last_at") or 0.0, "quiet": quiet}
+
+
+def _health_state(cfg) -> dict | None:
+    """What the health check last found, or None when it has never run (feature 17).
+
+    A file the scheduled task writes, read here. Not re-run on the status poll: the checks shell
+    out to PowerShell and read the registry, and doing that every ten seconds on every open page
+    is the sort of thing that made the interface feel slow in the first place.
+
+    Stale is said rather than hidden: a state file from three days ago describes a machine that
+    has been switched on since, and reporting it as current would be worse than reporting
+    nothing.
+    """
+    import time
+
+    if cfg is None or not getattr(cfg, "state_dir", None):
+        return None
+    path = Path(cfg.state_dir).parent / "health.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    # The task runs every 15 minutes, so an hour old means it has not been running.
+    age = max(0.0, time.time() - path.stat().st_mtime)
+    data["stale"] = age > 3600
+    data["age_minutes"] = int(age // 60)
+    return data
+
+
+def _open_folders(cfg) -> list[str]:
+    """The install, clients, logs and state folders, if other local users can write them (H18)."""
+    if cfg is None:
+        return []
+    from .perms import open_folders
+
+    app_root = Path(__file__).resolve().parent.parent
+    places = [app_root, cfg.clients_dir, cfg.log_dir, getattr(cfg, "state_dir", "") or ""]
+    return open_folders([str(p) for p in places if str(p).strip()])
+
+
+def _share_of(entry: dict, shares: dict | None) -> str:
+    folded = {str(cid).lower(): folder for cid, folder in (shares or {}).items()}
+    return str(folded.get(str(entry.get("client") or "").lower()) or "")
+
+
+def _settle_homes_and_shares(wanted: list, stored: list, shares: dict | None) -> list[str]:
+    """Before a save, in place (DECISIONS 64): a profile whose home moves keeps the old one in
+    `homes_before`, so its conversations stay listed; and a hand-added folder that is the client's
+    OneDrive share is dropped - the share is always included - unless it is the profile's home,
+    which it then stays as. Returns what was done, in words, for the page to say."""
+    from . import workspace
+
+    def home(entry: dict) -> str:
+        try:
+            return workspace.home_of(list(entry.get("workspaces") or []), list(entry.get("projects") or []),
+                                     str(entry.get("home_override") or "")).get("folder", "")
+        except Exception:  # noqa: BLE001 - a hint, never a reason to refuse the save
+            return ""
+
+    before = {str(e.get("name", "")).lower(): e for e in stored}
+    names = {str(e.get("name", "")).lower() for e in wanted if isinstance(e, dict)}
+    notes: list[str] = []
+    for entry in wanted:
+        if not isinstance(entry, dict):
+            continue
+        share = _share_of(entry, shares)
+        if share:
+            now = home(entry)
+            folders = list(entry.get("projects") or [])
+            kept = [f for f in folders if not workspace._same(f, share) or workspace._same(f, now)]
+            if len(kept) != len(folders):
+                entry["projects"] = kept
+                notes.append(f"{entry.get('name')}: {share} was removed from the folders - it is the "
+                             "client's OneDrive share, which is always included.")
+        old = before.get(str(entry.get("name", "")).lower())
+        # A renamed profile keeps its history (the user, 2026-10-06): `was` names the stored profile
+        # it came from, honoured only when that name has left the list - renamed, not copied. What
+        # it inherits is the server's own list, still held to the allowed folders where it is read.
+        was_name = str(entry.pop("was", "") or "").lower()
+        if old is None and was_name and was_name not in names:
+            old = before.get(was_name)
+        # Only ever from the stored profile and the home worked out here - never from the request:
+        # a folder in this list is read for conversations, so a page that could name one could
+        # have another client's conversations listed and drawn (security review, 2026-10-06).
+        history = list((old or {}).get("homes_before") or [])
+        was, now = (home(old) if old else ""), home(entry)
+        if was and now and not workspace._same(was, now) and not any(workspace._same(was, h) for h in history):
+            history.append(was)
+            notes.append(f"{entry.get('name')}: the home folder moved to {now}; conversations started "
+                         f"in {was} stay listed under Continue.")
+        entry["homes_before"] = [h for h in history if not (now and workspace._same(h, now))]
+        # Worktrees are made and removed by the server (DECISIONS 66), never named by a page: a
+        # folder in this list becomes a session's home.
+        entry.pop("worktrees", None)
+        if (old or {}).get("worktrees"):
+            entry["worktrees"] = list(old["worktrees"])
+    return notes
+
+
+def _share_hint(entry: dict, shares: dict | None, folders: list, home: str) -> dict:
+    from . import workspace
+
+    share = _share_of(entry, shares)
+    repeated = bool(share) and any(workspace._same(f, share) for f in folders)
+    return {"share": share, "share_in_folders": repeated,
+            "share_is_home": repeated and bool(home) and workspace._same(share, home)}
+
+
+def _setup_findings(entry: dict, shares: dict | None, folders: list, home: str, workspaces: list) -> list:
+    from .setupcheck import findings
+    share = str(_share_hint(entry, shares, folders, home).get("share") or "")
+    return findings(home, [str(f) for f in folders], share, list(workspaces or []))
+
+
+def _workspace_view(entries: list, mf: MappingStore | None = None, shares: dict | None = None) -> dict:
+    """Per profile (D99): its home folder and how it was worked out, the workspace files in use
+    (its own, or for an older profile the one found inside a folder), what a workspace file lists
+    that the profile has not got (D41), and the two offers - the cwd setting when the first
+    workspace file lacks it (feature 71), or a new workspace file when there is none.
+
+    Best effort throughout. This reads the disk, and a folder that has been renamed or unplugged
+    should cost the hint, never the page. `mf` is unused since D99 (the client file holds nothing
+    about this machine's folders) and kept for the callers' signature.
+    """
+    from . import workspace
+
+    out: dict[str, dict] = {}
+    for entry in entries:
+        folders = list(entry.get("projects") or [])
+        own = list(entry.get("workspaces") or [])
+        if not folders and not own:
+            continue
+        try:
+            workspaces = own or workspace.implicit_workspaces(folders)
+            home = workspace.home_of(workspaces, folders, str(entry.get("home_override") or ""))
+            first = workspaces[0] if workspaces else ""
+            cwd = (workspace.cwd_offer(first, home["folder"]) if first and home.get("folder")
+                   else {"current": "", "suggested": ""})
+            create = None
+            if not workspaces and home.get("folder"):
+                path, text = workspace.new_workspace(str(entry.get("name", "")), home["folder"], folders)
+                if not path.exists():
+                    create = {"path": str(path), "text": text}
+            out[entry.get("name", "")] = {
+                "home": home, "home_derived_was": str(entry.get("home_derived_was") or ""),
+                "workspaces": workspaces, "implicit": bool(workspaces and not own),
+                "missing": workspace.missing_from_workspaces(workspaces, folders), "workspace": first, "cwd": cwd, "create": create,
+                # The client's share, and whether a hand-added folder repeats it (DECISIONS 64).
+                **_share_hint(entry, shares, folders, home.get("folder", "")),
+                # Git and CLAUDE.md (2026-10-16, item B): what is missing, with the fixes offered.
+                "setup": _setup_findings(entry, shares, folders, home.get("folder", ""), workspaces),
+                # The old names, kept for the page while it moves over.
+                "folder": home.get("folder", ""), "how": home.get("how", ""),
+            }
+        except Exception as exc:  # noqa: BLE001
+            log.debug("workspace hint for %s failed: %s", entry.get("name"), exc)
+    return out
+
+
+def _record_provenance(mf: MappingStore, cid: str, real: str, source: str,
+                       found: Any = None, note: str = "") -> None:
+    """Keep the evidence for one entry, locally (feature 30).
+
+    Best effort by design: provenance is evidence about a decision, never part of it, so a
+    failure here must not lose the mapping that has already been written.
+    """
+    detail: dict[str, Any] = {"note": note}
+    if found is not None:
+        detail.update(kind=getattr(found, "kind", ""), confidence=getattr(found, "confidence", ""),
+                      count=getattr(found, "count", 0), near=getattr(found, "near", ""),
+                      first_seen=getattr(found, "first_seen", ""),
+                      last_seen=getattr(found, "last_seen", ""),
+                      paths=getattr(found, "sources", ()), projects=getattr(found, "projects", ()),
+                      sessions=getattr(found, "sessions", ()),
+                      seen_with=getattr(found, "seen_with", None))
+    try:
+        mf.provenance.record(cid, real, source, **detail)
+    except Exception as exc:  # noqa: BLE001 - evidence is never worth failing a write for
+        log.warning("could not record provenance for %s/%s: %s", cid, real, exc)
+
+WEB = Path(__file__).resolve().parent / "web"  # the static single-page app (index.html, css/, js/)
+# A wiki page's name: what docs/wiki holds, and nothing that could step out of it.
+WIKI_PAGE = re.compile(r"[A-Za-z0-9-]{1,60}")
+REDIRECTS = {"/ui": "/#/review", "/ui/": "/#/review", "/config": "/#/settings", "/secrets": "/#/secrets"}
+
+def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStore, log_dir: Path, host: str,
+                    contact: ContactSource | None = None, user_secrets: Any = None, proxy: Any = None) -> None:
+    contact = contact or ContactSource()
+
+    def err(exc: Exception, status: int = 400, suggest: str | None = None) -> web.Response:
+        body: dict[str, Any] = {"error": str(exc)}
+        # A structured refusal (MappingError with why/offer, feature 41) carries the rule it is
+        # protecting and an action the page can put behind a button. Bare exceptions have
+        # neither and are flattened exactly as before.
+        why = getattr(exc, "why", "")
+        offer = getattr(exc, "offer", None)
+        if why:
+            body["why"] = why
+        if offer:
+            body["offer"] = offer
+        if suggest:
+            body["suggest"] = suggest  # what the UI can offer instead (see treat_as_public)
+        return web.json_response(body, status=status)
+
+    async def candidates(request: web.Request) -> web.Response:
+        # kind_offers: kinds ignored far more often than kept, which Review offers to stop (31).
+        return web.json_response({"pending": store.pending(), "kind_offers": store.kind_offers()})
+
+    # ---- each client's OneDrive share (shares.py) ---------------------------------------
+
+    def share_label(cid: str) -> str:
+        """The name a person reads, which is what a created folder is called."""
+        try:
+            for client in mf.load().data.get("clients", []):
+                if str(client.get("id", "")).lower() == cid.lower():
+                    return str(client.get("label") or client.get("id") or cid)
+        except Exception:                                    # a broken mapping is reported elsewhere
+            pass
+        return cid
+
+    def share_view(cid: str) -> dict[str, Any]:
+        from .shares import onedrive_root
+
+        root = onedrive_root()
+        return {"client": cid, "share": proxy.share_store.get(cid) if proxy else "",
+                "onedrive": str(root) if root else "", "suggested": share_label(cid)}
+
+    async def client_onedrive(request: web.Request) -> web.Response:
+        """Where this client's folder opens in OneDrive on the web, for its Share button (DECISIONS 67)."""
+        from .shares import onedrive_web
+
+        cid = request.match_info["cid"]
+        folder = Path(proxy.cfg.clients_dir) / cid
+        answer = await asyncio.to_thread(onedrive_web, folder)
+        return web.json_response({**answer, "folder": str(folder)})
+
+    async def client_share(request: web.Request) -> web.Response:
+        cid = request.match_info["cid"]
+        if cid.lower() == GLOBAL_ID.lower():
+            return err(ValueError("Global is not an engagement, so it has no share"), status=404)
+        return web.json_response(share_view(cid))
+
+    async def client_share_save(request: web.Request) -> web.Response:
+        """{path} to use a folder that exists, {create: true} to make one, {path: ""} to forget it."""
+        from .shares import ShareError
+
+        cid = request.match_info["cid"]
+        if cid.lower() == GLOBAL_ID.lower():
+            return err(ValueError("Global is not an engagement, so it has no share"), status=404)
+        from .folders import FolderError, FolderOutside, check_usable
+
+        body = await request.json()
+        try:
+            if body.get("create"):
+                # Created inside OneDrive by the store, so it lands where OneDrive is; it still has
+                # to come out inside an allowed root, or it is a folder the pages may not reach.
+                proxy.share_store.create(cid, share_label(cid))
+                check_usable(proxy.share_store.get(cid), folder_roots(), "share folder")
+            elif str(body.get("path", "")).strip():
+                # boundary only: the share store says "does not exist" better than this can
+                check_usable(str(body["path"]), folder_roots(), "share folder", must_exist=False)
+                proxy.share_store.set(cid, str(body["path"]))
+            else:
+                proxy.share_store.clear(cid)
+        except FolderOutside as problem:
+            return err(problem, status=403)
+        except FolderError as problem:
+            return err(problem)
+        except ShareError as problem:
+            return err(problem)
+        # Sessions read it from their profile; a running one keeps what it was started with.
+        proxy.reload_profiles()
+        return web.json_response(share_view(cid))
+
+    # ---- driving a session (session.py) -------------------------------------------------
+
+    def session_host():
+        """The session host, or a clear error when driving a session is switched off."""
+        from .session import SessionError
+
+        session = getattr(proxy, "session", None)
+        if session is None:
+            raise SessionError("driving a session is switched off (session.enabled)")
+        return session
+
+    async def session_profiles(request: web.Request) -> web.Response:
+        """The profiles, and the clients one can be pointed at - by label, never by id."""
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        entries = proxy.read_profiles()
+        running = [n for n, sess in host.sessions.items() if sess.running]
+        labels = proxy.client_labels()
+        return web.json_response({
+            "profiles": entries,
+            # by the name a person reads, since that is the only thing the picker shows
+            "clients": [{"id": cid, "label": label}
+                        for cid, label in sorted(labels.items(), key=lambda kv: kv[1].lower())
+                        if cid and cid.lower() != GLOBAL_ID.lower()],
+            "running": running,
+            "max_running": host.max_running,
+            "problem": proxy.profile_problem,
+            "path": str(proxy.profile_store.path),
+            # Which folder is the primary repo, on what grounds, and what its workspace file
+            # lists that this profile has not got (D41). Computed here rather than on the page
+            # because it reads the disk, and a page that read the disk would do it per keystroke.
+            "workspace": await asyncio.to_thread(_workspace_view, entries, mf, proxy.share_store.load()),
+        })
+
+    async def session_profiles_save(request: web.Request) -> web.Response:
+        """Validate, then commit - the same path a client file takes, for the same reason."""
+        from .profiles import ProfileError
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        body = await request.json()
+        wanted = body.get("profiles")
+        if not isinstance(wanted, list):
+            return err(ValueError("send {profiles: [...]}"))
+        kept = {str(entry.get("name", "")).lower() for entry in wanted if isinstance(entry, dict)}
+        for name, sess in host.sessions.items():
+            if sess.running and name.lower() not in kept:
+                return err(ValueError(f"{name} is running; stop it before removing its profile"))
+        # A profile's project folders are folders a session may read and write, so they answer to
+        # folders.roots like anything else. Checked before the file is written rather than when a
+        # session is started, so a profile cannot be saved naming somewhere it may never go.
+        from .folders import FolderError, FolderOutside, check_usable
+
+        roots = folder_roots()
+        for entry in wanted:
+            if not isinstance(entry, dict):
+                continue
+            # The folders, the workspace files' folders and the home override are all held to the
+            # same allowed locations (D99): a workspace file must not widen what the pages reach.
+            places = [(p, "project folder") for p in entry.get("projects") or []]
+            places += [(str(Path(w).parent), "workspace file's folder") for w in entry.get("workspaces") or []]
+            if str(entry.get("home_override") or "").strip():
+                places.append((entry["home_override"], "home folder"))
+            for project, what in places:
+                if not str(project).strip():
+                    continue
+                try:
+                    check_usable(project, roots, what)
+                except FolderOutside as problem:
+                    return err(ValueError(f"{entry.get('name', 'profile')}: {problem}"), status=403)
+                except FolderError as problem:
+                    return err(ValueError(f"{entry.get('name', 'profile')}: {problem}"))
+            for ws in entry.get("workspaces") or []:
+                if str(ws).strip() and not Path(str(ws)).is_file():
+                    return err(ValueError(f"{entry.get('name', 'profile')}: {ws} does not exist"))
+        notes = await asyncio.to_thread(_settle_homes_and_shares, wanted, proxy.read_profiles(),
+                                        proxy.share_store.load())
+        try:
+            saved = proxy.profile_store.save(wanted, set(proxy.client_labels()))
+        except (ProfileError, OSError) as problem:
+            return err(problem)
+        proxy.reload_profiles()
+        return web.json_response({"profiles": saved, "notes": notes})
+
+    async def session_profile_add_folder(request: web.Request) -> web.Response:
+        """Add one of the client's folders to a profile, from Continue (feature 50).
+
+        Only a folder the profile's tree already shows - the client's workspace folders (D72) -
+        and only inside the allowed locations, so this can widen a profile to its own client's
+        repos and to nothing else."""
+        from .folders import FolderError, check_usable
+        from .profiles import ProfileError
+        from .session import SessionError
+        from .workspace import _same
+
+        body = await request.json()
+        name, folder = str(body.get("name", "")).strip(), str(body.get("folder", "")).strip()
+        try:
+            host = session_host()
+            profile = host.profile(name)
+        except SessionError as problem:
+            return err(problem, status=404)
+        if not any(_same(folder, f) for f in host.tree_of(profile)):
+            return err(ValueError(f"{folder} is not one of {profile.name}'s client folders"), status=403)
+        try:
+            check_usable(folder, folder_roots(), "project folder")
+        except FolderError as problem:
+            return err(problem, status=403)
+        entries = proxy.read_profiles()
+        for entry in entries:
+            if entry.get("name") == profile.name and not any(_same(folder, p) for p in entry.get("projects") or []):
+                entry["projects"] = list(entry.get("projects") or []) + [folder]
+        try:
+            proxy.profile_store.save(entries, set(proxy.client_labels()))
+        except (ProfileError, OSError) as problem:
+            return err(problem)
+        proxy.reload_profiles()
+        return web.json_response({"ok": True, "folder": folder})
+
+    # ---- Start Work and Start Personal (feature 152) --------------------------------------------
+
+    def _presets_view(host) -> dict[str, Any]:
+        from .presets import limit_for, runner_of
+
+        return {"presets": proxy.cfg.session_presets, "max_running": host.max_running,
+                "limit": limit_for(host.max_running), "profiles": [p.name for p in host.profiles],
+                **runner_of(host).state()}
+
+    async def presets_get(request: web.Request) -> web.Response:
+        """The two panels and the current run, if any. Sessions switched off: no panels, and no error - the page asks
+        on every visit, and the Session page already says it is off."""
+        from .session import SessionError
+
+        try:
+            return web.json_response(_presets_view(session_host()))
+        except SessionError:
+            return web.json_response({"presets": [], "run": None, "finishing": {}, "active": False, "profiles": [],
+                                      "max_running": 0, "limit": None})
+
+    async def presets_save(request: web.Request) -> web.Response:
+        """Save the panels: every project a known profile, at most max_running - 1 each."""
+        from .presets import PresetError
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        body = await request.json()
+        wanted = body.get("presets")
+        names = {p.name.lower(): p.name for p in host.profiles}
+        try:
+            for entry in wanted if isinstance(wanted, list) else []:
+                if isinstance(entry, dict) and isinstance(entry.get("profiles"), list):
+                    unknown = [str(n) for n in entry["profiles"] if str(n).strip().lower() not in names]
+                    if unknown:
+                        raise PresetError(f"no project session called {', '.join(unknown)}")
+                    entry["profiles"] = [names[str(n).strip().lower()] for n in entry["profiles"]]
+            proxy.cfg.update_settings({"session.presets": wanted})
+        except ValueError as problem:
+            return err(problem)
+        return web.json_response(_presets_view(host))
+
+    async def _before_preset_start(name: str) -> None:
+        """What a page Start does first: the MCP audit (H11), and no start on a machine short of memory (S2) -
+        the page can ask; a run cannot, so it says why and that session is not started."""
+        from .session import SessionError
+
+        await proxy.audit_mcp()
+        memory = await asyncio.to_thread(lifecycle.proctree.memory)
+        if lifecycle.low_memory(memory):
+            free = (memory["commit_limit_mb"] - memory["commit_mb"]) / 1024
+            raise SessionError(f"memory is nearly full ({free:.1f} GB left) - stop a session, then start it by hand")
+
+    async def preset_go(request: web.Request) -> web.Response:
+        """Go: the panel's set started, the rest stopped when idle (feature 152)."""
+        from .presets import runner_of
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        body = await request.json()
+        pid = str(body.get("id", "")).strip().lower()
+        preset = next((p for p in proxy.cfg.session_presets if p["id"] == pid), None)
+        if preset is None:
+            return err(ValueError(f"no panel called {pid or '(blank)'}"))
+        if not preset["profiles"]:
+            return err(ValueError(f"{preset['name']} has no projects yet - choose them with ..."))
+        runner = runner_of(host)
+        runner.before_start = _before_preset_start
+        runner.go(preset["id"], preset["name"], preset["profiles"])
+        return web.json_response(_presets_view(host))
+
+    async def preset_cancel(request: web.Request) -> web.Response:
+        """End the run; sessions asked to finish are no longer stopped by AI Cleaner."""
+        from .presets import runner_of
+        from .session import SessionError
+
+        try:
+            host = session_host()
+        except SessionError as problem:
+            return err(problem, status=404)
+        runner_of(host).cancel()
+        return web.json_response(_presets_view(host))
+
+    # ---- worktree sessions (DECISIONS 66, feature 86) -------------------------------------------
+
+    def _save_worktrees(parent: str, change) -> None:
+        """Apply `change(list)` to the stored profile's worktrees, then save and reload."""
+        entries = proxy.read_profiles()
+        for entry in entries:
+            if entry.get("name") == parent:
+                kept = change(list(entry.get("worktrees") or []))
+                entry.pop("worktrees", None)
+                if kept:
+                    entry["worktrees"] = kept
+        proxy.profile_store.save(entries, set(proxy.client_labels()))
+        proxy.reload_profiles()
+
+    def _worktree_session(name: str):
+        """The stopped worktree session called `name`, or why not."""
+        from .session import SessionError
+
+        profile = session_host().profile(name)
+        if not profile.worktree_of:
+            raise SessionError(f"{profile.name} is not a worktree session")
+        running = session_host().sessions.get(profile.name)
+        if running is not None and running.running:
+            raise SessionError(f"{profile.name} is running; stop it first")
+        return profile
+
+    async def session_worktree_offer(request: web.Request) -> web.Response:
+        """What "Create a worktree" can offer: the profile's git repos, its other folders that could
+        be made one (not in OneDrive), and a default name."""
+        from . import worktree
+        from .session import SessionError
+
+        try:
+            profile = session_host().profile(request.query.get("name", ""))
+        except SessionError as problem:
+            return err(problem, status=404)
+        if profile.worktree_of:
+            return err(ValueError(f"{profile.name} is already a worktree session"))
+        folders = [str(p) for p in profile.projects if Path(p).is_dir()]
+        repos = worktree.repos_of(folders)
+        plain = [f for f in folders if f not in repos and not worktree._synced(f)]
+        taken = [p.worktree.get("name", "") for p in session_host().profiles if p.worktree_of == profile.name]
+        return web.json_response({"repos": repos, "folders": plain, "default": worktree.default_name(taken)})
+
+    async def session_worktree_create(request: web.Request) -> web.Response:
+        """git worktree add beside the repo, and a session `<profile> @ <name>` homed there. With
+        `init`, a plain folder of the profile is made a repo first."""
+        from . import worktree
+        from .folders import FolderError, check_usable
+        from .profiles import ProfileError
+        from .session import SessionError
+        from .workspace import _same
+
+        body = await request.json()
+        try:
+            profile = session_host().profile(str(body.get("name", "")))
+            if profile.worktree_of:
+                raise SessionError(f"{profile.name} is already a worktree session")
+            repo = str(body.get("repo", "")).strip()
+            # Only one of the profile's own folders: those were checked against the allowed
+            # locations when it was saved, and this one gains a sibling.
+            if not any(_same(repo, p) for p in profile.projects):
+                raise SessionError(f"{repo} is not one of {profile.name}'s folders")
+            name = worktree.check_name(str(body.get("branch", "")))
+            # It goes beside the repo, so the folder holding the repo must be allowed too.
+            check_usable(str(Path(repo).parent), folder_roots(), "folder the worktree goes in")
+            if body.get("init") and not worktree.is_repo(repo):
+                await asyncio.to_thread(worktree.init_repo, repo)
+            path = await asyncio.to_thread(worktree.create, repo, name)
+            _save_worktrees(profile.name, lambda ws: ws + [{"name": name, "repo": repo, "path": str(path)}])
+        except (SessionError, worktree.WorktreeError, FolderError, ProfileError, OSError) as problem:
+            return err(problem)
+        return web.json_response({"session": f"{profile.name} @ {name}", "path": str(path)})
+
+    async def session_worktree_merge(request: web.Request) -> web.Response:
+        """Merge a stopped worktree session's branch into its repo. Conflicts are reported, not resolved."""
+        from . import worktree
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            profile = _worktree_session(str(body.get("name", "")))
+            w = profile.worktree
+            said = await asyncio.to_thread(worktree.merge, w["repo"], w["name"], w["path"])
+        except (SessionError, worktree.WorktreeError) as problem:
+            return err(problem)
+        return web.json_response({"ok": True, "message": said})
+
+    async def session_worktree_remove(request: web.Request) -> web.Response:
+        """Remove a stopped worktree session: the worktree, its branch when merged, and the session."""
+        from . import worktree
+        from .profiles import ProfileError
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            profile = _worktree_session(str(body.get("name", "")))
+            w = profile.worktree
+            said = await asyncio.to_thread(worktree.remove, w["repo"], w["name"], w["path"])
+            _save_worktrees(profile.worktree_of, lambda ws: [x for x in ws if x.get("name") != w["name"]])
+            session_host().sessions.pop(profile.name, None)
+        except (SessionError, worktree.WorktreeError, ProfileError, OSError) as problem:
+            return err(problem)
+        return web.json_response({"ok": True, "message": said, "session": profile.worktree_of})
+
+    async def session_state(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        from . import timing
+
+        parts = request.get(timing.REQUEST_PARTS)        # set only while timings are recorded
+        # Only what the page has not seen (D140): the last event number it holds, and whose.
+        try:
+            since = int(request.query["since"]) if "since" in request.query else None
+        except ValueError:
+            since = None
+        try:
+            state = session_host().state(request.query.get("name", ""), parts=parts, since=since,
+                                         epoch=request.query.get("epoch", ""))
+        except SessionError as exc:   # switched off: say so, rather than a 500
+            return err(exc)
+        # The model request this session has open, if any (DECISIONS 47).
+        if proxy is not None and hasattr(proxy, "model_requests"):
+            from .proxy import request_state_for
+            state["model_request"] = request_state_for(state.get("selected") or state.get("name", ""),
+                                                       proxy.model_requests(), time.time())
+        if parts is None:
+            return web.json_response(state)
+        started = time.perf_counter()
+        text = json.dumps(state)
+        timing.part(request, "json", started)
+        parts.append(("events", float(len(state.get("events") or []))))   # a count, not a time
+        return web.Response(text=text, content_type="application/json")
+
+    async def session_past(request: web.Request) -> web.Response:
+        """What this profile has talked about before, so a conversation can be picked up."""
+        from .session import SessionError
+
+        name = request.query.get("name", "")
+        # Continue lists the newest 25 per folder (reading many cold is slow); the Delete and new-chat
+        # dialogs ask for every one when they open (2026-10-17: 216 imported, about 50 reachable).
+        try:
+            limit = max(1, min(int(request.query.get("limit") or 25), 5000))
+        except ValueError:
+            limit = 25
+        try:
+            # Off the loop: this opens and reads transcripts looking for their opening message.
+            # "all" is every conversation a person or aicleaner started, not just the newest 25 (the
+            # user, 2026-10-17). Ones a program started (PR review bots) are never listed: nobody
+            # opens them, and they used to be what "all" added.
+            if request.query.get("all") == "1":
+                limit = 5000
+            past = await asyncio.to_thread(session_host().past, name, limit, False)
+            return web.json_response({"projects": past})
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def conversation_search(request: web.Request) -> web.Response:
+        """Conversations ranked for a topic (2026-10-16): this profile's, or every profile's."""
+        from .session import SessionError
+
+        query = request.query.get("q", "").strip()
+        if not query:
+            return web.json_response({"results": [], "searched": 0, "read": 0, "ms": 0})
+        if len(query) > 300:
+            return err(ValueError("a search is at most 300 characters"))
+        try:
+            answer = await asyncio.to_thread(session_host().search_conversations, request.query.get("name", ""),
+                                             query, request.query.get("scope") == "all")
+            return web.json_response(answer)
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def conversation_bin(request: web.Request) -> web.Response:
+        """Delete (to Recently deleted), list, put back, delete for good (2026-10-16, item D)."""
+        from .convbin import BinError
+        from .session import SessionError
+
+        action = request.match_info["action"]
+        host = session_host()
+        try:
+            if action == "deleted":
+                rows = await asyncio.to_thread(host.deleted_conversations, request.query.get("name", ""))
+                return web.json_response({"deleted": rows})
+            body = await request.json()
+            name, conv_id = str(body.get("name", "")), str(body.get("id", ""))
+            work = {"delete": host.delete_conversation, "restore": host.restore_conversation,
+                    "purge": host.purge_conversation}[action]
+            return web.json_response(await asyncio.to_thread(work, name, conv_id))
+        except BinError as problem:
+            return err(problem, status=409)
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def conversation_titles(request: web.Request) -> web.Response:
+        """Rename, retitle by the model, or suggest titles for the untitled (2026-10-16, item E)."""
+        from .session import SessionError
+
+        action = request.match_info["action"]
+        body = await request.json()
+        name, conv_id = str(body.get("name", "")), str(body.get("id", ""))
+        host = session_host()
+        try:
+            if action == "title":
+                answer = await asyncio.to_thread(host.rename_conversation, name, conv_id, str(body.get("title", ""))[:200])
+            elif action == "retitle":
+                answer = await asyncio.to_thread(host.retitle_conversation, name, conv_id)
+            else:
+                ids = body.get("ids")              # the dialog's ticks (E3); absent, the untitled listed
+                ids = [str(i) for i in ids][:5000] if isinstance(ids, list) else None
+                answer = {"started": await asyncio.to_thread(host.suggest_titles, name, bool(body.get("all")), ids),
+                          "progress": host.title_queue().progress()}
+        except SessionError as problem:
+            return err(problem, status=409)
+        return web.json_response(answer)
+
+    async def titles_progress(request: web.Request) -> web.Response:
+        """How the background titles are going, for the page's progress toast (2026-10-17)."""
+        from .session import SessionError
+        try:
+            return web.json_response(session_host().title_queue().progress())
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def conversation_consolidate(request: web.Request) -> web.Response:
+        """Start a consolidation (POST {name, ids}) or ask how it is going (GET ?job=) - item F."""
+        from .session import SessionError
+
+        host = session_host()
+        try:
+            if request.method == "GET":
+                return web.json_response(await asyncio.to_thread(host.consolidation, request.query.get("job", "")))
+            body = await request.json()
+            ids = [str(i) for i in (body.get("ids") or [])][:50]
+            job = await asyncio.to_thread(host.consolidate, str(body.get("name", "")), ids)
+        except SessionError as problem:
+            return err(problem, status=409)
+        return web.json_response({"job": job})
+
+    # ---- importing a project from claude.ai (2026-10-16, item H) --------------------------------
+
+    def claude_imports():
+        from .claudeimport import Imports
+
+        host = session_host()
+        if getattr(host, "_claude_imports", None) is None:
+            state = host.state_dir() or Path.home() / ".aicleaner"
+            host._claude_imports = Imports(state)
+        return host, host._claude_imports
+
+    def _import_watch(request: web.Request, extra: str = "") -> list[Path]:
+        """The folders a download is looked for in: Downloads, and one the person names. Only on
+        the machine itself - through remote access the files land on the other device."""
+        from .claudeimport import downloads_folder
+
+        if request.get(REMOTE):
+            return []
+        folders = [downloads_folder()]
+        if extra.strip():
+            folders.append(Path(extra.strip()))
+        return folders
+
+    def _import_home(host: Any, name: str) -> Path:
+        from .session import SessionError
+
+        try:
+            profile = host.profile(name)
+        except SessionError as problem:
+            raise ValueError(str(problem)) from problem
+        home = host.home_of(profile).get("folder") or ""
+        if not home or not Path(home).is_dir():
+            raise ValueError(f"{name} has no home folder on this machine to import into")
+        return Path(home)
+
+    def _import_new_target(new: dict[str, Any]) -> str:
+        """A new client and its project profile, as the import's target: the client named exactly as
+        typed, a project folder holding a local-only _<name>-tooling repository as the home, and a
+        OneDrive share unless none is wanted. Returns the profile's name."""
+        from .folders import check_usable
+        from .setupcheck import git_init
+
+        name = str(new.get("client") or "").strip()
+        if not name:
+            raise ValueError("name the new client")
+        cid = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:64]
+        if not cid:
+            raise ValueError(f"{name!r} has no letters or digits to make a client id from")
+        if any(str(e.get("name", "")).lower() == name.lower() for e in proxy.read_profiles()):
+            raise ValueError(f"there is already a profile called {name}: import into it instead")
+        folder = Path(str(new.get("folder") or "").strip() or str(Path("C:/Repos") / name))
+        check_usable(str(folder), folder_roots(), "project folder", must_exist=False)
+        home = folder / f"_{cid.lower()}-tooling"
+        mf.add_client(cid, None, True, name)
+        home.mkdir(parents=True, exist_ok=True)
+        git_init(home)
+        share = str(new.get("share", "create"))
+        if share == "create":
+            proxy.share_store.create(cid, share_label(cid))
+        elif share.strip():
+            check_usable(share, folder_roots(), "share folder", must_exist=False)
+            proxy.share_store.set(cid, share)
+        entries = proxy.read_profiles() + [{"name": name, "client": cid, "projects": [str(home)]}]
+        proxy.profile_store.save(entries, set(proxy.client_labels()))
+        proxy.reload_profiles()
+        return name
+
+    async def claude_import(request: web.Request) -> web.Response:
+        """The import wizard's steps: manifest, received, upload, projects, chats, pick, run, cancel."""
+        from .claudeimport import ClaudeImportError, imported_ids
+        from .folders import FolderError
+        from .history import transcript_root
+        from .session import SessionError
+        from .shares import ShareError
+
+        step = request.match_info["step"]
+        try:
+            host, imports = claude_imports()
+            if step == "manifest":
+                job = imports.start((await request.json()).get("manifest"))
+                # Looked for at once - in Downloads, and where this export was last time - so files
+                # already here are not offered for download again (2026-10-17).
+                return web.json_response({"job": job.id, "created_at": job.manifest["created_at"],
+                                          "files": await asyncio.to_thread(imports.status, job, _import_watch(request)),
+                                          "watching": [str(p) for p in _import_watch(request)],
+                                          "folder": str(job.extra or "")})
+            if step == "remembered":
+                # The export used last, and whether one on this machine can be used - only on the
+                # machine itself, as the folders are this machine's (2026-10-17).
+                local = not request.get(REMOTE)
+                return web.json_response({"local": local, "remembered": imports.remembered() if local else None})
+            if step in ("folder", "reuse"):
+                if request.get(REMOTE):
+                    return err(ValueError("an export already on the machine is used from the machine itself; "
+                                          "through remote access, choose the manifest"), status=403)
+                body = await request.json() if step == "folder" else {}
+                job = await asyncio.to_thread(imports.start_from_folder, Path(str(body.get("folder", "")))) \
+                    if step == "folder" else await asyncio.to_thread(imports.start_remembered)
+                return web.json_response({"job": job.id, "created_at": job.manifest["created_at"],
+                                          "files": await asyncio.to_thread(imports.status, job, _import_watch(request)),
+                                          "watching": [str(p) for p in _import_watch(request)],
+                                          "folder": str(job.extra or "")})
+            if step == "received":
+                job = imports.get(request.query.get("job", ""))
+                watch = _import_watch(request, request.query.get("folder", ""))
+                return web.json_response({"files": await asyncio.to_thread(imports.status, job, watch)})
+            if step == "upload":
+                body = await request.json()
+                job = imports.get(str(body.get("job", "")))
+                data = base64.b64decode(str(body.get("data", "")), validate=True)
+                return web.json_response(await asyncio.to_thread(
+                    imports.upload_chunk, job, str(body.get("file", "")), int(body.get("offset") or 0), data, bool(body.get("last"))))
+            if step == "projects":
+                job = imports.get(request.query.get("job", ""))
+                return web.json_response({"projects": await asyncio.to_thread(imports.projects, job)})
+            if step == "chats":
+                job = imports.get(request.query.get("job", ""))
+                name = request.query.get("name", "")
+                done = imported_ids(_import_home(host, name), transcript_root()) if name else set()
+                chats = await asyncio.to_thread(imports.chats, job, request.query.get("project", ""), done,
+                                                request.query.get("q", ""))
+                return web.json_response({"chats": chats})
+            body = await request.json()
+            job = imports.get(str(body.get("job", "")))
+            if step == "pick":
+                try:
+                    ids = await asyncio.to_thread(imports.pick, job, str(body.get("project", "")), host.claude, host.base_url)
+                except RuntimeError as problem:
+                    return err(ValueError(f"Claude could not choose: {problem}"), status=502)
+                return web.json_response({"chats": ids})
+            if step == "cancel":
+                await asyncio.to_thread(imports.finish, job)
+                return web.json_response({"ok": True})
+            if step == "run":
+                if isinstance(body.get("new"), dict):
+                    name = await asyncio.to_thread(_import_new_target, body["new"])
+                else:
+                    name = str(body.get("name", ""))
+                home = _import_home(host, name)
+                pairs = [(str(p[0]), str(p[1])) for p in body.get("path_pairs") or []
+                         if isinstance(p, (list, tuple)) and len(p) == 2 and str(p[0]).strip()]
+                report = await asyncio.to_thread(
+                    imports.run, job, str(body.get("project", "")), [str(i) for i in body.get("chats") or []],
+                    home, transcript_root(), pairs, bool(body.get("memories", True)), bool(body.get("keep_zips")))
+                return web.json_response({**report, "name": name, "home": str(home)})
+            return err(ValueError(f"no import step called {step}"), status=404)
+        except (ClaudeImportError, ValueError, binascii.Error) as problem:
+            return err(problem)
+        except (MappingError, FolderError, ShareError, OSError) as problem:
+            return err(problem)
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def session_drop(request: web.Request) -> web.Response:
+        """Files and folders dropped on the tree (item H2): check, then each file in pieces (base64
+        in JSON, so it goes through the encrypted tunnel like any call), and empty folders."""
+        from . import filedrop
+        from .session import SessionError
+
+        step = request.match_info["step"]
+        body = await request.json()
+        try:
+            folder = await asyncio.to_thread(session_host().drop_folder, str(body.get("name", "")),
+                                             str(body.get("root", "")), str(body.get("path", "")))
+            if step == "check":
+                items = [i for i in body.get("items") or [] if isinstance(i, dict)]
+                return web.json_response(await asyncio.to_thread(filedrop.check, folder, items))
+            if step == "file":
+                data = base64.b64decode(str(body.get("data", "")), validate=True)
+                return web.json_response(await asyncio.to_thread(
+                    filedrop.write_piece, folder, str(body.get("relative", "")), str(body.get("mode", "replace")),
+                    int(body.get("offset") or 0), data, bool(body.get("last"))))
+            if step == "folder":
+                return web.json_response(await asyncio.to_thread(filedrop.make_folder, folder, str(body.get("relative", ""))))
+            return err(ValueError(f"no drop step called {step}"), status=404)
+        except (filedrop.DropError, binascii.Error) as problem:
+            return err(problem)
+        except (SessionError, OSError) as problem:
+            return err(problem, status=403)
+
+    async def agent_report(request: web.Request) -> web.Response:
+        """A sub-agent's report under its Agent call, fetched when the line is opened (2026-10-16)."""
+        from .session import SessionError
+
+        try:
+            answer = await asyncio.to_thread(session_host().agent_report, request.query.get("name", ""),
+                                             request.query.get("tool", ""))
+        except ValueError as problem:
+            return err(problem)
+        except SessionError as problem:
+            return err(problem, status=404)
+        return web.json_response(answer)
+
+    async def conversation_rank(request: web.Request) -> web.Response:
+        """The model's order and a reason for each, over results the page sent back."""
+        from .convsearch import RANK_CANDIDATES
+
+        body = await request.json()
+        query = str(body.get("q") or "").strip()[:300]
+        results = [r for r in (body.get("results") or []) if isinstance(r, dict) and r.get("id")][:RANK_CANDIDATES]
+        if not query or not results:
+            return err(ValueError("a question and some results to rank are needed"))
+        try:
+            ranked = await asyncio.to_thread(session_host().rank_conversations, query, results)
+        except RuntimeError as problem:
+            return err(problem, status=502)
+        return web.json_response({"ranked": ranked})
+
+    async def session_earlier(request: web.Request) -> web.Response:
+        """The 500 events before what the page shows, for "Show earlier" (feature 82)."""
+        from .session import SessionError
+
+        try:
+            before = float(request.query.get("before") or 0)
+        except ValueError:
+            return err(ValueError("before must be a time"))
+        try:
+            answer = await asyncio.to_thread(session_host().earlier, request.query.get("name", ""), before)
+            return web.json_response(answer)
+        except SessionError as problem:
+            return err(problem, status=404)
+
+    async def tunnel_params(request: web.Request) -> web.Response:
+        """What a device needs to derive the long-term key (feature 21). Plain by design: a salt
+        and a count, nothing that opens or checks anything. `sealed` is true only through the
+        tunnel with encryption on and a code set."""
+        sealed = bool(request.get(REMOTE)) and proxy.cfg.remote_encrypt and proxy.tunnel.key() is not None
+        out: dict[str, Any] = {"sealed": sealed, "storage": proxy.cfg.remote_key_storage}
+        if sealed:
+            out.update(proxy.tunnel.params())
+        return web.json_response(out)
+
+    async def tunnel_hello(request: web.Request) -> web.Response:
+        """Step one of a connection's key exchange (DECISIONS 60): the page's throwaway public key
+        and nonce in, the proxy's out, with the proxy's proof that it holds the code."""
+        from .tunnelcrypt import SealError
+
+        key = proxy.tunnel.key()
+        if key is None:
+            return err(ValueError("no tunnel code is set"), status=403)
+        body = await request.json()
+        try:
+            return web.json_response(proxy.tunnel_sessions.hello(key, str(body.get("client_pub", "")),
+                                                                 str(body.get("client_nonce", ""))))
+        except SealError as exc:
+            return err(exc)
+
+    async def tunnel_confirm(request: web.Request) -> web.Response:
+        """Step two: the page proves it holds the code too. Until then the session carries nothing."""
+        from .tunnelcrypt import SealError
+
+        key = proxy.tunnel.key()
+        if key is None:
+            return err(ValueError("no tunnel code is set"), status=403)
+        body = await request.json()
+        try:
+            proxy.tunnel_sessions.confirm(key, str(body.get("sid", "")), str(body.get("proof", "")))
+        except SealError as exc:
+            return err(exc, status=403)
+        return web.json_response({"ok": True})
+
+    async def tunnel_secret(request: web.Request) -> web.Response:
+        """Whether a code is set, and the two settings. On this machine only."""
+        if request.get(REMOTE):
+            return err(ValueError("the tunnel code is set on the machine itself"), status=403)
+        return web.json_response({"set": proxy.tunnel.is_set(), "legacy": proxy.tunnel.legacy(),
+                                  "encrypt": proxy.cfg.remote_encrypt, "storage": proxy.cfg.remote_key_storage})
+
+    async def tunnel_secret_set(request: web.Request) -> web.Response:
+        """Generate a new code, returned this once (DECISIONS 60: codes only, no chosen passphrase).
+        On this machine only; every connection is dropped and every device must enter the new one."""
+        if request.get(REMOTE):
+            return err(ValueError("the tunnel code is set on the machine itself"), status=403)
+        body = await request.json()
+        if not body.get("generate"):
+            return err(ValueError("only a generated code can be set - choose Generate"))
+        try:
+            code = proxy.tunnel.generate()
+        except (ValueError, RuntimeError) as exc:
+            return err(exc)
+        proxy.tunnel_sessions.forget_all()
+        return web.json_response({"ok": True, "code": code})
+
+    async def session_commands(request: web.Request) -> web.Response:
+        """What can be typed after a slash here: the files on this machine, not a terminal's menu."""
+        from .commands import available
+        from .session import SessionError
+
+        host = session_host()
+        try:
+            profile = host.profile(request.query.get("name", ""))
+        except SessionError as problem:
+            return err(problem, status=404)
+        # What the running session said it accepts, when one has (feature 84).
+        running = host.sessions.get(profile.name)
+        offered = running.slash_commands if running is not None and running.slash_commands else None
+        return web.json_response({"commands": available(profile.projects, offered=offered)})
+
+    # ---- file tabs (feature 54, 74; DECISIONS 50) -------------------------------------------
+    #
+    # The first endpoints that return a project file's CONTENT - as it is on disk, real names and
+    # all, because it goes to the person, not the AI service. Held to the tree's own allow-list.
+
+    def _file_args(request: web.Request) -> tuple[str, str, str]:
+        q = request.query
+        return q.get("name", ""), q.get("root", ""), q.get("path", "")
+
+    async def session_file(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        name, root, path = _file_args(request)
+        try:
+            answer = await asyncio.to_thread(session_host().read_file, name, root, path)
+        except (SessionError, OSError) as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        return web.json_response(answer)
+
+    async def session_file_write(request: web.Request) -> web.Response:
+        """Save a file tab (F54, DECISIONS 53). 409 with the file's time now when it changed on disk
+        since the tab read it; sending that time back with the same text overwrites."""
+        from .session import SessionError, StaleWrite
+
+        body = await request.json()
+        try:
+            answer = await asyncio.to_thread(
+                session_host().write_file, str(body.get("name", "")), str(body.get("root", "")),
+                str(body.get("path", "")), str(body.get("text", "")), float(body.get("modified", 0) or 0))
+        except StaleWrite as stale:
+            return web.json_response({"error": str(stale), "stale": True, "modified": stale.modified}, status=409)
+        except (SessionError, OSError, ValueError) as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        return web.json_response(answer)
+
+    reading: dict[str, asyncio.Lock] = {}
+
+    async def session_read_image(request: web.Request) -> web.Response:
+        """Feature 113: an image or PDF read to text for the prompt box - pasted, dropped or chosen
+        (the bytes, base64, so it goes sealed through the tunnel like any call), or named by its
+        path inside the session's folders (`root` and `path`, the file tree's rule). Read with the
+        proxy's own readers, one at a time per session. Nothing is sent to the model from here."""
+        import base64
+        import binascii
+
+        from .imagetext import MAX_BYTES, ConversionError, ReadRefused, read_text
+        from .session import SessionError
+
+        body = await request.json()
+        name = str(body.get("name", ""))
+        if body.get("path"):
+            try:
+                target = await asyncio.to_thread(session_host().locate_file, name, str(body.get("root", "")),
+                                                 str(body.get("path", "")))
+                if target.stat().st_size > MAX_BYTES:
+                    return web.json_response({"error": f"{target.name} is over {MAX_BYTES // (1024 * 1024)} MB"}, status=413)
+                raw = await asyncio.to_thread(target.read_bytes)
+                filename = target.name
+            except (SessionError, OSError) as problem:
+                return web.json_response({"error": str(problem)}, status=403)
+        else:
+            try:
+                raw = base64.b64decode(str(body.get("data", "")), validate=True)
+            except (binascii.Error, ValueError):
+                return web.json_response({"error": "the file did not arrive whole"}, status=400)
+            filename = str(body.get("filename", ""))[:200]
+        lock = reading.setdefault(name, asyncio.Lock())
+        if lock.locked():
+            return web.json_response({"error": "an image is already being read for this session; try again when it is done"},
+                                     status=429)
+        image_to_text = getattr(proxy, "_image_to_text", None)
+        pdf_to_text = getattr(proxy, "_pdf_to_text", None)
+        cfg = proxy.cfg if proxy is not None else None
+        async with lock:
+            try:
+                text = await asyncio.to_thread(read_text, raw, filename, image_to_text, pdf_to_text,
+                                               cfg.ocr_max_pages if cfg else 10, cfg.ocr_timeout_s if cfg else 60)
+            except ReadRefused as refused:
+                return web.json_response({"error": str(refused)}, status=415)
+            except (ConversionError, OSError) as failed:
+                return web.json_response({"error": f"{filename or 'the file'} could not be read: {failed}"}, status=500)
+            # The Misreadings setting, as the proxy applies it to an image inside a request: a word
+            # one letter away from a client's real name is put right before the text is shown, so
+            # the filter catches it when the prompt is sent (the user, 2026-10-14: AlCleaner for
+            # AICleaner). Text put in the prompt here is sent as typed text, which the proxy
+            # deliberately never corrects - so it is done now, where it is still known to be read.
+            corrected = 0
+            if cfg is not None and cfg.near_miss and text:
+                from collections import Counter
+                near: Counter[str] = Counter()
+                text = await asyncio.to_thread(proxy.mapper.repair_near_misses, text, near)
+                corrected = sum(near.values())
+        return web.json_response({"text": text, "filename": filename, "corrected": corrected})
+
+    async def _send_file(request: web.Request, inline: bool) -> web.StreamResponse:
+        from .session import MAX_FILE_SEND, SessionError, file_kind, inline_type
+
+        name, root, path = _file_args(request)
+        try:
+            target = await asyncio.to_thread(session_host().locate_file, name, root, path)
+            size = target.stat().st_size
+        except (SessionError, OSError) as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        if size > MAX_FILE_SEND:
+            return web.json_response({"error": f"{target.name} is {size // (1024 * 1024)} MB; "
+                                               f"the limit is {MAX_FILE_SEND // (1024 * 1024)} MB"}, status=413)
+        if inline:
+            kind = inline_type(target.name)
+            if not kind or file_kind(target.name)[1] == "download":
+                return web.json_response({"error": f"{target.name} cannot be shown in the page"}, status=403)
+            response = web.FileResponse(target, headers={"Content-Type": kind})
+            # Framed by the page only, in place of the guard's own policy, which forbids all framing.
+            # An image is sandboxed outright. A PDF is not: Chromium's viewer will not run in a
+            # sandboxed document or under default-src 'none', and it runs no script from the file.
+            request[FILE_CSP] = ("frame-ancestors 'self'" if kind == "application/pdf" else
+                                 "sandbox; default-src 'none'; img-src 'self'; frame-ancestors 'self'")
+            return response
+        quoted = urllib.parse.quote(target.name)
+        return web.FileResponse(target, headers={
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted}"})
+
+    async def session_file_raw(request: web.Request) -> web.StreamResponse:
+        return await _send_file(request, inline=True)
+
+    async def session_file_download(request: web.Request) -> web.StreamResponse:
+        return await _send_file(request, inline=False)
+
+    async def session_files_zip(request: web.Request) -> web.StreamResponse:
+        """Many files and folders as one zip (feature 97): paths kept relative to their root,
+        refused (413) before anything is written when the whole is too big."""
+        import tempfile
+
+        from .filezip import ZipTooBig, plan_zip, write_zip
+        from .session import SessionError
+
+        body = await request.json()
+        items = [i for i in (body.get("items") or []) if isinstance(i, dict)][:1000]
+        if not items:
+            return web.json_response({"error": "nothing chosen to download"}, status=400)
+        try:
+            located = await asyncio.to_thread(session_host().locate_items, str(body.get("name", "")), items)
+            plan = await asyncio.to_thread(plan_zip, located)
+        except SessionError as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        except ZipTooBig as big:
+            return web.json_response({"error": str(big), "files": big.files, "size": big.size}, status=413)
+        handle, temp = tempfile.mkstemp(suffix=".zip", prefix="aicleaner-")
+        os.close(handle)
+        dest = Path(temp)
+        try:
+            await asyncio.to_thread(write_zip, plan, dest)
+            single = located[0][1] if len(located) == 1 and located[0][1].is_dir() else None
+            filename = f"{single.name}.zip" if single else f"files-{datetime.now():%Y%m%d-%H%M%S}.zip"
+            from .tunnelgate import INSIDE_TUNNEL, MAX_SEALED_FILE
+            if request.get(INSIDE_TUNNEL):
+                # Inside a sealed envelope: the whole zip as one answer, to be sealed (D168).
+                size = dest.stat().st_size
+                if size > MAX_SEALED_FILE:
+                    return web.json_response({"error": f"the zip is {size // (1024 * 1024)} MB; through the encrypted "
+                                                       f"tunnel the limit is {MAX_SEALED_FILE // (1024 * 1024)} MB"}, status=413)
+                return web.Response(body=await asyncio.to_thread(dest.read_bytes), content_type="application/zip",
+                                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}"})
+            response = web.StreamResponse(headers={
+                "Content-Type": "application/zip",
+                "Content-Disposition": f"attachment; filename*=UTF-8''{urllib.parse.quote(filename)}",
+                "Content-Length": str(dest.stat().st_size)})
+            await response.prepare(request)
+            with dest.open("rb") as fh:
+                while chunk := fh.read(256 * 1024):
+                    await response.write(chunk)
+            await response.write_eof()
+            return response
+        finally:
+            dest.unlink(missing_ok=True)
+
+    async def session_file_stat(request: web.Request) -> web.Response:
+        """Many files at once: the page's 15-second changed-on-disk check."""
+        from .session import SessionError
+
+        body = await request.json()
+        files = [f for f in (body.get("files") or []) if isinstance(f, dict)]
+        try:
+            answer = await asyncio.to_thread(session_host().stat_files, str(body.get("name", "")), files)
+        except SessionError as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        return web.json_response({"files": answer, "checked_at": time.time()})
+
+    async def session_files(request: web.Request) -> web.Response:
+        """One folder of one configured project, so a path can be pointed at rather than typed."""
+        from .session import SessionError
+
+        name, root = request.query.get("name", ""), request.query.get("root", "")
+        path = request.query.get("path", "")
+        try:
+            # Off the loop: a folder listing is filesystem work, and the share is normally a
+            # OneDrive folder that can take seconds when the OS has nothing cached. Left in the
+            # coroutine it stopped the single event loop serving anything - the other UI requests,
+            # the poll, and the proxy, which shares it.
+            listing = await asyncio.to_thread(
+                lambda: session_host().browse(name=name, root=root, path=path))
+        except SessionError as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        return web.json_response(listing)
+
+    async def autocorrect_words(request: web.Request) -> web.Response:
+        """The prompt autocorrect's word list (feature 94), grouped by SCOWL band (10 = most common),
+        each band one space-separated string. About 75,000 words: cached by the browser for a day,
+        revalidated against the file's ETag, compressed on the wire."""
+        path = Path(__file__).resolve().parent / "data" / "autocorrect-words.txt"
+        # Words it knows with their capitals - days, months, product names (feature 100).
+        terms_path = path.with_name("autocorrect-terms.txt")
+        # Developer words SCOWL does not have (2026-10-14 review), served in band 50.
+        extra_path = path.with_name("autocorrect-extra.txt")
+        try:
+            stat = path.stat()
+            terms_stat = terms_path.stat()
+            extra_stat = extra_path.stat()
+        except OSError:
+            return web.json_response({"bands": {}, "terms": []})
+        tag = (f'"{int(stat.st_mtime)}-{stat.st_size}-{int(terms_stat.st_mtime)}-{terms_stat.st_size}'
+               f'-{int(extra_stat.st_mtime)}-{extra_stat.st_size}"')
+        if request.headers.get("If-None-Match") == tag:
+            return web.Response(status=304, headers={"ETag": tag})
+
+        def read() -> dict[str, list[str]]:
+            bands: dict[str, list[str]] = {}
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line and not line.startswith("#") and "\t" in line:
+                    word, band = line.split("\t", 1)
+                    bands.setdefault(band.strip(), []).append(word)
+            bands.setdefault("50", []).extend(extra_words())
+            return bands
+
+        bands = await asyncio.to_thread(read)
+        terms = [line.strip() for line in terms_path.read_text(encoding="utf-8").splitlines()
+                 if line.strip() and not line.startswith("#")]
+        response = web.json_response({"bands": {b: " ".join(ws) for b, ws in bands.items()}, "terms": terms},
+                                     headers={"ETag": tag, "Cache-Control": "private, max-age=86400"})
+        response.enable_compression()
+        return response
+
+    async def autocorrect_clients(request: web.Request) -> web.Response:
+        """The single words in the filter's client names (feature 94), for autocorrect to leave alone
+        when the user chose to - real names, as the rest of the page shows them."""
+        words: set[str] = set()
+        handle = getattr(proxy, "_handle", None) if proxy is not None else None
+        mapper = handle.mapper if handle is not None else None
+        for form in (getattr(mapper, "forms", None) or []):
+            for word in re.findall(r"[A-Za-z][A-Za-z']+", str(getattr(form, "real", ""))):
+                words.add(word.lower())
+        return web.json_response({"words": sorted(words)})
+
+    async def debug_timings(request: web.Request) -> web.Response:
+        """The page's timing report (feature 91), written to logs/timings-<date>.jsonl - only while
+        Diagnostics records timings; otherwise accepted and dropped."""
+        from . import timing
+
+
+        if proxy is None or not timing.active(proxy.cfg):
+            return web.json_response({"ok": True, "kept": 0})
+        body = await request.json()
+        who = "remote" if request.get(REMOTE) else "local"
+        kept = await asyncio.to_thread(proxy.timing_log.write, body.get("entries") or [], who)
+        return web.json_response({"ok": True, "kept": kept})
+
+    async def editor_ps_commands(request: web.Request) -> web.Response:
+        """The PowerShell commands on this machine, for the file editor's completion (feature 80).
+        Compact, and cached by the page against an ETag: about 40,000 with Az and Graph."""
+        ps = proxy.ps_commands
+        tag = ps.version()
+        if request.headers.get("If-None-Match") == tag:
+            return web.Response(status=304, headers={"ETag": tag})
+        answer = await asyncio.to_thread(ps.compact)
+        return web.json_response(answer, headers={"ETag": ps.version(), "Cache-Control": "no-cache"})
+
+    async def editor_ps_parameters(request: web.Request) -> web.Response:
+        """One command's own parameters (feature 80), fetched when the editor first needs them."""
+        try:
+            found = await asyncio.to_thread(proxy.ps_commands.parameters, request.query.get("command", ""))
+        except ValueError as problem:
+            return err(problem)
+        return web.json_response({"command": request.query.get("command", ""), "parameters": found})
+
+    async def session_search(request: web.Request) -> web.Response:
+        """Files and folders by name across every folder a session's tree shows (feature 90)."""
+        from .session import SessionError
+
+        name, query = request.query.get("name", ""), request.query.get("q", "")
+        try:
+            more = request.query.get("more") == "1"          # carry on past the time limit (D146)
+            found = await asyncio.to_thread(lambda: session_host().search(name, query, more=more))
+        except SessionError as problem:
+            return err(problem)
+        return web.json_response(found)
+
+    # Which folders are open in a session's tree, per client (D73). View state, on this machine,
+    # beside profiles.json - never in the shared client file.
+    def tree_state():
+        from .treestate import TREE_STATE_FILE, TreeState
+        return TreeState(mf.mapping_path.parent / TREE_STATE_FILE)
+
+    async def session_tree_state(request: web.Request) -> web.Response:
+        client = request.query.get("client", "").strip()
+        return web.json_response({"client": client, "open": tree_state().load(client) if client else []})
+
+    async def session_tree_state_save(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            kept = tree_state().save(str(body.get("client", "")).strip(), body.get("open"))
+        except ValueError as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "open": kept})
+
+    # Which file tabs each session has open (D136), beside the tree's state, never in a client file.
+    def tabs_state():
+        from .tabstate import TABS_STATE_FILE, TabState
+        return TabState(mf.mapping_path.parent / TABS_STATE_FILE)
+
+    async def session_tabs_state(request: web.Request) -> web.Response:
+        name = request.query.get("name", "").strip()
+        return web.json_response({"name": name, **(tabs_state().load(name) if name else {"tabs": [], "active": ""})})
+
+    async def session_tabs_state_save(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            kept = tabs_state().save(str(body.get("name", "")).strip(), body.get("tabs"), body.get("active"))
+        except ValueError as exc:
+            return err(exc)
+        return web.json_response({"ok": True, **kept})
+
+    async def session_workspace_cwd(request: web.Request) -> web.Response:
+        """Add the terminal working directory to a profile's workspace file (feature 71).
+
+        Offered on the page, written only here and only when asked. Recomputed from the profile
+        rather than trusting a path from the page: the home folder (D99), named as the profile's
+        first workspace file names it. A setting already there is never overwritten."""
+        from . import workspace
+
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        # A folder chosen on the page (D131), for a profile saved or not: written only when the
+        # file is a workspace file inside the allowed folders and lists that name itself.
+        chosen_ws, chosen = str(body.get("workspace") or "").strip(), str(body.get("folder") or "").strip()
+        if chosen_ws or chosen:
+            from .folders import FolderError, check_usable
+
+            try:
+                check_usable(str(Path(chosen_ws).parent), folder_roots(), "workspace file's folder")
+            except FolderError as problem:
+                return err(problem, status=403)
+            if not chosen_ws.lower().endswith(".code-workspace") or not Path(chosen_ws).is_file():
+                return err(ValueError(f"{chosen_ws} is not a workspace file"))
+            names = [n for n, _f in await asyncio.to_thread(workspace.cwd_choices, chosen_ws)]
+            if chosen not in names:
+                return err(ValueError(f"{Path(chosen_ws).name} does not list a folder called {chosen}"))
+            value = "${workspaceFolder:" + chosen + "}"
+            try:
+                await asyncio.to_thread(workspace.add_cwd_setting, chosen_ws, value)
+            except (OSError, ValueError) as exc:
+                return err(exc)
+            return web.json_response({"ok": True, "workspace": chosen_ws, "value": value})
+        entry = next((e for e in proxy.read_profiles() if e.get("name") == name), None) if proxy else None
+        if entry is None:
+            return err(ValueError(f"no profile named {name!r}"))
+        view = (await asyncio.to_thread(_workspace_view, [entry], mf)).get(name) or {}
+        folder, found = view.get("folder", ""), view.get("workspace", "")
+        suggested = (view.get("cwd") or {}).get("suggested", "")
+        if not folder or not found or not suggested:
+            return err(ValueError("nothing to set: no workspace file lists the home folder, or it already has the setting"))
+        try:
+            await asyncio.to_thread(workspace.add_cwd_setting, found, suggested)
+        except (OSError, ValueError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "workspace": found, "value": suggested})
+
+    async def session_workspace_files(request: web.Request) -> web.Response:
+        """The `.code-workspace` files directly in a folder the pages may reach, for the profile
+        editor's Browse (D99). Names only, never contents."""
+        from .fileio import network_path
+        from .folders import FolderError, check_usable
+        from .workspace import WORKSPACE_GLOB
+
+        folder = str(request.query.get("folder", "")).strip()
+        if not folder or network_path(folder):
+            return err(ValueError("give a folder on this machine"))
+        try:
+            check_usable(folder, folder_roots(), "folder")
+        except FolderError as problem:
+            return err(problem, status=403)
+        found = await asyncio.to_thread(lambda: sorted(str(p) for p in Path(folder).glob(WORKSPACE_GLOB)))
+        return web.json_response({"files": found})
+
+    async def session_workspace_view(request: web.Request) -> web.Response:
+        """One profile's workspace hints worked out from what the editor holds now, saved or not
+        (the user, 2026-10-04): removing a folder has to take its workspace file's offer with it,
+        and the page cannot read the disk to know. Every place is held to folders.roots first, as
+        saving holds it; one outside them is left out of the answer rather than read."""
+        body = await request.json()
+        entry = body.get("profile") if isinstance(body, dict) else None
+        if not isinstance(entry, dict):
+            return err(ValueError("send {profile: {...}}"))
+        clean = clean_profile(entry)
+        view = await asyncio.to_thread(_workspace_view, [clean], None, proxy.share_store.load())
+        return web.json_response({"workspace": view.get(clean["name"])})
+
+    def clean_profile(entry: dict) -> dict:
+        """What the editor holds, saved or not, with every place held to folders.roots first, as
+        saving holds it; one outside them is left out rather than read (workspace-view, trust)."""
+        from .fileio import network_path
+        from .folders import FolderError, check_usable
+
+        roots = folder_roots()
+
+        def allowed(path: str, what: str) -> bool:
+            if not str(path).strip() or network_path(str(path)):
+                return False
+            try:
+                check_usable(str(path), roots, what)
+            except FolderError:
+                return False
+            return True
+
+        return {
+            "name": str(entry.get("name", "")),
+            "client": str(entry.get("client", "")),
+            "projects": [p for p in entry.get("projects") or [] if allowed(p, "project folder")],
+            "workspaces": [w for w in entry.get("workspaces") or []
+                           if allowed(str(Path(str(w)).parent), "workspace file's folder")],
+            "home_override": (entry.get("home_override") or "")
+            if allowed(entry.get("home_override") or "", "home folder") else "",
+            "home_derived_was": str(entry.get("home_derived_was") or ""),
+        }
+
+    async def trust_inputs(request: web.Request) -> tuple[dict, list[str], str, list[str]]:
+        """The folders a profile needs trusted (2026-10-16, item C): hand-added folders and the share
+        with their children, the home folder, the workspace files' folders."""
+        body = await request.json()
+        entry = body.get("profile") if isinstance(body, dict) else None
+        if not isinstance(entry, dict):
+            raise ValueError("send {profile: {...}}")
+        clean = clean_profile(entry)
+        view = (await asyncio.to_thread(_workspace_view, [clean], None, proxy.share_store.load())).get(clean["name"]) or {}
+        folders = list(clean["projects"]) + ([str(view["share"])] if view.get("share") else [])
+        home = str((view.get("home") or {}).get("folder") or "")
+        workspace_dirs = [str(Path(w).parent) for w in (view.get("workspaces") or [])]
+        return clean, folders, home, workspace_dirs
+
+    async def session_trust_check(request: web.Request) -> web.Response:
+        from . import claudetrust
+        # AICLEANER_SKIP_TRUST_CHECK: test servers, whose temp folders nothing trusts (see conftest).
+        if os.environ.get("AICLEANER_SKIP_TRUST_CHECK") == "1":
+            return web.json_response({"missing": [], "can_add": False, "names": claudetrust.LIST_NAMES})
+        try:
+            _clean, folders, home, workspace_dirs = await trust_inputs(request)
+            missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
+        except (ValueError, claudetrust.TrustError) as exc:
+            return err(exc)
+        return web.json_response({"missing": missing, "can_add": True,
+                                  "names": claudetrust.LIST_NAMES})
+
+    async def session_trust_add(request: web.Request) -> web.Response:
+        """Add what is missing to Claude Code's files - the person's own Claude Code settings, not
+        AI Cleaner's. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
+        from . import claudetrust
+        try:
+            clean, folders, home, workspace_dirs = await trust_inputs(request)
+            missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
+            done = await asyncio.to_thread(claudetrust.add, missing, clean["name"] or "a project profile")
+        except (ValueError, OSError, claudetrust.TrustError) as exc:
+            return err(exc)
+        return web.json_response(done)
+
+    async def session_workspace_create(request: web.Request) -> web.Response:
+        """Write the new workspace file the page offered (D99) and make it the profile's first.
+
+        Recomputed here, never taken from the page; never over an existing file; only inside the
+        allowed folder locations. The profile is saved with the new file first."""
+        from . import workspace
+        from .folders import is_usable
+
+        name = str((await request.json()).get("name", "")).strip()
+        entries = proxy.read_profiles() if proxy else []
+        entry = next((e for e in entries if e.get("name") == name), None)
+        if entry is None:
+            return err(ValueError(f"no profile named {name!r}"))
+        create = ((await asyncio.to_thread(_workspace_view, [entry], mf)).get(name) or {}).get("create")
+        if not create:
+            return err(ValueError("nothing to create: the profile already has a workspace file, or no home folder"))
+        path = Path(create["path"])
+        if not is_usable(path.parent, proxy._allowed_roots()):
+            return err(ValueError(f"{path.parent} is outside the folders the pages may reach"), status=403)
+        try:
+            await asyncio.to_thread(workspace.write_new_workspace, path, create["text"])
+            updated = [{**e, "workspaces": [str(path)] + list(e.get("workspaces") or [])} if e is entry else e
+                       for e in entries]
+            proxy.profile_store.save(updated, set(proxy.client_labels()))
+            proxy.reload_profiles()
+        except (OSError, ValueError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "workspace": str(path)})
+
+    async def session_setup_fix(request: web.Request) -> web.Response:
+        """Initialise git in the home folder, or write a starter CLAUDE.md there (2026-10-16, item B).
+
+        As workspace-create: the finding is recomputed here, never taken from the page; only a fix
+        the server itself offers for that folder is done, and only inside the reachable folders."""
+        from . import setupcheck
+        from .folders import is_usable
+
+        body = await request.json()
+        name, folder, fix = str(body.get("name", "")).strip(), str(body.get("folder", "")), str(body.get("fix", ""))
+        entries = proxy.read_profiles() if proxy else []
+        entry = next((e for e in entries if e.get("name") == name), None)
+        if entry is None:
+            return err(ValueError(f"no profile named {name!r} - save it first"))
+        view = (await asyncio.to_thread(_workspace_view, [entry], mf, proxy.share_store.load())).get(name) or {}
+        offered = [f for f in view.get("setup") or [] if f.get("fix") == fix and setupcheck._same(f["folder"], folder)]
+        if not offered:
+            return err(ValueError("that fix is not offered for that folder"))
+        target = Path(offered[0]["folder"])
+        if not is_usable(target, proxy._allowed_roots()):
+            return err(ValueError(f"{target} is outside the folders the pages may reach"), status=403)
+        try:
+            if fix == "git_init":
+                said = await asyncio.to_thread(setupcheck.git_init, target)
+            else:
+                text = setupcheck.claude_md_text(name, str(target), [str(f) for f in entry.get("projects") or []],
+                                                 str(view.get("share") or ""))
+                said = await asyncio.to_thread(setupcheck.write_claude_md, target, text)
+        except (OSError, RuntimeError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "said": said})
+
+    async def session_start(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        body = await request.json()
+        if proxy is not None:
+            # A session may open a project whose .mcp.json is new: audit before it starts (H11).
+            await proxy.audit_mcp()
+        # Stability spec S2: short of memory, a start asks first - another session is what took the machine down
+        # twice on 2026-10-24. The page shows the numbers and starts anyway when told to.
+        if not body.get("low_memory_ok"):
+            memory = await asyncio.to_thread(lifecycle.proctree.memory)
+            if lifecycle.low_memory(memory):
+                free = (memory["commit_limit_mb"] - memory["commit_mb"]) / 1024
+                return web.json_response(
+                    {"error": f"Memory is nearly full: {free:.1f} GB of {memory['commit_limit_mb'] / 1024:.0f} GB left.",
+                     "why": "Another session would take more. Stop a session you are not using first, or start anyway.",
+                     "offer": {"action": "start_low_memory", "label": "Start anyway", **memory}}, status=409)
+        try:
+            state = await session_host().start(name=str(body.get("name", "")),
+                                               project=str(body.get("project", "")),
+                                               resume=str(body.get("resume", "")),
+                                               model=str(body.get("model", "")),
+                                               title=str(body.get("title", ""))[:200])
+        except SessionError as exc:
+            return err(exc)
+        return web.json_response(state)
+
+    async def conversation_move_preview(request: web.Request) -> web.Response:
+        """What a move would take (J3): the files the conversation made, and where it could go."""
+        from .session import SessionError
+
+        name, conv = request.query.get("name", ""), request.query.get("id", "")
+        try:
+            host = session_host()
+            files = await asyncio.to_thread(host.files_of_conversation, name, conv)
+            here = host.profile(name).name
+        except SessionError as exc:
+            return err(exc)
+        targets = [{"name": p.name, "client": p.label if p.client else "", "home": host.home_of(p).get("folder") or ""}
+                   for p in host.profiles if p.name != here and not getattr(p, "worktree_of", "")]
+        return web.json_response({"files": files, "targets": targets})
+
+    async def conversation_move(request: web.Request) -> web.Response:
+        """A conversation moved to another project session (J3), with its files when asked."""
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            done = await asyncio.to_thread(session_host().move_conversation, str(body.get("name", "")),
+                                           str(body.get("id", "")), str(body.get("to", "")), bool(body.get("files")))
+        except (SessionError, OSError) as exc:
+            return err(exc)
+        return web.json_response(done)
+
+    async def session_agent(request: web.Request) -> web.Response:
+        """The AI service a project session's conversations use (item K), kept with the profile. Running and
+        idle: a new conversation with the chosen service (a conversation cannot change service); busy:
+        refused, saying why."""
+        from .agents import AGENTS
+        from .profiles import ProfileError
+        from .session import SessionError
+
+        body = await request.json()
+        name, wanted = str(body.get("name", "")), str(body.get("agent", "")).strip().lower()
+        if wanted not in AGENTS:
+            return err(ValueError(f"{wanted or 'that'} is not an AI service AI Cleaner knows"))
+        try:
+            host = session_host()
+            profile = host.profile(name)
+            base = profile.worktree_of or profile.name
+            entries, _problem = proxy.profile_store.load()
+            entry = next((e for e in entries if e["name"] == base), None)
+            if entry is None:
+                return err(ValueError(f"{base} is not a saved project session"))
+            running = host.sessions.get(profile.name)
+            if running is not None and running.running and (entry.get("agent") or "claude") != wanted:
+                from .session import work_in_progress
+                why = work_in_progress(running)
+                if why:
+                    return err(SessionError(f"{profile.name}: {why}"), status=409)
+            entry["agent"] = wanted
+            await asyncio.to_thread(proxy.profile_store.save, entries, set(proxy.client_labels()) or None)
+            proxy.reload_profiles()
+            if running is not None and running.running and running.agent != wanted:
+                await host.switch(name=profile.name, resume="", title="")
+        except (SessionError, ProfileError, ValueError) as exc:
+            return err(exc, status=409 if isinstance(exc, SessionError) else 400)
+        return web.json_response({"ok": True, "name": profile.name, "agent": wanted})
+
+    async def session_switch(request: web.Request) -> web.Response:
+        """Another conversation in a running session (item J), refused while there is work in progress."""
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            when = str(body.get("when", ""))
+            if when not in ("", "now", "finish"):
+                raise SessionError(f"when is now, finish or left out, not {when!r}")
+            state = await session_host().switch(name=str(body.get("name", "")), resume=str(body.get("resume", "")),
+                                                title=str(body.get("title", ""))[:200], when=when)
+        except SessionError as exc:
+            return err(exc, status=409)
+        return web.json_response(state)
+
+    # ---- casual chats and Chat now (item J, 2026-10-20) ----------------------------------------
+
+    async def casual_get(request: web.Request) -> web.Response:
+        from . import casual
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        entries, _problem = proxy.profile_store.load()
+        roots = list(proxy.cfg.folder_roots)
+        # Only what lies inside the root folders is offered: they are what aicleaner may reach (Brad, 2026-10-20).
+        offered = [s for s in await asyncio.to_thread(casual.suggestions) if casual.inside(Path(s["path"]), roots)]
+        return web.json_response({"folder": proxy.cfg.session_casual_folder, "has_roots": bool(roots),
+                                  "profile": casual.PROFILE if any(e["name"] == casual.PROFILE for e in entries) else "",
+                                  "suggestions": offered})
+
+    async def casual_post(request: web.Request) -> web.Response:
+        from .casual import CasualError
+        from .profiles import ProfileError
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        body = await json_or_empty(request)
+        try:
+            done = await asyncio.to_thread(proxy.set_casual_folder, str(body.get("folder", "")))
+        except (CasualError, ProfileError, ValueError, OSError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, **done})
+
+    async def chat_now(request: web.Request) -> web.Response:
+        """Chat now (item J): a new conversation in Casual chats - made if needed, Project Sessions turned
+        on if off, the session started, or switched to a new conversation when running and idle."""
+        from .profiles import ProfileError
+        from .session import SessionError
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        try:
+            name = await asyncio.to_thread(proxy.casual_profile)
+        except (ProfileError, ValueError, OSError) as exc:
+            return err(exc)
+        if not name:
+            # An expected answer, not a failure: the page asks for the folder and tries again.
+            return web.json_response({"ok": False, "needs_folder": True})
+        if not proxy.cfg.session_enabled:
+            proxy.cfg.update_settings({"session.enabled": True})
+            await proxy.apply_session_enabled()
+            proxy.reload_profiles()
+        await proxy.audit_mcp()
+        try:
+            await session_host().switch(name=name, resume="", title="")
+        except SessionError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True, "name": name})
+
+    async def session_prompt(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        from .promptpictures import PictureError, checked
+
+        body = await request.json()
+        try:
+            # Pictures attached on the page (D216), checked before anything is queued or sent.
+            images = checked(body.get("images"))
+        except PictureError as exc:
+            return err(exc, status=400)
+        try:
+            # "queued": a turn is running, so it waits on the page until that turn ends (D176).
+            from .origin import page_note
+            # Where it was typed, said to Claude (the user, 2026-10-18): remote access or this machine.
+            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""))
+            outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")), origin=note,
+                                                  images=images)
+        except SessionError as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "outcome": outcome})
+
+    async def session_queue_send(request: web.Request) -> web.Response:
+        """A waiting prompt sent now: first in line, and the running turn interrupted (D176)."""
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            outcome = await session_host().send_queued_now(str(body.get("id", "")), name=str(body.get("name", "")))
+        except SessionError as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "outcome": outcome})
+
+    async def session_queue_cancel(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            images = await session_host().cancel_queued(str(body.get("id", "")), name=str(body.get("name", "")))
+        except SessionError as exc:
+            return err(exc)
+        # Its pictures back to the page that cancelled it (D216), to attach again with the words.
+        return web.json_response({"ok": True, **({"images": images} if images else {})})
+
+    async def session_deliver(request: web.Request) -> web.Response:
+        """Feature 119: asked by the PostToolUse hook after every tool call, with the conversation's
+        id. A Session-page session's waiting prompts are taken off its queue and handed back, to
+        reach Claude between tool calls rather than at the end of the turn. This machine only: the
+        hook runs here, and nothing remote has a reason to empty a queue this way."""
+        if request.get(REMOTE):
+            return web.json_response({"ok": False, "error": "this machine only"}, status=403)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        session = getattr(proxy, "session", None)
+        taken = session.take_waiting(str(body.get("session_id", ""))) if session is not None else []
+        if not taken:
+            return web.json_response({"ok": True, "text": ""})
+        lead = deliver_lead(len(taken), bool(proxy is not None and proxy.cfg.session_turn_summary))
+        find = getattr(session, "origin_of", None)
+        origin = find(str(body.get("session_id", ""))) if find else ""
+        return web.json_response({"ok": True, "text": "\n\n".join([lead, *taken, *([origin] if origin else [])])})
+
+    async def tool_check(request: web.Request) -> web.Response:
+        """Asked by the PreToolUse hook before every tool call, with its id: a call in which two
+        different spellings come back as the same real name is stopped, with the reason (the rename
+        collapse, bug report 2026-10-14). This machine only, like the hook."""
+        if request.get(REMOTE):
+            return web.json_response({"ok": False, "error": "this machine only"}, status=403)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        reason = proxy.take_collapse(str(body.get("tool_use_id", ""))) if proxy is not None else ""
+        return web.json_response({"ok": True, "deny": bool(reason), "reason": reason})
+
+    async def session_suggest(request: web.Request) -> web.Response:
+        """Feature 139: code to insert at the editor's cursor, from the file's own project session - whichever AI
+        service it runs (Claude, Copilot CLI, Codex). Sent as a prompt like any other, so it is filtered and it
+        is in the conversation; this waits for that prompt's own turn (behind any running or queued one) and
+        answers with the code from the reply's first fenced block."""
+        from .origin import page_note
+        from .session import SessionError
+
+        body = await request.json()
+        name = str(body.get("name", ""))
+        path = str(body.get("path", ""))[:400]
+        language = re.sub(r"[^\w+-]", "", str(body.get("language", "")))[:30]
+        before = str(body.get("before", ""))[-6000:]
+        after = str(body.get("after", ""))[:2000]
+        line = int(body.get("line") or 0)
+        instruction = str(body.get("instruction", "")).strip()[:500]
+        text = (f"Code suggestion for {path or 'the open file'}, line {line} (from AI Cleaner's editor). "
+                "Reply with ONLY the code to insert at <CURSOR> - nothing before or after it, no explanation - "
+                f"in one fenced code block.{(' What it should do: ' + instruction) if instruction else ''}\n\n"
+                f"```{language}\n{before}<CURSOR>{after}\n```")
+        host = session_host()
+        try:
+            session = host._session(name)
+        except SessionError as exc:
+            return err(exc, status=409)
+        if not session.running:
+            return err(ValueError("the session is not running - start it to get suggestions"), status=409)
+        queue = session.watch()
+        try:
+            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""))
+            await host.prompt(text, name=name, origin=note)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 300
+            ours = False
+            said: list[str] = []
+            while True:
+                event = await asyncio.wait_for(queue.get(), max(1.0, deadline - loop.time()))
+                kind = event.get("type")
+                if kind == "prompt" and text in str(event.get("text", "")):
+                    ours = True                       # our prompt has gone; its turn starts now
+                elif ours and kind == "assistant":
+                    for block in (event.get("message") or {}).get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            said.append(str(block.get("text", "")))
+                elif ours and kind in ("result", "exited", "stopped", "interrupted"):
+                    break
+        except asyncio.TimeoutError:
+            return err(ValueError("no suggestion within 5 minutes"), status=504)
+        except SessionError as exc:
+            return err(exc, status=409)
+        finally:
+            session.unwatch(queue)
+        reply = "\n".join(said)
+        fenced = re.search(r"```[^\n]*\n(.*?)```", reply, re.S)
+        code = (fenced.group(1) if fenced else reply).rstrip("\n")
+        code = code.replace("<CURSOR>", "")
+        if not code.strip():
+            return err(ValueError("the reply held no code"), status=502)
+        return web.json_response({"ok": True, "code": code})
+
+    async def activity_seen(request: web.Request) -> web.Response:
+        """A page looked at a session (D200): its "has finished" alerts up to that turn are cleared on every
+        page, here and through remote access. Nothing secret moves - a name and a count."""
+        body = await json_or_empty(request)
+        host = getattr(proxy, "session", None) if proxy is not None else None
+        target = host.sessions.get(str(body.get("session", ""))) if host is not None else None
+        if target is not None:
+            try:
+                target.mark_seen(int(body.get("turns", 0)))
+            except (TypeError, ValueError):
+                return err(ValueError("turns must be a number"))
+        return web.json_response({"ok": True, "seen_turns": target.seen_turns if target is not None else 0})
+
+    async def tool_names(request: web.Request) -> web.Response:
+        """Asked by the PostToolUse hook after every tool call, with its id: whether real names were put
+        into its arguments, so the model can be told that what it sees as a token was written correctly
+        (D199). This machine only, like the hook."""
+        if request.get(REMOTE):
+            return web.json_response({"ok": False, "error": "this machine only"}, status=403)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = {}
+        restored = proxy.take_restored(str(body.get("tool_use_id", ""))) if proxy is not None else False
+        return web.json_response({"ok": True, "restored": restored})
+
+    async def session_stop(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            await session_host().stop(name=str(body.get("name", "")))
+        except SessionError as exc:
+            return err(exc)
+        return web.json_response({"ok": True})
+
+    async def session_interrupt(request: web.Request) -> web.Response:
+        """Stop the turn that is running and keep the session alive (feature 48, Escape).
+
+        Deliberately not session_stop with a nicer name. Stop closes stdin and kills the child;
+        this sends the CLI's own interrupt control request, so the conversation, its context and
+        its permission grants all survive. Binding Escape to Stop would have been worse than
+        leaving Escape unbound, which is why this had to exist before the key could.
+        """
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            state = await session_host().interrupt(name=str(body.get("name", "")),
+                                                   cancel_queued=body.get("cancel_queued", True) is not False)
+        except SessionError as exc:
+            return err(exc)
+        # "pending": sent, not yet answered. The page says so and waits for the event stream to
+        # report the answer, rather than calling it a failure.
+        return web.json_response({"ok": True, "state": state})
+
+    async def session_permission_mode(request: web.Request) -> web.Response:
+        """Change how this session asks before it acts, without restarting it.
+
+        Allowed over the tunnel for every mode including bypassPermissions (decided 2026-09-28).
+        He needs it from the phone, and the remote environment is one already trusted for client
+        work - the same reasoning as feature 54. The mode is validated in the session before it
+        reaches the CLI, so a typo comes back as a message rather than a session that will not
+        start.
+        """
+        from .session import SessionError
+
+        body = await request.json()
+        mode, live = str(body.get("mode", "")), True
+        try:
+            await session_host().set_permission_mode(name=str(body.get("name", "")), mode=mode)
+        except SessionError as exc:
+            # A stopped session is not an error here: setting the mode before starting one is the
+            # ordinary way to use this, and refusing would mean the only way to leave "manual" was
+            # to start a session in it first. An unknown mode still fails, because that is a typo.
+            if "no session is running" not in str(exc):
+                return err(exc)
+            live = False
+        # Remember it, so the next session starts the way this one ended rather than reverting to
+        # the built-in default. Persisting is best-effort: the live change already worked, and
+        # failing the request would say otherwise.
+        if proxy is not None and body.get("remember", True) is not False:
+            try:
+                proxy.cfg.update_settings({"session.permission_mode": mode})
+            except ValueError as exc:
+                return err(exc)                      # an unknown mode, and nothing was applied
+            except OSError as exc:
+                log.warning("permission mode changed but not saved: %s", exc)
+        return web.json_response({"ok": True, "mode": mode, "live": live})
+
+    async def session_permission_request(request: web.Request) -> web.Response:
+        """Claude Code, through the approval host, asking whether a tool may run. The request waits
+        here until someone answers on the page or the wait runs out."""
+        from .session import SessionError
+
+        # The token says which session is asking. With several running it is the routing as well as
+        # the proof: a request can only ever be parked in the transcript that raised it.
+        token = request.headers.get("X-Aicleaner-Approve", "")
+        try:
+            session = session_host().session_for_token(token)
+        except SessionError:
+            return web.json_response({"allow": False, "message": "aicleaner: not this session's approval host"},
+                                     status=403)
+        body = await request.json()
+        request_id = f"{session.profile.name if session.profile else 'ask'}-{session._sequence + 1}"
+        allowed = await session.ask_permission(request_id, str(body.get("tool", "a tool")),
+                                               body.get("input") or {})
+        # A question comes back answered (D58): the choices ride along with the allow.
+        if isinstance(allowed, dict):
+            return web.json_response({"allow": bool(allowed.get("allow")), "answers": allowed.get("answers")})
+        return web.json_response({"allow": bool(allowed)})
+
+    async def session_permission(request: web.Request) -> web.Response:
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            # The page says which session it is answering in, so an answer to a question that
+            # has already closed is kept in that transcript rather than refused (2026-10-01).
+            outcome = session_host().answer_permission(str(body.get("id", "")), bool(body.get("allow")),
+                                                       body.get("answers"), name=str(body.get("name", "")))
+        except (SessionError, ValueError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "late": outcome == "late"})
+
+    async def session_events(request: web.Request) -> web.Response:
+        """Everything the session says, as it says it."""
+        from .session import SessionError
+
+        name = request.query.get("name", "")
+        try:
+            session = session_host()._session(name)
+        except SessionError as exc:
+            return err(exc)
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                               "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+        await response.prepare(request)
+        queue = session.watch()
+        try:
+            for event in session.state()["events"]:
+                await response.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=20)
+                    await response.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+                except asyncio.TimeoutError:
+                    await response.write(b": keep-alive\n\n")  # through proxies and tunnels
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+        finally:
+            session.unwatch(queue)
+        return response
+
+    async def resolve(request: web.Request) -> web.Response:
+        body = await request.json()
+        value = str(body.get("value", "")).strip()
+        action = body.get("action")
+        try:
+            if action == "map":
+                cid = str(body["client"]).strip()
+                if cid == GLOBAL_ID:
+                    mf.ensure_global()
+                elif cid not in mf.load_tolerant(record=False)[0].sources:
+                    mf.add_client(cid, body.get("index"))
+                real = body.get("real") or value
+                # Look before resolving: `resolve` discards the candidate, and the candidate is
+                # where the evidence is - how often it was seen, in which projects and sessions,
+                # alongside whose names (feature 30).
+                found = store.find(value)
+                tok = mf.add_form(cid, real, body.get("token"), source=SOURCE_REVIEW)
+                _record_provenance(mf, cid, real, SOURCE_REVIEW, found,
+                                   note=f"accepted in Review as {cid}")
+                store.resolve(value, "mapped")
+                return web.json_response({"ok": True, "token": tok})
+            if action in ("ignore", "dismiss"):
+                store.resolve(value, action)
+                return web.json_response({"ok": True})
+            return err(ValueError("action must be map, ignore or dismiss"))
+        except (MappingError, KeyError, ValueError) as exc:
+            # "x is in both A and B" usually means x is public (a built-in role id, a vendor host):
+            # offer that instead of making the user choose which client owns it.
+            suggest = "public" if "is in both" in str(exc) else None
+            return err(exc, suggest=suggest)
+
+    async def restore_candidates(request: web.Request) -> web.Response:
+        """Review's undo (D45): put candidates back as they were, after undoing what was done.
+
+        Body: `candidates` - the records exactly as /api/candidates listed them before the action;
+        at most one of `unignore` (the scope they were ignored in) or `unmap` (the client they were
+        mapped to). An entry another window has already taken out needs no inverse, so it is not a
+        refusal: the candidate coming back is what was asked for.
+        """
+        body = await request.json()
+        records = body.get("candidates")
+        unignore = str(body.get("unignore") or "").strip()
+        unmap = str(body.get("unmap") or "").strip()
+        if not isinstance(records, list) or not records or not all(isinstance(r, dict) for r in records):
+            return err(ValueError("candidates must be a list of the records /api/candidates listed"))
+        if unignore and unmap:
+            return err(ValueError("a candidate is undone from one action: unignore or unmap, not both"))
+        mapped: set[str] = set()
+        if unmap:
+            try:
+                mapped = {str(f.get("real", "")) for f in mf.export_client(unmap).get("forms", [])}
+            except (MappingError, KeyError, ValueError):
+                mapped = set()           # the client itself is gone: nothing of it to take out
+        done: list[str] = []
+        refused: list[dict[str, str]] = []
+        for record in records:
+            value = str(record.get("value") or "").strip()
+            if not value:
+                refused.append({"value": "", "why": "a record without a value cannot be put back"})
+                continue
+            try:
+                if unignore:
+                    mf.remove_ignore(value, unignore)
+                if unmap and value in mapped:
+                    mf.delete_form(unmap, value)
+                # The kind's count goes back too, or an undone mis-click still counts towards
+                # quieting the kind (feature 31).
+                store.restore({**record, "value": value},
+                              undoing="ignored" if unignore else "kept" if unmap else "")
+                done.append(value)
+            except (MappingError, KeyError, ValueError, TypeError) as exc:
+                refused.append({"value": value, "why": str(exc)})
+        return web.json_response({"ok": not refused, "done": done, "refused": refused})
+
+    async def snooze_kind_offer(request: web.Request) -> web.Response:
+        """"Not now" on a kind offer: hidden until the kind is ignored 50 more times (DECISIONS 42).
+        `undo` wakes it again."""
+        body = await request.json()
+        kind = str(body.get("kind", ""))
+        result = store.snooze_kind(kind, undo=bool(body.get("undo")))
+        if result is False:
+            return err(ValueError(f"{kind or 'that kind'} is not being offered, so there is nothing to snooze"))
+        return web.json_response({"ok": True, "kind": kind,
+                                  **({"back_after": result} if result is not True else {})})
+
+    async def treat_as_public(request: web.Request) -> web.Response:
+        """An identifier that is the same in every tenant: ignore it everywhere and remove the form
+        from whichever clients hold it (Global is per user, so it is not promoted there)."""
+        value = str((await request.json()).get("value", "")).strip()
+        if not value:
+            return err(ValueError("value is required"))
+        removed: list[str] = []
+        try:
+            loaded, _reports = mf.load_tolerant(record=False)
+            for client in loaded.data["clients"]:
+                cid = str(client.get("id", ""))
+                if any(str(f.get("real", "")).lower() == value.lower() for f in client.get("forms", []) or []):
+                    mf.delete_form(cid, value)
+                    removed.append(cid)
+            mf.add_ignore(value, GLOBAL_ID)
+            store.add_ignore(value)
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "removed_from": removed})
+
+    async def mapping(request: web.Request) -> web.Response:
+        loaded, _reports = mf.load_tolerant(record=False)
+        for c in loaded.data["clients"]:
+            c["_source"] = loaded.sources.get(c["id"], Path("?")).name
+        ids = [c["id"] for c in loaded.data["clients"]]
+        return web.json_response({**loaded.data, "layout": "clients/" if mf.client_files() else "client-map.json",
+                                  "next_index": mf.next_index(), "archived": mf.archived(),
+                                  "targets": ([GLOBAL_ID] if GLOBAL_ID not in ids else []) + ids})
+
+    async def renumber_client(request: web.Request) -> web.Response:
+        """A client's index changed (DECISIONS 67), before it is shared. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
+        body = await request.json()
+        try:
+            await asyncio.to_thread(mf.renumber, request.match_info["cid"], int(body.get("index", 0)))
+        except (MappingError, ValueError) as problem:
+            return err(problem)
+        return web.json_response({"ok": True})
+
+    def wiki_folder() -> Path:
+        """docs/wiki beside the package in an install (app/aicleaner, app/docs); in the repository from 1.0 the
+        package is under src/ and docs/ stays at the root, one level further up."""
+        package_parent = Path(__file__).resolve().parent.parent
+        for folder in (package_parent / "docs" / "wiki", package_parent.parent / "docs" / "wiki"):
+            if folder.is_dir():
+                return folder
+        return package_parent / "docs" / "wiki"
+
+    async def wiki_page(request: web.Request) -> web.Response:
+        """A page of the wiki (docs/wiki/<page>.md) from this install's own copy (2026-10-07). The
+        name is held to letters, digits and hyphens, so nothing outside that folder can be named."""
+        page = request.match_info["page"]
+        path = wiki_folder() / f"{page}.md"
+        if not WIKI_PAGE.fullmatch(page) or not path.is_file():
+            return web.json_response({"error": f"there is no wiki page called {page}"}, status=404)
+        text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+        return web.json_response({"page": page, "text": text})
+
+    async def wiki_index(request: web.Request) -> web.Response:
+        """The wiki's page names, Home first then A to Z: the top menu's "?" lists them (2026-10-15)."""
+        folder = wiki_folder()
+        names = sorted((p.stem for p in folder.glob("*.md") if WIKI_PAGE.fullmatch(p.stem)), key=str.lower)
+        if "Home" in names:
+            names.remove("Home")
+            names.insert(0, "Home")
+        return web.json_response({"pages": names})
+
+    async def others_additions(request: web.Request) -> web.Response:
+        """Forms someone else added to a shared client, not yet kept on this PC (DECISIONS 67)."""
+        return web.json_response({"me": mf.author,
+                                  "additions": await asyncio.to_thread(mf.others_additions)})
+
+    async def answer_addition(request: web.Request) -> web.Response:
+        """Keep another person's form (remembered here) or remove it from the shared file."""
+        body = await request.json()
+        cid, real, action = str(body.get("client", "")), str(body.get("real", "")), body.get("action")
+        try:
+            if action == "keep":
+                await asyncio.to_thread(mf.keep_addition, cid, real)
+            elif action == "drop":
+                await asyncio.to_thread(mf.delete_form, cid, real)
+            else:
+                raise ValueError("action is keep or drop")
+        except (MappingError, ValueError) as problem:
+            return err(problem)
+        return web.json_response({"ok": True})
+
+    async def join_client(request: web.Request) -> web.Response:
+        """A client a colleague shared, from its synced folder (DECISIONS 67). The folder is held to
+        the allowed folders like any other a page names. It changes what this PC loads. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
+        from .folders import FolderError, check_usable
+
+        body = await request.json()
+        folder = str(body.get("folder", "")).strip()
+        try:
+            check_usable(folder, folder_roots(), "shared client folder")
+            cid = await asyncio.to_thread(mf.join_shared, folder)
+        except FolderError as problem:
+            return err(problem, status=403)
+        except MappingError as problem:
+            return err(problem)
+        return web.json_response({"ok": True, "client": cid})
+
+    async def add_client(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            mf.add_client(str(body["id"]).strip(), body.get("index"), bool(body.get("expand_case", True)), body.get("label"))
+            return web.json_response({"ok": True})
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+
+    # ---- the Add Client wizard's drafts (feature 111) --------------------------------------------
+
+    def drafts():
+        from .clientdrafts import DRAFTS_FOLDER, DraftStore
+        base = Path(proxy.cfg.path).parent if proxy is not None and getattr(proxy.cfg, "path", None) else Path(log_dir).parent
+        return DraftStore(base / DRAFTS_FOLDER)
+
+    async def draft_list(request: web.Request) -> web.Response:
+        return web.json_response({"drafts": await asyncio.to_thread(drafts().list)})
+
+    async def draft_save(request: web.Request) -> web.Response:
+        from .clientdrafts import DraftError
+        try:
+            saved = await asyncio.to_thread(drafts().save, await request.json())
+        except (DraftError, ValueError, TypeError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "draft": saved})
+
+    async def draft_get(request: web.Request) -> web.Response:
+        from .clientdrafts import DraftError
+        try:
+            return web.json_response(await asyncio.to_thread(drafts().load, request.match_info["did"]))
+        except DraftError as exc:
+            return err(exc, status=404)
+
+    async def draft_delete(request: web.Request) -> web.Response:
+        from .clientdrafts import DraftError
+        try:
+            await asyncio.to_thread(drafts().delete, request.match_info["did"])
+        except DraftError as exc:
+            return err(exc)
+        return web.json_response({"ok": True})
+
+    async def draft_summary(request: web.Request) -> web.Response:
+        """The Finish page: the counts per kind, and the index the client would get."""
+        from .clientdrafts import DraftError, summary
+        from .mapping import client_index
+        try:
+            draft = await asyncio.to_thread(drafts().load, request.match_info["did"])
+        except DraftError as exc:
+            return err(exc, status=404)
+        out = summary(draft)
+        cid = draft["client_id"]
+        out["index"] = 0 if draft["mode"] == "global" else (client_index(cid) if cid else None)
+        return web.json_response(out)
+
+    async def draft_finish(request: web.Request) -> web.Response:
+        """Save: the draft becomes a client - its entries in one write, its email domains as rules,
+        its ticked scan finds as finds - and the draft goes. A refusal leaves no client behind."""
+        from .clientdrafts import DraftError, entries_of
+        from .mapping import ORIGIN_SCAN, SOURCE_SCAN
+        try:
+            draft = await asyncio.to_thread(drafts().load, request.match_info["did"])
+        except DraftError as exc:
+            return err(exc, status=404)
+        is_global = draft["mode"] == "global"
+        cid = GLOBAL_ID if is_global else draft["client_id"]
+        if not cid:
+            return err(ValueError("the client needs an id first (the Client name page)"))
+        entries, rules, found = entries_of(draft)
+        try:
+            index, added = await asyncio.to_thread(mf.create_client, cid, draft["label"] or None, entries, SOURCE_MANUAL)
+            scanned = await asyncio.to_thread(mf.add_forms, cid, found, ORIGIN_SCAN, SOURCE_SCAN) if found else []
+        except (MappingError, ValueError) as exc:
+            return err(exc)
+        for real, _token in added:
+            _record_provenance(mf, cid, real, SOURCE_MANUAL, note="added in the Add Client wizard")
+        for real, _token in scanned:
+            _record_provenance(mf, cid, real, SOURCE_SCAN, note="found by the Add Client wizard's repository scan")
+        ruled, refused = [], []
+        for domain in ([] if is_global else rules):
+            try:
+                await asyncio.to_thread(mf.set_email_rule, cid, domain, True)
+                ruled.append(domain)
+            except MappingError as exc:
+                refused.append(f"{domain}: {exc}")
+        await asyncio.to_thread(drafts().delete, draft["id"])
+        return web.json_response({"ok": True, "client": cid, "index": index, "added": len(added) + len(scanned),
+                                  "email_rules": ruled, "refused": refused})
+
+    async def wizard_lookup(request: web.Request) -> web.Response:
+        """A domain on the wizard's Domains page, looked up at Microsoft (feature 111): suggestions
+        to tick - the tenant, its SharePoint, its other domains, its sign-in name."""
+        from .tenantlookup import look_up
+        body = await request.json()
+        return web.json_response(await asyncio.to_thread(look_up, str(body.get("domain", ""))))
+
+    async def wizard_scan(request: web.Request) -> web.Response:
+        """The wizard's Scan page (feature 111): a repository read for the draft's names, the finds
+        returned to tick rather than queued for Review. Bounded by folders.roots like any scan."""
+        from .clientdrafts import DraftError, entries_of
+        from .folders import FolderError, FolderOutside, check_usable
+        from .mapping import Mapper, client_index, client_tokens
+        from .scan import scan_candidates
+        body = await request.json()
+        try:
+            folder = check_usable(str(body.get("folder", "")), folder_roots(), "folder to scan")
+            draft = await asyncio.to_thread(drafts().load, str(body.get("draft", "")))
+        except FolderOutside as problem:
+            return err(problem, status=403)
+        except (FolderError, DraftError) as problem:
+            return err(problem)
+        entries, _rules, _found = entries_of(draft)
+        cid = GLOBAL_ID if draft["mode"] == "global" else (draft["client_id"] or "draft-client")
+
+        def run() -> list[dict]:
+            data = mf.load_tolerant(record=False)[0].data
+            clients = [c for c in data.get("clients", []) if c.get("id") != cid]
+            names = [e for e in entries if not any(f.get("real") == e for c in clients for f in c.get("forms", []))]
+            temp = {"id": cid, "index": client_index(cid) if cid != GLOBAL_ID else 0, "forms": [{"real": r} for r in names]}
+            temp["forms"] = [{"real": r, "token": tok} for r, tok in client_tokens(temp).items()]
+            mapper = Mapper.from_dict({**data, "clients": clients + [temp]})
+            rows = scan_candidates(Path(folder), mapper, min_count=1)
+            return [{"value": r.value, "kind": r.kind, "confidence": r.confidence, "count": r.count,
+                     "theirs": r.client == cid} for r in rows][:300]
+
+        try:
+            rows = await asyncio.to_thread(run)
+        except (MappingError, OSError) as exc:
+            return err(exc)
+        return web.json_response({"folder": str(folder), "finds": rows})
+
+    async def add_form(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            cid, real = str(body["client"]), str(body["real"])
+            # The type chosen on the add row (2026-10-23); none or "auto" leaves it to the guess.
+            kind = str(body.get("kind") or "").strip() or None
+            tok = mf.add_form(cid, real, body.get("token"), source=SOURCE_MANUAL, kind=None if kind == "auto" else kind)
+            _record_provenance(mf, cid, real, SOURCE_MANUAL, note="typed in on the Clients page")
+            return web.json_response({"ok": True, "token": tok})
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+
+    async def preview_form_token(request: web.Request) -> web.Response:
+        """The token a name would get if added now, with the type chosen on the add row - nothing is written."""
+        body = await request.json()
+        try:
+            kind = str(body.get("kind") or "").strip()
+            tok = await asyncio.to_thread(mf.preview_token, str(body["client"]), str(body["real"]),
+                                          None if kind in ("", "auto") else kind)
+            return web.json_response({"ok": True, "token": tok})
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+
+    async def move_form(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            tok = mf.move_form(str(body["real"]), str(body["client"]), str(body["to"]))
+            return web.json_response({"ok": True, "token": tok})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def form_to_ignore(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            mf.form_to_ignore(str(body["client"]), str(body["real"]), str(body.get("scope", "global")))
+            store.add_ignore(str(body["real"]))   # and out of Review, if it is there
+            return web.json_response({"ok": True})
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+
+    async def whole_word(request: web.Request) -> web.Response:
+        """The entry's "whole word only" checkbox, and the canary fix on the Log page."""
+        body = await request.json()
+        try:
+            mf.set_whole_word(str(body["client"]), str(body["real"]), bool(body.get("on", True)))
+            return web.json_response({"ok": True})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def canary_ignore(request: web.Request) -> web.Response:
+        """The Log page's other canary fix: the entry the canary matched, ignored for its client or
+        everyone. The match may be a case variant, so the entry is looked up as the file spells it."""
+        body = await request.json()
+        try:
+            cid = str(body["client"])
+            real = mf.declared_real(cid, str(body["real"]))
+            mf.form_to_ignore(cid, real, str(body.get("scope", "global")))
+            store.add_ignore(real)
+            return web.json_response({"ok": True, "real": real})
+        except (MappingError, KeyError, ValueError) as exc:
+            return err(exc)
+
+    async def processes(request: web.Request) -> web.Response:
+        """Settings > Diagnostics > Processes: memory, each session's process tree as its job counts it, processes
+        left behind, the last pause, and the lifecycle log's recent events (spec 2026-10-24-session-lifecycle-
+        instrumentation.md). ?fresh=1 takes a new look instead of the last 5-minute one."""
+        monitor = proxy.lifecycle
+        snap: dict[str, Any] = {}
+        if monitor is not None:
+            if request.query.get("fresh") == "1" or not monitor.last_snapshot:
+                snap = await asyncio.to_thread(monitor.snapshot)
+            else:
+                snap = monitor.last_snapshot
+        wanted = ("session-start", "stop-requested", "stop-result", "kill", "limit-hit", "cli-exit", "broker-hold",
+                  "broker-hold-timeout", "broker-exit", "pause", "orphan", "gone", "proxy-start", "proxy-stop")
+        events = await asyncio.to_thread(lifecycle.read, Path(proxy.cfg.log_dir), 2, wanted, 60) if monitor else []
+        return web.json_response({"on": monitor is not None, "job_cleanup": lifecycle.job_cleanup,
+                                  "max_processes": lifecycle.max_processes, "max_memory_mb": lifecycle.max_memory_mb,
+                                  "snapshot": snap, "events": events})
+
+    async def move_ignore(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            mf.move_ignore(str(body["value"]), str(body.get("scope", "global")), str(body["to"]))
+            return web.json_response({"ok": True})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def archive_client(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            target = mf.archive_client(str(body["id"]).strip())
+            return web.json_response({"ok": True, "archived_to": str(target)})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def delete_form(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            mf.delete_form(str(body["client"]), str(body["real"]))
+            return web.json_response({"ok": True})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def delete_forms(request: web.Request) -> web.Response:
+        """Many entries, one write. The page sends a selection, not a row at a time."""
+        body = await request.json()
+        try:
+            reals = [str(r) for r in body["reals"]]
+            done, refused = mf.delete_forms(str(body["client"]), reals)
+            return web.json_response({"ok": True, "done": done,
+                                      "refused": [{"real": r, "why": w} for r, w in refused]})
+        except (MappingError, KeyError, TypeError) as exc:
+            return err(exc)
+
+    async def restore_forms(request: web.Request) -> web.Response:
+        """Put a bulk action back (D42).
+
+        One endpoint rather than an inverse per action, because every inverse is some of the same
+        three steps: take the values off an ignore list, take them out of Global, and put the
+        entries back with the tokens they had. The page says which apply; it knows, because it
+        took the snapshot before it acted.
+        """
+        body = await request.json()
+        try:
+            cid = str(body["client"])
+            entries = [{"real": str(e.get("real", "")), "token": str(e.get("token", ""))}
+                       for e in body.get("entries", [])]
+            unignore = str(body.get("unignore") or "")
+            if unignore:
+                mf.remove_ignores([e["real"] for e in entries], unignore)
+            if body.get("from_global"):
+                for entry in entries:
+                    with contextlib.suppress(MappingError):
+                        mf.delete_form(GLOBAL_ID, entry["real"])
+            # Undoing a copy-to-Global is the one case with nothing to put back: the client's own
+            # entry never left, only the Global copy was added. Restoring would report every one
+            # as "already back", which is true and useless.
+            restore = entries if body.get("restore", True) else []
+            done, refused = mf.restore_forms(cid, restore) if restore else (
+                [e["real"] for e in entries] if body.get("from_global") else [], [])
+            return web.json_response({"ok": True, "done": done,
+                                      "refused": [{"real": r, "why": w} for r, w in refused]})
+        except (MappingError, KeyError, TypeError, ValueError) as exc:
+            return err(exc)
+
+    async def forms_to_ignore(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            reals = [str(r) for r in body["reals"]]
+            done, refused = mf.forms_to_ignore(str(body["client"]), reals,
+                                               str(body.get("scope", "global")))
+            for real in done:
+                store.add_ignore(real)      # and out of Review, as the single-form route does
+            return web.json_response({"ok": True, "done": done,
+                                      "refused": [{"real": r, "why": w} for r, w in refused]})
+        except (MappingError, KeyError, TypeError, ValueError) as exc:
+            return err(exc)
+
+    async def ignore_list(request: web.Request) -> web.Response:
+        # The proxy-local list (store) and the shared files (mf) are shown together.
+        scoped = mf.ignores()
+        scoped["global"] = sorted(set(scoped["global"]) | set(store.ignore_entries()))
+        return web.json_response({"ignore": scoped["global"], "scopes": scoped})
+
+    async def ignore_add(request: web.Request) -> web.Response:
+        body = await request.json()
+        value = str(body.get("value", "")).strip()
+        scope = str(body.get("scope", "global")).strip() or "global"
+        try:
+            mf.add_ignore(value, scope)
+            store.add_ignore(value)  # drop from the queue now; the file reload covers the future
+            return web.json_response({"ok": True})
+        except (MappingError, ValueError) as exc:
+            return err(exc)
+
+    async def ignore_delete(request: web.Request) -> web.Response:
+        body = await request.json()
+        value = str(body.get("value", "")).strip()
+        scope = str(body.get("scope", "global")).strip() or "global"
+        try:
+            removed = mf.remove_ignore(value, scope)
+            # The queue's own suppression is dropped whatever the scope, because ignore_add sets it
+            # whatever the scope. Cleaning it only for "global" meant un-ignoring a string a client
+            # had ignored left it suppressed from Review for good: off that client's list, still
+            # never proposed, and showing under "global" in the listing because that is where the
+            # queue's entries are merged. The client's own ignore still applies to that client.
+            removed = store.remove_ignore(value) or removed
+            return web.json_response({"ok": removed})
+        except MappingError as exc:
+            return err(exc)
+
+    def in_use_folders() -> list[str]:
+        """Folders already configured before this list existed: a profile's project folders and a
+        client's share.
+
+        They stay reachable, because turning the setting on must not silently stop a session that
+        works today - and they grant nothing new, since a session could already read and write
+        them. They are NOT written into folders.roots: the Settings card shows them separately as
+        in use but unlisted, so the list can be corrected deliberately rather than inherited from a
+        guess this code made.
+        """
+        found: list[str] = []
+        if proxy is None:
+            return found
+        try:
+            entries, _problem = proxy.profile_store.load()
+            for entry in entries:
+                if isinstance(entry, dict):
+                    found.extend(str(p) for p in (entry.get("projects") or []))
+        except Exception:                # never let housekeeping stop a request being answered
+            pass
+        try:
+            found.extend(str(p) for p in proxy.share_store.load().values())
+        except Exception:
+            pass
+        return [f.strip() for f in found if str(f).strip()]
+
+    def folder_roots() -> list:
+        """The allowed roots, resolved. Read fresh each time so changing the list takes effect
+        without a restart - the whole point of it being a setting rather than a constant."""
+        from .folders import blocked_roots, roots_of
+
+        configured = list(proxy.cfg.folder_roots) if proxy is not None else []
+        return roots_of(configured + in_use_folders())
+
+    async def folders_list(request: web.Request) -> web.Response:
+        """What a picker may show at ?path=, which is never more than the roots allow.
+
+        An ancestor of a root lists only the children that lead to one, so a picker can open at the
+        drive without that being a disclosure: nothing on the way down mentions what else is there.
+        """
+        from .folders import FolderError, listing
+
+        try:
+            return web.json_response(listing(request.query.get("path", ""), folder_roots()))
+        except FolderError as problem:
+            return err(problem)
+
+    async def folders_new(request: web.Request) -> web.Response:
+        """A new folder inside an allowed one, from the picker (2026-09-30). Checked like any folder."""
+        from .folders import FolderError, make_folder
+
+        body = await request.json()
+        try:
+            made = make_folder(str(body.get("parent", "")), str(body.get("name", "")), folder_roots())
+        except FolderError as problem:
+            return err(problem)
+        return web.json_response({"ok": True, "path": str(made)})
+
+    async def models(request: web.Request) -> web.Response:
+        """Model names this machine could use (feature 45).
+
+        Offered, never enforced: the field stays free text, because a list that cannot be
+        fetched must not become a box you cannot type in.
+        """
+        answer = await asyncio.to_thread(model_list.get, request.query.get("refresh") == "1")
+        return web.json_response(answer)
+
+    async def folders_roots(request: web.Request) -> web.Response:
+        """The configured roots, and the system folders none of them may be."""
+        from .folders import blocked_roots
+        configured = list(proxy.cfg.folder_roots) if proxy is not None else []
+        known = {str(c).strip().lower() for c in configured}
+        # Reachable because they were already in use, not because anybody listed them. Shown so the
+        # list can be corrected deliberately rather than quietly inherited.
+        in_use = sorted({f for f in in_use_folders() if f.strip().lower() not in known})
+        return web.json_response({
+            "roots": configured,
+            "in_use": in_use,
+            # Settable from either side since 2026-09-27: the case is realising at a client site
+            # that a folder holding client content was never added. The de-risking is the system
+            # folder refusal in `folders.blocked_reason`, not a locked control.
+            "editable": True,
+            "blocked": [str(p) for p in blocked_roots()],
+        })
+
+    async def export_public(request: web.Request) -> web.Response:
+        """The list shipped with the install: identifiers that are the same in every tenant.
+
+        It is not a client's list and cannot be edited from here - it is rebuilt by
+        tools/build_public_identifiers.py and shipped - but it decides what is never queued and
+        never tokenised, so it should be readable by whoever is wondering why something was
+        skipped.
+        """
+        from .detect import PUBLIC_PATH
+
+        try:
+            text = PUBLIC_PATH.read_text(encoding="utf-8")
+        except OSError as problem:
+            return err(problem, status=404)
+        return web.Response(body=text.encode("utf-8"), content_type="application/json",
+                            headers={"Content-Disposition": 'attachment; filename="public-identifiers.json"'})
+
+    async def public_summary(request: web.Request) -> web.Response:
+        """What the shipped list holds, for the Settings card - without sending the whole thing."""
+        from .detect import public_identifiers, PUBLIC_PATH
+        import json as _json
+
+        guids, domains = public_identifiers()
+        generated, sources = "", []
+        try:
+            doc = _json.loads(PUBLIC_PATH.read_text(encoding="utf-8"))
+            generated, sources = str(doc.get("generated", "")), [str(x) for x in doc.get("sources", [])]
+        except (OSError, ValueError):
+            pass
+        return web.json_response({"guids": len(guids), "domains": len(domains),
+                                  "generated": generated, "sources": sources,
+                                  # What the list has actually taken out since the proxy started.
+                                  # The counterweight to a list that has three times nearly eaten
+                                  # real client data, silently, because a suppressed value simply
+                                  # never appears anywhere (D13).
+                                  "suppressed": store.suppressed()[:50]})
+
+    async def form_from_global(request: web.Request) -> web.Response:
+        """Global gives an identifier back to one client: {real, to}.
+
+        Either the client already has it - in which case its row is locked only because Global has
+        it, so dropping Global's copy unlocks it and the client keeps its token - or it does not,
+        and this is an ordinary move out of Global with a new token. The store decides which.
+        """
+        body = await request.json()
+        try:
+            token = mf.take_from_global(str(body["real"]), str(body["to"]))
+            return web.json_response({"ok": True, "token": token, "client": str(body["to"])})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def ignore_tokenise(request: web.Request) -> web.Response:
+        """Move a string off an ignore list and onto the token list in the same scope.
+
+        The reverse (token -> ignore) already existed a row at a time; this direction did not, so a
+        string ignored by mistake had to be un-ignored and then typed back in by hand. One call
+        rather than two from the page: the form is added first, because a declared entry is
+        tokenised whatever any ignore list says - so if the second half failed the string would be
+        protected but listed oddly, which is the safe way round to fail.
+        """
+        body = await request.json()
+        value = str(body.get("value", "")).strip()
+        scope = str(body.get("scope", "global")).strip() or "global"
+        if not value:
+            return err(ValueError("name the string to tokenise"))
+        try:
+            token = mf.add_form(scope, value)
+            mf.remove_ignore(value, scope)
+            store.remove_ignore(value)      # whatever the scope: see ignore_delete
+            return web.json_response({"ok": True, "value": value, "token": token, "client": scope})
+        except MappingError as exc:
+            return err(exc)
+
+    async def secrets_list(request: web.Request) -> web.Response:
+        if user_secrets is None:
+            return web.json_response({"entries": [], "enabled": False})
+        user_secrets.maybe_reload()
+        return web.json_response({"entries": user_secrets.entries(), "enabled": True, "path": str(user_secrets.path)})
+
+    async def secrets_add(request: web.Request) -> web.Response:
+        if user_secrets is None:
+            return err(ValueError("secrets redaction is off in aicleaner-config.json"))
+        body = await request.json()
+        try:
+            user_secrets.add(str(body.get("label", "")), str(body.get("value", "")))
+            return web.json_response({"ok": True})
+        except (ValueError, OSError) as exc:
+            return err(exc)
+
+    async def secrets_mode(request: web.Request) -> web.Response:
+        if proxy is None:
+            return err(ValueError("mode switch unavailable"))
+        if request.method == "GET":
+            return web.json_response({"mode": proxy.cfg.secrets_mode})
+        body = await request.json()
+        try:
+            proxy.set_secrets_mode(str(body.get("mode", "")))
+            return web.json_response({"ok": True, "mode": proxy.cfg.secrets_mode})
+        except (ValueError, OSError) as exc:
+            return err(exc)
+
+    async def scan_state(request: web.Request) -> web.Response:
+        """How the one scan there is went, or that there has not been one."""
+        if proxy is None:
+            return err(ValueError("scanning is unavailable"))
+        return web.json_response(proxy.scans.state())
+
+    async def scan_start(request: web.Request) -> web.Response:
+        """Run the scan the command line would run, from the page that knows the client.
+
+        Startable from anywhere, including through the tunnel: it always reads the machine the
+        proxy runs on, so a folder named from somewhere else is not ambiguous. What bounds it is
+        folders.roots, checked here - the picker only offers allowed folders, but a convenience
+        cannot be a control, and a typed path or a direct POST arrives at this same line.
+        """
+        from .folders import FolderError, FolderOutside, check_usable
+        from .scanjob import ScanError
+
+        if proxy is None:
+            return err(ValueError("scanning is unavailable"))
+        body = await request.json()
+        try:
+            folder = check_usable(str(body.get("folder", "")), folder_roots(), "folder to scan")
+        except FolderOutside as problem:
+            return err(problem, status=403)      # a decision to make in Settings
+        except FolderError as problem:
+            return err(problem)                  # a typo: 400, the same as it always was
+        try:
+            started = proxy.scans.start(kind=str(body.get("kind", "scan")),
+                                        folder=str(folder),
+                                        client=str(body.get("client", "")),
+                                        mode=str(body.get("mode", "report")),
+                                        known=set(proxy.client_labels()))
+        except ScanError as problem:
+            return err(problem)
+        return web.json_response(started)
+
+    async def config_get(request: web.Request) -> web.Response:
+        if proxy is None:
+            return err(ValueError("config unavailable"))
+        from .detect import SELECTABLE_KINDS
+        # Everything the Settings page shows comes from here: /healthz is not a UI route, so
+        # through the tunnel it is refused, and a second fetch of it failed the whole page.
+        return web.json_response({"settings": proxy.cfg.settings(), "kinds": SELECTABLE_KINDS,
+                                  "dialects": sorted(proxy.cfg.upstreams),
+                                  # Read-only, and shown whether it is empty or not: an entry here
+                                  # turns off every check this proxy performs, for that endpoint,
+                                  # so it should never be something you have to go looking for.
+                                  "allow_non_json_paths": list(proxy.cfg.allow_non_json_paths),
+                                  "remote": bool(request.get(REMOTE)), "remote_settings": list(REMOTE_SETTINGS),
+                                  "windows": bashguard.applies(),
+                                  "config_path": str(proxy.cfg.path or ""), "contact_file": contact.get().source, "clients": [c["id"] for c in mf.load_tolerant(record=False)[0].data["clients"]]})
+
+    async def editor_complete(request: web.Request) -> web.Response:
+        """Feature 143: code for the cursor, from the warm suggestion worker - '' when a newer request took its
+        place, the setting is off, or nothing fits."""
+        from pathlib import PureWindowsPath
+        from .completion import clean, prompt_for
+        if proxy is None or not proxy.cfg.editor_inline_suggest:
+            return web.json_response({"text": ""})
+        body = await request.json()
+        before, after = str(body.get("before") or ""), str(body.get("after") or "")
+        if len(before.strip()) < 3:
+            return web.json_response({"text": ""})
+        name = PureWindowsPath(str(body.get("path") or "")).name
+        worker = await proxy.completions()
+        if worker is None:
+            return web.json_response({"text": ""})
+        answer = await worker.complete(prompt_for(name, str(body.get("language") or ""), before, after))
+        return web.json_response({"text": clean(answer, before, after)})
+
+    async def editor_services(request: web.Request) -> web.Response:
+        """The File editor card's list: each service, whether it can answer here, and which one answers now."""
+        if proxy is None:
+            return web.json_response({"choice": "off", "active": "", "services": {}})
+        services = await asyncio.to_thread(proxy.editor_services)
+        worker = proxy._completions
+        return web.json_response({"choice": proxy.cfg.editor_inline_service, "services": services,
+                                  "active": proxy.editor_service(services),
+                                  "worker": worker.summary() if worker is not None else None})
+
+    async def claudeai_get(request: web.Request) -> web.Response:
+        if proxy is None:
+            return web.json_response({"enabled": False})
+        return web.json_response(await asyncio.to_thread(proxy.claudeai_summary))
+
+    async def copilot_get(request: web.Request) -> web.Response:
+        """The Copilot card (release 6): the switch's state, the certificate, VS Code's files, traffic."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        return web.json_response(await asyncio.to_thread(proxy.copilot_summary))
+
+    async def codetab_get(request: web.Request) -> web.Response:
+        """The Code tab card (feature 117): what is in place, and whether this Claude Code's PowerShell
+        tool can be kept off the proxy (2.1.296 and later)."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        from . import codetab_settings
+        version = await asyncio.to_thread(codetab_settings.claude_version)
+        return web.json_response({**proxy.codetab_summary(), "applies": codetab_settings.applies(),
+                                  "claude_version": ".".join(map(str, version)) if version else "",
+                                  "powershell_ok": codetab_settings.powershell_ok(version),
+                                  "powershell_from": ".".join(map(str, codetab_settings.POWERSHELL_FROM))})
+
+    async def config_post(request: web.Request) -> web.Response:
+        if proxy is None:
+            return err(ValueError("config unavailable"))
+        body = await request.json()
+        changes = dict(body.get("settings", {}))
+        if request.get(REMOTE):
+            local_only = sorted(k for k in changes if k not in REMOTE_SETTINGS)
+            if local_only:
+                return err(ValueError(f"local only: {', '.join(local_only)} can only be changed on the "
+                                      "machine AI Cleaner runs on"), status=403)
+        was_binaries = proxy.cfg.allow_images
+        # Turning timings on starts its 24 hours now (feature 91); the page never sets the clock.
+        changes.pop("debug.timings_since", None)
+        if changes.get("debug.timings") is True:
+            changes["debug.timings_since"] = int(time.time())
+        if changes.get("remote.encrypt") is True and not proxy.tunnel.is_set():
+            # On with no secret would lock the tunnel with no way in (feature 21).
+            return err(ValueError("generate a tunnel code first, then turn encryption on"))
+        try:
+            out = proxy.cfg.update_settings(changes)
+            if proxy.store is not None:
+                proxy.store.quiet_kinds = frozenset(proxy.cfg.quiet_kinds)
+            proxy.notifier.footer_enabled = proxy.cfg.notify_footer
+            proxy.notifier.toast_enabled = proxy.cfg.notify_toast
+            await proxy.apply_session_enabled()
+            # The running host takes a new limit at once (2026-10-16); lowering it stops nothing.
+            if proxy.session is not None:
+                proxy.session.max_running = proxy.cfg.session_max_running
+                proxy.session.auto_titles = proxy.cfg.session_auto_titles
+                proxy.session.idle_offer_hours = proxy.cfg.session_idle_offer_hours
+            lifecycle.job_cleanup = proxy.cfg.session_job_cleanup     # new sessions from now on
+            lifecycle.set_limits(proxy.cfg.session_max_processes, proxy.cfg.session_max_memory_gb)
+            # One control (feature 36). The setting governs the pipe and the CLAUDE.md rule
+            # governs the agent, and only the rule is in front of the model - so leaving them to
+            # disagree meant the setting appeared to do nothing. Flipping it rewrites the block.
+            #
+            # Never on a remote request: this writes a file in the user's home folder, and the
+            # remote side is a browser on a phone. And never as part of the failure path - the
+            # setting is saved either way, and a rules write that fails is reported rather than
+            # rolled back, because the two are separate facts about the machine.
+            rules_said = ""
+            if "attachments.allow_images" in changes and proxy.cfg.allow_images != was_binaries \
+                    and not request.get(REMOTE):
+                try:
+                    rules_said = rules.apply(proxy.cfg.allow_images, reading=proxy.reads_images())
+                except rules.RulesError as exc:
+                    rules_said = f"the setting was saved, but {exc}"
+                    log.warning("rules block not updated: %s", exc)
+            # The Bash guard (feature 98) is a hook in Claude Code's settings, kept in step with its
+            # switch here. Waiting messages between tool calls (feature 119): the same kind of hook.
+            # Both reach remotely since item L - neither prompts on the machine; the collapse guard
+            # stays local, since off is a safety check off.
+            if "claude.deliver_between_tools" in changes:          # remote too since L (2026-10-20)
+                from . import deliver
+                try:
+                    said = deliver.apply(proxy.cfg.claude_deliver_between_tools, proxy.cfg.port)
+                except deliver.DeliverError as exc:
+                    said = f"the setting was saved, but {exc}"
+                    log.warning("deliver hook not updated: %s", exc)
+                rules_said = " ".join(s for s in (rules_said, said) if s)
+            if "claude.collapse_guard" in changes and not request.get(REMOTE):
+                from . import deliver
+                try:
+                    said = deliver.apply_collapse_guard(proxy.cfg.claude_collapse_guard, proxy.cfg.port)
+                except deliver.DeliverError as exc:
+                    said = f"the setting was saved, but {exc}"
+                    log.warning("collapse guard not updated: %s", exc)
+                rules_said = " ".join(s for s in (rules_said, said) if s)
+            if "claude.bash_guard" in changes:                     # remote too since L (2026-10-20)
+                try:
+                    said = bashguard.apply(proxy.cfg.claude_bash_guard)
+                except bashguard.GuardError as exc:
+                    said = f"the setting was saved, but {exc}"
+                    log.warning("bash guard not updated: %s", exc)
+                rules_said = " ".join(s for s in (rules_said, said) if s)
+            # The Code tab switch (feature 117) and Copilot's (2026-10-18): the forward proxy's readers,
+            # Claude Code's settings and VS Code's. Both act remotely (the Code tab since item L); the
+            # certificate is only added from here (trust), where Windows can ask the person.
+            switches = ("codetab.enabled", "codetab.port")
+            remote = bool(request.get(REMOTE))
+            if any(key in changes for key in switches + ("copilot.enabled", "claudeai.enabled")):   # remote too
+                try:
+                    said = await proxy.apply_codetab(trust=not remote)
+                except Exception as exc:  # noqa: BLE001 - saved; the reason is the answer
+                    said = f"the setting was saved, but {exc}"
+                    log.warning("Code tab not applied: %s", exc)
+                rules_said = " ".join(s for s in (rules_said, said) if s)
+            return web.json_response({"ok": True, "settings": out, "rules": rules_said})
+        except (ValueError, OSError) as exc:
+            return err(exc)
+
+    async def restart_proxy(request: web.Request) -> web.Response:
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config; restart it by hand"))
+        if getattr(proxy, "service", ""):
+            # Feature 107: run by the start-up task's launcher loop, which starts it again 5 seconds after it stops -
+            # so a restart is this process ending. Stop-AiCleaner would also end the loop (stopped on purpose).
+            asyncio.get_running_loop().call_later(0.5, lambda: os._exit(0))
+            return web.json_response({"ok": True, "log": "", "service": True})
+        try:
+            log_path = restart(proxy.cfg.path.parent, proxy.cfg.port, Path(proxy.cfg.log_dir))
+        except RestartError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True, "log": str(log_path)})
+
+    # ---- starting with the computer, as you (feature 107, decided 2026-10-24) ----------------------------
+
+    def _app_root() -> Path | None:
+        if proxy is None or proxy.cfg.path is None:
+            return None
+        return proxy.cfg.path.parent
+
+    async def service_get(request: web.Request) -> web.Response:
+        """The start-up task's state, read without elevation. Shown remotely too - the switch is locked there."""
+        from . import service as service_module
+        root = _app_root()
+        found = (await asyncio.to_thread(service_module.state, root)) if root is not None else service_module.off()
+        found["running_as_service"] = bool(getattr(proxy, "service", ""))
+        found["elevated"] = getattr(proxy, "_elevated", None)        # this copy's own token (feature 107)
+        found["remote"] = bool(request.get(REMOTE))
+        return web.json_response(found)
+
+    async def service_set(request: web.Request) -> web.Response:
+        """Turn it on or off: the elevated script, run on this machine. Local only - it needs an administrator
+        prompt and your password, both of which only someone at this machine can answer."""
+        from . import service as service_module
+        if request.get(REMOTE):
+            return err(ValueError("local only: starting AI Cleaner with the computer is changed at the machine where "
+                                  "it is deployed (an administrator prompt and your password are asked for there)"),
+                       status=403)
+        root = _app_root()
+        if root is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        try:
+            body = await request.json()
+        except ValueError:
+            return err(ValueError("expected JSON with on: true or false"))
+        if not isinstance(body, dict) or not isinstance(body.get("on"), bool):
+            return err(ValueError("expected JSON with on: true or false"))
+        try:
+            said = service_module.change(root, body["on"], proxy.cfg.port)
+        except service_module.ServiceError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True, "said": said})
+
+    # ---- feedback (2026-10-16; spec 2026-10-16-feedback-design.md) ----------------------------------
+
+    from . import feedback as fb
+
+    def feedback_state() -> dict[str, Any]:
+        held = fb.consent()
+        relay = proxy.cfg.feedback_relay if proxy is not None else fb.RELAY
+        return {"connected": bool(held), "relay": relay, "consented_at": (held or {}).get("consented_at", ""),
+                "client": (held or {}).get("client_id", "")[:8]}
+
+    def feedback_server_context(request: web.Request, include_log: bool) -> dict[str, Any]:
+        """The proxy's half of a ticket's context: versions, on/off settings, counts - no values."""
+        from . import __version__, updates
+        mine = updates.installed(root=proxy.install_root()) if proxy is not None else {"repo": ""}
+        host = proxy.session if proxy is not None else None
+        context: dict[str, Any] = {
+            "version": __version__, "channel": fb.channel_of(mine.get("repo", "")), **fb.system_info(),
+            "reached": "remote access (Cloudflare Access)" if request.get(REMOTE) else "this machine (127.0.0.1)",
+            "settings": fb.settings_summary(proxy.cfg.settings()) if proxy is not None else {},
+            "counts": {
+                "profiles": len(host.profiles) if host is not None else 0,
+                "running_sessions": len([s for s in host.sessions.values() if s.running]) if host is not None else 0,
+                "clients": len(getattr(proxy.mapper, "clients", []) or []) if proxy is not None else 0,
+            },
+            "proxy": {"uptime_s": int(time.time() - getattr(proxy, "started_at", time.time())),
+                      "requests_seen": getattr(proxy, "requests_seen", 0)} if proxy is not None else {},
+        }
+        if include_log and proxy is not None:
+            tokenise = getattr(proxy.mapper, "tokenise", lambda text: text)
+            context["recent_log"] = fb.recent_log_lines(Path(proxy.cfg.log_dir), tokenise)
+        return context
+
+    def feedback_context(request: web.Request, body: dict[str, Any]) -> dict[str, Any]:
+        page = body.get("page") if isinstance(body.get("page"), dict) else {}
+        return fb.build_context(page, feedback_server_context(request, bool(body.get("include_log"))))
+
+    def feedback_text(text: str, limit: int) -> str:
+        """The person's own words, through the client-name filter: they are about to leave the machine."""
+        tokenise = getattr(proxy.mapper, "tokenise", None) if proxy is not None else None
+        text = str(text or "")[:limit]
+        return tokenise(text) if tokenise else text
+
+    async def feedback_relay(method: str, path: str, body: dict | None = None) -> dict[str, Any]:
+        held = fb.consent()
+        if not held:
+            raise fb.FeedbackError("connect to the feedback system first", status=409)
+        return await asyncio.to_thread(fb.call, proxy.cfg.feedback_relay, method, path, held["client_id"], body)
+
+    async def feedback_get_state(request: web.Request) -> web.Response:
+        return web.json_response(feedback_state())
+
+    async def feedback_connect(request: web.Request) -> web.Response:
+        """The person said yes: register this install's ID, and remember the answer."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        try:
+            cid = await asyncio.to_thread(fb.client_id)
+            await asyncio.to_thread(fb.call, proxy.cfg.feedback_relay, "POST", "/v1/register", cid, {})
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+        fb.save_consent(cid, proxy.cfg.feedback_relay, time.strftime("%Y-%m-%dT%H:%M:%S"))
+        return web.json_response(feedback_state())
+
+    async def feedback_disconnect(request: web.Request) -> web.Response:
+        fb.forget_consent()
+        return web.json_response(feedback_state())
+
+    async def feedback_preview(request: web.Request) -> web.Response:
+        """Exactly what would go with a ticket, shown before sending."""
+        return web.json_response({"context": feedback_context(request, await request.json())})
+
+    async def feedback_tickets(request: web.Request) -> web.Response:
+        state = "closed" if request.query.get("state") == "closed" else "open"
+        try:
+            return web.json_response(await feedback_relay("GET", f"/v1/tickets?state={state}"))
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+
+    async def feedback_send(request: web.Request) -> web.Response:
+        from . import __version__, updates
+        body = await request.json()
+        title = feedback_text(str(body.get("title") or "").strip(), fb.TITLE_MAX)
+        if not title:
+            return err(ValueError("a title is needed"))
+        mine = updates.installed(root=proxy.install_root()) if proxy is not None else {"repo": ""}
+        payload = {"title": title, "body": feedback_text(body.get("body") or "", fb.BODY_MAX),
+                   "kind": "idea" if body.get("kind") == "idea" else "bug",
+                   "channel": fb.channel_of(mine.get("repo", "")), "version": __version__,
+                   "context": feedback_context(request, body)}
+        try:
+            return web.json_response(await feedback_relay("POST", "/v1/tickets", payload), status=201)
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+
+    async def feedback_ticket_action(request: web.Request) -> web.Response:
+        number = int(request.match_info["number"])
+        action = request.match_info["action"]
+        body = await request.json() if action == "comments" else {}
+        payload = {"body": feedback_text(body.get("body") or "", fb.BODY_MAX)} if action == "comments" else {}
+        try:
+            return web.json_response(await feedback_relay("POST", f"/v1/tickets/{number}/{action}", payload))
+        except fb.FeedbackError as exc:
+            return err(exc, status=exc.status)
+
+    # ---- updates (2026-10-16) ----------------------------------------------------------------------
+
+    async def updates_info(request: web.Request) -> web.Response:
+        """Installed and available. `?check=1` asks the repository now rather than within the hour."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        return web.json_response(await proxy.update_info(force=request.query.get("check") == "1"))
+
+    async def updates_apply(request: web.Request) -> web.Response:
+        """Update now: the installed Deploy-AiCleaner.ps1 -Action Update, handed off. From anywhere since
+        H2 (Brad, 2026-10-19): it is Update automatically on demand - no new risk of leakage, no prompt
+        on the machine."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        from .restart import RestartError
+        try:
+            log_path = proxy.start_update()
+        except RestartError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True, "log": str(log_path)})
+
+    # ---- the setup wizard (feature 106) - local only, see guard.REMOTE_REFUSED_PREFIXES ----------
+
+    async def setup_dns(request: web.Request) -> web.Response:
+        """What a domain's DNS looks like now, for the remote-access step. Read-only."""
+        from .dnsguide import look_up
+        report = await asyncio.to_thread(look_up, request.query.get("domain", ""))
+        return web.json_response(report.as_dict())
+
+    async def setup_enable(request: web.Request) -> web.Response:
+        """Route the AI tools through aicleaner: the same Enable-AiCleaner.ps1 a person would run,
+        readiness checks and all. Run without blocking the server - the script asks this proxy for
+        /healthz and sends a request through it while it runs."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Enable-AiCleaner.ps1"
+        if not script.exists():
+            script = root / "Enable-AiCleaner.ps1"                    # an install from before the move
+        from .restart import powershell
+        child = await asyncio.create_subprocess_exec(
+            powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-LogPath", "",
+            cwd=str(root), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(child.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            child.kill()
+            return err(ValueError("Enable-AiCleaner.ps1 did not finish within three minutes"), status=504)
+        text = out.decode("utf-8", errors="replace")
+        return web.json_response({"ok": child.returncode == 0, "output": text[-6000:]})
+
+    async def setup_disable(request: web.Request) -> web.Response:
+        """One tool's routing taken off (item H): Disable-AiCleaner.ps1 -Only, so the AI tools card's
+        switch never touches another tool. Under /api/setup, so it reaches as far as enabling does."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        body = await json_or_empty(request)
+        only = str(body.get("only") or "")
+        if only not in ("ClaudeCode", "CodeTab", "Copilot"):
+            return err(ValueError("only must be ClaudeCode, CodeTab or Copilot"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Disable-AiCleaner.ps1"
+        from .restart import powershell
+        child = await asyncio.create_subprocess_exec(
+            powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-Only", only,
+            "-LogPath", "", cwd=str(root), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(child.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            child.kill()
+            return err(ValueError("Disable-AiCleaner.ps1 did not finish within two minutes"), status=504)
+        return web.json_response({"ok": child.returncode == 0, "output": out.decode("utf-8", errors="replace")[-6000:]})
+
+    # ---- the AI tools (item H, 2026-10-19; aitools.py) ------------------------------------------
+    # Read and signed in to from anywhere (spec decision 4): sign-in prompts nothing on this machine.
+
+    from . import aitools
+    claude_login = aitools.ClaudeLogin()
+
+    async def json_or_empty(request: web.Request) -> dict:
+        # Not `can_read_body`: a middleware has already read the body to log the action, which makes
+        # it False although request.json() still returns the cached body (the code arrived empty).
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            return {}
+        return body if isinstance(body, dict) else {}
+
+    async def aitools_get(request: web.Request) -> web.Response:
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        copilot = await asyncio.to_thread(proxy.copilot_summary)
+        tools = await aitools.rows(proxy.cfg, copilot, logins={k: v.state for k, v in device_logins.items()})
+        return web.json_response({"tools": tools, "login": claude_login.view(), "remote": bool(request.get(REMOTE)),
+                                  "devices": {k: v.view() for k, v in device_logins.items()}})
+
+    # Other agents (item K): installed into aicleaner's own folder, signed in with a device code - neither
+    # prompts on the machine, so both work through remote access.
+    device_logins = {"copilot-cli": aitools.DeviceLogin("copilot"), "codex": aitools.DeviceLogin("codex")}
+
+    async def aitools_install(request: web.Request) -> web.Response:
+        body = await json_or_empty(request)
+        return web.json_response(await aitools.install(str(body.get("agent", ""))))
+
+    async def aitools_device(request: web.Request) -> web.Response:
+        """POST {tool, action: start|cancel} or GET ?tool=: an agent's device-code sign-in."""
+        if request.method == "GET":
+            login = device_logins.get(request.query.get("tool", ""))
+            return web.json_response(login.view() if login else {"state": "idle"})
+        body = await json_or_empty(request)
+        login = device_logins.get(str(body.get("tool", "")))
+        if login is None:
+            return err(ValueError("that AI tool signs in another way"))
+        return web.json_response(await (login.cancel() if body.get("action") == "cancel" else login.start()))
+
+    async def aitools_login(request: web.Request) -> web.Response:
+        """Claude Code's sign-in: start it (POST), or read where it is (GET)."""
+        if request.method == "GET":
+            return web.json_response(claude_login.view())
+        body = await json_or_empty(request)
+        return web.json_response(await claude_login.start(console=bool(body.get("console"))))
+
+    async def aitools_login_code(request: web.Request) -> web.Response:
+        body = await json_or_empty(request)
+        return web.json_response(await claude_login.submit(str(body.get("code") or "")))
+
+    async def aitools_login_cancel(request: web.Request) -> web.Response:
+        return web.json_response(await claude_login.cancel())
+
+    async def setup_remote(request: web.Request) -> web.Response:
+        """Remote access from the wizard: Enable-RemoteControl.ps1's API route, unattended. Detached,
+        because it restarts this proxy at the end; the page reads its log and waits for it back."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        body = await request.json()
+        hostname = str(body.get("hostname") or "").strip().lower()
+        email = str(body.get("email") or "").strip()
+        token = str(body.get("token") or "").strip()
+        use_stored = bool(body.get("use_stored")) and not token
+        from .dnsguide import DOMAIN_RE
+        if not DOMAIN_RE.match(hostname) or hostname.count(".") < 2:
+            return err(ValueError("give the full address for AI Cleaner, for example ai.example.com"))
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            return err(ValueError("give the email address that may sign in"))
+        if use_stored and not stored_cloudflare_token().exists():
+            return err(ValueError("no Cloudflare token is stored on this machine: give a new one"))
+        if not use_stored and not re.fullmatch(r"[A-Za-z0-9_-]{30,}", token):
+            return err(ValueError("that does not look like a Cloudflare API token"))
+        identity = str(body.get("identity") or "OneTimePin")
+        if identity not in REMOTE_IDENTITIES:
+            return err(ValueError(f"sign-in method must be one of: {', '.join(REMOTE_IDENTITIES)}"))
+        client_id = str(body.get("client_id") or "").strip()
+        client_secret = str(body.get("client_secret") or "").strip()
+        account_kind = str(body.get("account_kind") or "").strip()
+        directory = str(body.get("directory") or "").strip()
+        if identity in REMOTE_NEEDS_CLIENT and not (client_id and client_secret):
+            return err(ValueError(f"{identity} sign-in needs the client ID and secret of the OAuth app made for it"))
+        if account_kind not in ("", "personal", "work"):
+            return err(ValueError("account kind is personal or work"))
+        if identity == "Microsoft" and account_kind == "work" and not re.fullmatch(r"[0-9a-fA-F-]{36}", directory):
+            return err(ValueError("a work-only Microsoft sign-in needs the Entra directory (tenant) ID"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Enable-RemoteControl.ps1"
+        from .restart import RestartError, powershell, spawn_detached
+        from .logfiles import stamped
+        log_path = stamped(Path(proxy.cfg.log_dir), "remote-setup")     # this run's own log (D219)
+        try:
+            env = {"AICLEANER_CLOUDFLARE_TOKEN": token} if token else {}
+            if client_secret:
+                env["AICLEANER_IDP_SECRET"] = client_secret
+            spawn_detached(remote_setup_command(powershell(), script, hostname, email, identity,
+                                                client_id=client_id if identity in REMOTE_NEEDS_CLIENT else "",
+                                                account_kind=account_kind if identity == "Microsoft" else "",
+                                                directory=directory if identity == "Microsoft" else "",
+                                                use_stored=use_stored), root, log_path, env=env)
+        except RestartError as exc:
+            return err(exc, status=409)
+        return web.json_response({"ok": True})
+
+    async def setup_remote_state(request: web.Request) -> web.Response:
+        """What the Remote Access step starts from (feature 110): remote access already set up here,
+        a token stored on this machine, and where to ask for a sign-in method that is not offered."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        remote = {}
+        try:
+            config = json.loads(Path(proxy.cfg.path).read_text(encoding="utf-8-sig")) if proxy.cfg.path else {}
+            remote = config.get("remote") if isinstance(config.get("remote"), dict) else {}
+        except (OSError, ValueError):
+            remote = {}
+        return web.json_response({
+            "hostname": str(remote.get("hostname") or ""),
+            "sign_in": str(remote.get("identity") or remote.get("sign_in_with") or ""),
+            "token_stored": stored_cloudflare_token().exists(),
+            "identities": list(REMOTE_IDENTITIES),
+            "feature_url": feature_request_url(),
+        })
+
+    async def setup_remote_replace(request: web.Request) -> web.Response:
+        """Replace: take the remote access set up here down - the tunnel, its DNS record and Access
+        application, and the config's remote block - so the step can set it up afresh (feature 110).
+        The uninstaller's -RemoteOnly does it; with nobody to answer, its questions take their
+        defaults."""
+        if proxy is None or proxy.cfg.path is None:
+            return err(ValueError("this proxy was not started from an installed config"))
+        root = proxy.cfg.path.parent
+        script = root / "installer" / "Uninstall-AiCleaner.ps1"
+        from .restart import powershell
+        child = await asyncio.create_subprocess_exec(
+            powershell(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script), "-RemoteOnly",
+            cwd=str(root), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(child.communicate(), timeout=180)
+        except asyncio.TimeoutError:
+            child.kill()
+            return err(ValueError("taking remote access down did not finish within three minutes"), status=504)
+        return web.json_response({"ok": child.returncode == 0, "output": out.decode("utf-8", errors="replace")[-6000:]})
+
+    async def setup_remote_log(request: web.Request) -> web.Response:
+        """What the remote-access run has said so far."""
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        from .logfiles import newest
+        path = newest(Path(proxy.cfg.log_dir), "remote-setup")          # the run under way is the newest (D219)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace") if path else ""
+        except OSError:
+            text = ""
+        failed = "FullyQualifiedErrorId" in text or "CategoryInfo" in text
+        return web.json_response({"text": text[-8000:], "ok": "Remote control is on:" in text, "failed": failed,
+                                  "done": "Remote control is on:" in text or failed})
+
+    async def export_client(request: web.Request) -> web.Response:
+        cid = request.match_info["cid"]
+        try:
+            doc = mf.export_client(cid)
+        except MappingError as exc:
+            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+        return web.Response(text=json.dumps(doc, indent=2, ensure_ascii=False), content_type="application/json",
+                            headers={"Content-Disposition": f'attachment; filename="{cid}.json"'})
+
+    async def export_all(request: web.Request) -> web.Response:
+        return web.Response(text=json.dumps(mf.export_all(), indent=2, ensure_ascii=False), content_type="application/json",
+                            headers={"Content-Disposition": 'attachment; filename="aicleaner-clients.json"'})
+
+    async def import_clients(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            doc = body.get("document")
+            if isinstance(doc, str):
+                doc = json.loads(doc)
+            # mode: new | merge (default) | replace (DECISIONS 44). The old `replace` flag still works.
+            mode = str(body.get("mode") or ("replace" if body.get("replace") else "merge"))
+            done = mf.import_bundle(doc, mode=mode)
+            return web.json_response({"ok": True, "imported": done})
+        except (MappingError, ValueError, KeyError, TypeError) as exc:
+            return err(exc)
+
+    async def secrets_delete(request: web.Request) -> web.Response:
+        if user_secrets is None:
+            return err(ValueError("secrets redaction is off in aicleaner-config.json"))
+        body = await request.json()
+        return web.json_response({"ok": user_secrets.remove(str(body.get("label", "")))})
+
+    def last_request() -> dict[str, Any] | None:
+        files = sorted(log_dir.glob(f"evidence-{host}-*.jsonl"))
+        for f in reversed(files[-2:]):
+            lines = [line for line in f.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if lines:
+                e = json.loads(lines[-1])
+                return {"ts": e.get("ts"), "path": e.get("path"), "status": e.get("status"),
+                        "outbound": sum(abs(int(v)) for v in (e.get("outbound") or {}).values()),
+                        "inbound": sum(abs(int(v)) for v in (e.get("inbound") or {}).values()),
+                        "note": e.get("note")}
+        return None
+
+    async def status(request: web.Request) -> web.Response:
+        """One call for the status stack, banner, badges and client list (spec section 4)."""
+        handle = getattr(proxy, "_handle", None) if proxy is not None else None
+
+        def read_mapping() -> dict:
+            """Off the loop: this stats every client file, and reloads if one moved.
+
+            `signature()` globs the clients folder and stats each file in it, and that folder is
+            normally a OneDrive share - a reparse point over network-backed storage, slow while
+            the OS has nothing cached. Every open page asks for this every ten seconds, and it
+            was running in the coroutine, so for its duration the single event loop served
+            nobody: not the other requests, not the poll, and not the proxy, which shares it
+            (D35). A reload is heavier still, though v0.9.30-32 made it far cheaper.
+            """
+            if handle is not None:
+                handle.current()
+                return handle.reports
+            return mf.load_tolerant(record=False)[1]
+
+        reports = await asyncio.to_thread(read_mapping)
+        rows = [r.as_dict() for _cid, r in sorted(reports.items(), key=lambda kv: kv[0].lower())]
+        items = await asyncio.to_thread(store.pending)
+        pending = len(items)
+        held = sum(1 for c in items if c.get("placeholder"))
+        # Meant to be held back, and could not be: the value went out as it is. Counted here
+        # because the number of things held back was already on the page and the number that
+        # FAILED to be held back was nowhere (D12).
+        unprotected = sum(1 for c in items if c.get("unprotected") and not c.get("placeholder"))
+        states = [set(r["state"]) for r in rows]
+        cfg = proxy.cfg if proxy is not None else None
+
+        # Whether anything is actually pointed at us, not merely whether the mapping is sound
+        # (D37). A healthy mapping with every client aimed elsewhere used to read "filtering: On"
+        # while nothing was being filtered at all.
+        from .routing import summary as routing_summary
+
+        seen = getattr(proxy, "requests_seen", 0) if proxy is not None else 0
+        # Every folder a session can run in, so a project whose own .claude settings route around
+        # the proxy is reported (H10).
+        projects = proxy.session_folders() if proxy is not None else []
+        routing = await asyncio.to_thread(routing_summary, cfg.port if cfg else 0, seen, None, None, projects)
+
+        # `filtering` stays what it has always meant - whether the mapping is sound - and routing
+        # travels beside it rather than folded in. Two reasons: the value is a contract several
+        # callers read, and the routing answer depends on files in the user's own home directory,
+        # which a test server has no business deciding a headline from. The Overview combines the
+        # two (see bannerContent), which is where the judgement belongs.
+        if any("broken" in st for st in states):
+            filtering = "stopped"
+        elif pending or any(st & {"fallback", "conflict-copy"} for st in states):
+            filtering = "attention"
+        else:
+            filtering = "on"
+        from . import timing
+
+        return web.json_response({
+            "filtering": filtering, "pending": pending, "held_back": held, "sent_as_is": pending - held,
+            "unprotected": unprotected,
+            # Bypass forwards everything untouched (D148): the headline must say so, whatever the
+            # mapping's state - "Filtering on" over a bypass is an assurance that is untrue.
+            "bypass": bool(cfg.proxy_bypass) if cfg else False,
+            # Diagnostics (feature 91): whether the page should time what it does, and until when.
+            "debug_timings": timing.active(cfg) if cfg else False,
+            "debug_timings_until": timing.until(cfg) if cfg else 0,
+            "clients": [r for r in rows if r["id"] != GLOBAL_ID],
+            "global": next((r for r in rows if r["id"] == GLOBAL_ID), None),
+            "secrets_mode": cfg.secrets_mode if cfg else "redact",
+            "listen": cfg.listen if cfg else "127.0.0.1", "port": cfg.port if cfg else 0,
+            # The machine the proxy runs on. Through the tunnel the page is read from
+            # somewhere else, so anything that says "this machine" has to name it instead.
+            "host": host,
+            "loopback": is_loopback_listen(cfg.listen) if cfg else True,
+            # Read through the tunnel (the guard verified it), so the page can grey out what only
+            # works on the machine itself - Secrets, for one (the user, 2026-10-01).
+            "remote": bool(request.get(REMOTE)),
+            # The MCP audit's latest answer (H11): which servers get real names, which wait.
+            "mcp": proxy.mcp.summary(list(proxy.cfg.keep_tokenised_tools)) if proxy is not None else [],
+            # What the health check last found (feature 17). Read from the file it writes rather
+            # than re-run here: it shells out to PowerShell and reads the registry, which is not
+            # something to do on a poll that fires every ten seconds.
+            "health": _health_state(cfg),
+            # Each client's folder is shared in OneDrive (DECISIONS 51): an amber note when the
+            # clients location is not in it, since nothing there syncs to colleagues.
+            "clients_in_onedrive": in_onedrive(Path(cfg.clients_dir)) if cfg else True,
+            # Folders other people on this PC could write to (H18): warned about, never refused.
+            "open_folders": _open_folders(cfg),
+            "last_request": last_request(), "contact": contact.get().as_dict(),
+            # What each client is pointed at, and when this proxy started - so the page can say
+            # whether filtering is happening, and whether a Restart actually took (feature 60).
+            "routing": routing,
+            # Copilot in VS Code (release 6): the Overview's coverage line and its "stopped arriving".
+            "copilot": _copilot_status(proxy),
+            "started_at": getattr(proxy, "started_at", 0.0) if proxy is not None else 0.0,
+            "requests_seen": seen,
+            "activity": activity(),
+        })
+
+    def activity() -> dict:
+        """What is going on that a page elsewhere may want to announce when it lands (feature 44):
+        each session's finished-turn count, whether a turn is running, and how many questions wait;
+        and the scan job. Counters only move forward, so the page compares one poll with the next."""
+        host = getattr(proxy, "session", None) if proxy is not None else None
+        sessions = [s.activity() for s in host.sessions.values()] if host is not None else []
+        scans = getattr(proxy, "scans", None) if proxy is not None else None
+        job = (scans.state().get("job") if scans is not None else None) or None
+        scan = ({k: job.get(k) for k in ("id", "state", "client", "kind", "folder", "finished")}
+                if job else None)
+        opened = proxy.model_requests() if proxy is not None and hasattr(proxy, "model_requests") else []
+        return {"sessions": sessions, "scan": scan, "model_requests": opened}
+
+    async def client_view(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(mf.client_view(request.match_info["cid"]))
+        except MappingError as exc:
+            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+
+    # Names in other systems (feature 150). The reads are for tooling on this machine - a ticketing
+    # integration finding the client's company - and nothing on a phone has a use for them, so they
+    # are refused through remote access; the page gets the names with the client (client_view).
+    async def external_names_get(request: web.Request) -> web.Response:
+        if request.get(REMOTE):
+            return err(ValueError("names in other systems are read on this machine only"), status=403)
+        cid = request.match_info["cid"]
+        try:
+            names = await asyncio.to_thread(mf.get_external_names, cid)
+        except MappingError as exc:
+            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+        return web.json_response({"client": cid, "external_names": names})
+
+    async def external_names_by_system(request: web.Request) -> web.Response:
+        if request.get(REMOTE):
+            return err(ValueError("names in other systems are read on this machine only"), status=403)
+        system = request.query.get("system", "")
+        try:
+            clients = await asyncio.to_thread(mf.external_names_for, system)
+        except MappingError as exc:
+            return err(exc)
+        return web.json_response({"system": system.strip(), "clients": clients})
+
+    async def external_names_set(request: web.Request) -> web.Response:
+        """Replace them; each name not yet an entry is added as one (the result says which, and which
+        were refused). A client edit like any other, so it reaches remotely as they do."""
+        cid = request.match_info["cid"]
+        try:
+            body = await request.json()
+            answer = await asyncio.to_thread(mf.set_external_names, cid, body.get("external_names"),
+                                             SOURCE_MANUAL)
+        except (MappingError, ValueError, AttributeError) as exc:
+            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+        for name in answer["added"]:
+            _record_provenance(mf, cid, name, SOURCE_MANUAL,
+                               note="the client's name in another system, set on the Clients page")
+        return web.json_response({"ok": True, **answer})
+
+    async def client_raw(request: web.Request) -> web.Response:
+        try:
+            return web.json_response(mf.raw(request.match_info["cid"]))
+        except MappingError as exc:
+            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+
+    async def client_restore(request: web.Request) -> web.Response:
+        try:
+            mf.restore(request.match_info["cid"])
+            return web.json_response({"ok": True})
+        except MappingError as exc:
+            return err(exc)
+
+    # ---- client keys and held changes (DECISIONS 51) ----------------------------------------
+
+    async def client_key_get(request: web.Request) -> web.Response:
+        """Whether this PC holds the client's key, and its id - never the key itself."""
+        from .keys import key_id
+        cid = request.match_info["cid"]
+        key = mf._key(cid)
+        return web.json_response({"has_key": key is not None, "key_id": key_id(key) if key else ""})
+
+    async def client_key_post(request: web.Request) -> web.Response:
+        """generate (shown once, to send to the engagement's people), enter (pasted), rotate. A key is
+        the one thing that makes a change to a shared file trusted. From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine. (Brad confirmed it for
+        generate, enter and rotate after the explanation: a generated key crosses the remote
+        connection once - sealed when the encrypted tunnel is on.)"""
+        from .keys import KeyError_, generate, key_id
+        cid = request.match_info["cid"]
+        body = await request.json()
+        action = str(body.get("action", ""))
+        try:
+            if action == "generate":
+                if mf._key(cid) is not None:
+                    return err(ValueError(f"{cid} already has a key on this machine; rotate it instead"))
+                return web.json_response({"ok": True, "key": mf.set_key(cid, generate())})
+            if action == "enter":
+                return web.json_response({"ok": True, "key_id": key_id(mf.set_key(cid, str(body.get("key", ""))))})
+            if action == "rotate":
+                return web.json_response({"ok": True, "key": mf.rotate_key(cid)})
+        except (MappingError, KeyError_) as exc:
+            return err(exc)
+        return err(ValueError("action must be generate, enter or rotate"))
+
+    async def client_held(request: web.Request) -> web.Response:
+        """A held change, reviewed: accept (sign it, trust it) or reject (last-good back)."""
+        cid = request.match_info["cid"]
+        body = await request.json()
+        try:
+            (mf.accept_held if body.get("accept") else mf.reject_held)(cid)
+            return web.json_response({"ok": True})
+        except MappingError as exc:
+            return err(exc)
+
+    async def mcp_approve_server(request: web.Request) -> web.Response:
+        """Real names for an MCP server reached over http(s) (H11, DECISIONS 52). From anywhere since J2 (Brad, 2026-10-20): nothing here prompts on the machine."""
+        if proxy is None:
+            return err(ValueError("no proxy"))
+        pattern = str((await request.json()).get("pattern", ""))
+        if not any(row["pattern"] == pattern and row["approvable"]
+                   for row in proxy.mcp.summary(list(proxy.cfg.keep_tokenised_tools))):
+            return err(ValueError(f"{pattern or 'that'} is not a server waiting for approval"))
+        proxy.mcp.approve(pattern)
+        return web.json_response({"ok": True})
+
+    async def client_salvage(request: web.Request) -> web.Response:
+        try:
+            return web.json_response({"ok": True, **mf.salvage(request.match_info["cid"])})
+        except MappingError as exc:
+            return err(exc)
+
+    async def copy_to_global(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            return web.json_response({"ok": True, "token": mf.copy_to_global(str(body["client"]), str(body["real"]))})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def set_label(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            mf.set_label(str(body["id"]), str(body.get("label") or ""))
+            return web.json_response({"ok": True})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def set_email_rule(request: web.Request) -> web.Response:
+        """One rule for every address at a client's domain, on or off (feature 96)."""
+        body = await request.json()
+        try:
+            answer = await asyncio.to_thread(mf.set_email_rule, str(body["client"]), str(body["domain"]),
+                                             bool(body.get("on", True)))
+            return web.json_response({"ok": True, **answer})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def update_form(request: web.Request) -> web.Response:
+        body = await request.json()
+        try:
+            # "match" absent means the caller is not editing the rule; "match": null means take
+            # it off. The two must not collapse, or an inline edit of the name would silently
+            # drop a rule somebody had set (feature 23).
+            match = body["match"] if "match" in body else _UNSET
+            tok = mf.update_form(str(body["client"]), str(body["real"]),
+                                 body.get("new_real"), body.get("new_token"), body.get("new_kind"),
+                                 new_match=match)
+            return web.json_response({"ok": True, "token": tok})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    # POST /api/mapping/client/primary-repo is gone (D99): the home folder comes from each
+    # profile's own workspace files on this machine, so the client file names no repo.
+
+    async def rederive_form(request: web.Request) -> web.Response:
+        """Derive this entry's token again under today's rules (D6)."""
+        body = await request.json()
+        try:
+            tok = mf.rederive_form(str(body["client"]), str(body["real"]))
+            return web.json_response({"ok": True, "token": tok})
+        except (MappingError, KeyError) as exc:
+            return err(exc)
+
+    async def evidence(request: web.Request) -> web.Response:
+        try:
+            n = max(1, min(int(request.query.get("n", "50")), 5000))
+        except ValueError:
+            return err(ValueError("n must be a whole number"))
+        files = sorted(log_dir.glob(f"evidence-{host}-*.jsonl"))
+        lines: list[str] = []
+        for f in files[-2:]:
+            lines.extend(f.read_text(encoding="utf-8").splitlines())
+        return web.json_response({"lines": [json.loads(l) for l in lines[-n:] if l.strip()]})
+
+    async def substitution_log(request: web.Request) -> web.Response:
+        """The substitution log for one day, newest first, filtered (DECISIONS 38).
+
+        Read here and shown on the Log page; never handed over as a file. Lines written before
+        the event format are counted in `skipped_old`, not shown.
+        """
+        q = request.query
+        day = q.get("day") or f"{datetime.now():%Y%m%d}"
+        if not re.fullmatch(r"\d{8}", day):
+            return err(ValueError("day must be YYYYMMDD"))
+        try:
+            n = max(1, min(int(q.get("n", "200")), 1000))
+            start = max(0, int(q.get("before", "0") or 0))
+        except ValueError:
+            return err(ValueError("n and before must be whole numbers"))
+        detail = log_dir / "detail"
+        days = sorted((p.name[len(f"substitutions-{host}-"):][:8]
+                       for p in detail.glob(f"substitutions-{host}-*.jsonl.gz")), reverse=True)
+        path = detail / f"substitutions-{host}-{day}.jsonl.gz"
+
+        def read() -> tuple[list[dict[str, Any]], int]:
+            if not path.exists():
+                return [], 0
+            events, old = [], 0
+            with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if "type" in event:
+                        events.append(event)
+                    else:
+                        old += 1
+            return events, old
+
+        events, old = await asyncio.to_thread(read)
+        events.reverse()
+        action, client, session, text = (q.get("action", ""), q.get("client", "").lower(),
+                                         q.get("session", ""), q.get("q", "").lower())
+
+        def wanted(e: dict[str, Any]) -> bool:
+            if action == "ui":
+                if e.get("type") != "ui":
+                    return False
+            elif action and e.get("action") != action:
+                return False
+            if client and str(e.get("client", "")).lower() != client:
+                return False
+            if session and e.get("session", "") != session:
+                return False
+            return not text or text in json.dumps(e, ensure_ascii=False).lower()
+
+        matched = [e for e in events if wanted(e)]
+        page = matched[start:start + n]
+        after = start + n if start + n < len(matched) else None
+        return web.json_response({"day": day, "days": days, "events": page, "next": after,
+                                  "total": len(matched), "skipped_old": old})
+
+    async def shell(request: web.Request) -> web.StreamResponse:
+        """The page, with a fresh style nonce (feature 139): the policy header allows <style> elements carrying it,
+        and the file editor (Monaco) puts it on the ones it makes. A new one each load."""
+        import secrets
+        nonce = secrets.token_urlsafe(18)
+        request[STYLE_NONCE] = nonce
+        page = (WEB / "index.html").read_text(encoding="utf-8")
+        page = page.replace('<meta charset="utf-8">',
+                            f'<meta charset="utf-8">\n<meta name="aicleaner-style-nonce" content="{nonce}">', 1)
+        return web.Response(text=page, content_type="text/html", charset="utf-8")
+
+    async def old_page(request: web.Request) -> web.Response:
+        raise web.HTTPFound(REDIRECTS[request.path])
+
+    app.router.add_get("/", shell)
+    for old in REDIRECTS:
+        app.router.add_get(old, old_page)
+    app.router.add_static("/web/", WEB, follow_symlinks=False, show_index=False)
+    app.router.add_get("/api/status", status)
+    app.router.add_get("/api/diagnostics/processes", processes)
+    app.router.add_get("/api/clients/{cid}", client_view)
+    app.router.add_get("/api/clients/{cid}/raw", client_raw)
+    app.router.add_post("/api/clients/{cid}/restore", client_restore)
+    app.router.add_get("/api/clients/{cid}/key", client_key_get)
+    app.router.add_post("/api/clients/{cid}/key", client_key_post)
+    app.router.add_post("/api/clients/{cid}/held", client_held)
+    app.router.add_post("/api/mcp/approve", mcp_approve_server)
+    app.router.add_post("/api/clients/{cid}/salvage", client_salvage)
+    app.router.add_get("/api/clients/{cid}/external-names", external_names_get)
+    app.router.add_post("/api/clients/{cid}/external-names", external_names_set)
+    app.router.add_get("/api/external-names", external_names_by_system)
+    if proxy is not None:
+        app.router.add_get("/api/clients/{cid}/share", client_share)
+        app.router.add_get("/api/clients/{cid}/onedrive", client_onedrive)
+        app.router.add_post("/api/clients/{cid}/share", client_share_save)
+    app.router.add_post("/api/mapping/form/update", update_form)
+    app.router.add_post("/api/mapping/form/rederive", rederive_form)
+    app.router.add_post("/api/mapping/form/copy-to-global", copy_to_global)
+    app.router.add_post("/api/mapping/form/from-global", form_from_global)
+    app.router.add_post("/api/mapping/client/label", set_label)
+    app.router.add_post("/api/mapping/client/email-rule", set_email_rule)
+    # Registered whether or not the session host exists yet. Routes were once added only when it
+    # already did, which froze the setting at whatever it was when the proxy started: aiohttp
+    # freezes its router once the app runs, so apply_session_enabled could build the host at
+    # runtime but nothing served its URLs, and every call fell through to the proxy's catch-all as
+    # "unknown dialect 'api'". Switching the Session page on did nothing, with no error anywhere.
+    # Each handler asks session_host(), which refuses with a reason when it is off, so registering
+    # them always costs nothing and makes the switch mean what the card says it means.
+    if proxy is not None:
+        app.router.add_get("/api/session", session_state)
+        app.router.add_get("/api/session/worktree", session_worktree_offer)
+        app.router.add_post("/api/session/worktree", session_worktree_create)
+        app.router.add_post("/api/session/worktree/merge", session_worktree_merge)
+        app.router.add_post("/api/session/worktree/remove", session_worktree_remove)
+        app.router.add_post("/api/session/start", session_start)
+        app.router.add_post("/api/session/switch", session_switch)
+        app.router.add_post("/api/session/agent", session_agent)
+        app.router.add_get("/api/session/conversations/move", conversation_move_preview)
+        app.router.add_post("/api/session/conversations/move", conversation_move)
+        app.router.add_get("/api/session/casual", casual_get)
+        app.router.add_post("/api/session/casual", casual_post)
+        app.router.add_post("/api/session/chat-now", chat_now)
+        app.router.add_post("/api/session/prompt", session_prompt)
+        app.router.add_post("/api/session/stop", session_stop)
+        app.router.add_post("/api/session/interrupt", session_interrupt)
+        app.router.add_post("/api/session/queue/send", session_queue_send)
+        app.router.add_post("/api/session/queue/cancel", session_queue_cancel)
+        app.router.add_post("/api/session/deliver", session_deliver)
+        app.router.add_post("/api/tool/check", tool_check)
+        app.router.add_post("/api/tool/names", tool_names)
+        app.router.add_post("/api/activity/seen", activity_seen)
+        app.router.add_post("/api/session/suggest", session_suggest)
+        app.router.add_post("/api/session/permission-mode", session_permission_mode)
+        app.router.add_post("/api/session/permission", session_permission)
+        app.router.add_post("/api/session/permission/request", session_permission_request)
+        app.router.add_get("/api/session/events", session_events)
+        app.router.add_get("/api/session/files", session_files)
+        app.router.add_get("/api/session/search", session_search)
+        app.router.add_get("/api/editor/powershell/commands", editor_ps_commands)
+        app.router.add_post("/api/debug/timings", debug_timings)
+        app.router.add_get("/api/autocorrect/words", autocorrect_words)
+        app.router.add_get("/api/autocorrect/clients", autocorrect_clients)
+        app.router.add_get("/api/editor/powershell/parameters", editor_ps_parameters)
+        app.router.add_get("/api/session/file", session_file)
+        app.router.add_post("/api/session/file/write", session_file_write)
+        app.router.add_post("/api/session/read-image", session_read_image)
+        app.router.add_get("/api/session/file/raw", session_file_raw)
+        app.router.add_get("/api/session/file/download", session_file_download)
+        app.router.add_post("/api/session/file/stat", session_file_stat)
+        app.router.add_post("/api/session/files/zip", session_files_zip)
+        app.router.add_get("/api/session/tree-state", session_tree_state)
+        app.router.add_post("/api/session/workspace-cwd", session_workspace_cwd)
+        app.router.add_post("/api/session/workspace-create", session_workspace_create)
+        app.router.add_get("/api/session/workspace-files", session_workspace_files)
+        app.router.add_post("/api/session/workspace-view", session_workspace_view)
+        app.router.add_post("/api/session/setup-fix", session_setup_fix)
+        app.router.add_post("/api/session/trust-check", session_trust_check)
+        app.router.add_post("/api/session/trust-add", session_trust_add)
+        app.router.add_post("/api/session/tree-state", session_tree_state_save)
+        app.router.add_get("/api/session/tabs-state", session_tabs_state)
+        app.router.add_post("/api/session/tabs-state", session_tabs_state_save)
+        app.router.add_get("/api/session/past", session_past)
+        app.router.add_get("/api/session/conversations/search", conversation_search)
+        app.router.add_post("/api/session/conversations/rank", conversation_rank)
+        app.router.add_get("/api/session/agent-report", agent_report)
+        app.router.add_get("/api/session/conversations/{action:deleted}", conversation_bin)
+        app.router.add_post("/api/session/conversations/{action:delete|restore|purge}", conversation_bin)
+        app.router.add_post("/api/session/conversations/{action:title|retitle|suggest-titles}", conversation_titles)
+        app.router.add_get("/api/session/conversations/titles-progress", titles_progress)
+        app.router.add_route("*", "/api/session/consolidate", conversation_consolidate)
+        app.router.add_route("*", "/api/claude-import/{step}", claude_import)
+        app.router.add_post("/api/session/drop/{step}", session_drop)
+        app.router.add_get("/api/session/earlier", session_earlier)
+        app.router.add_get("/api/tunnel/params", tunnel_params)
+        app.router.add_post("/api/tunnel/hello", tunnel_hello)
+        app.router.add_post("/api/tunnel/confirm", tunnel_confirm)
+        app.router.add_get("/api/tunnel/secret", tunnel_secret)
+        app.router.add_post("/api/tunnel/secret", tunnel_secret_set)
+        app.router.add_post("/api/session/profile/add-folder", session_profile_add_folder)
+        app.router.add_get("/api/session/commands", session_commands)
+        app.router.add_get("/api/session/profiles", session_profiles)
+        app.router.add_post("/api/session/profiles", session_profiles_save)
+        app.router.add_get("/api/session/presets", presets_get)
+        app.router.add_post("/api/session/presets", presets_save)
+        app.router.add_post("/api/session/preset/go", preset_go)
+        app.router.add_post("/api/session/preset/cancel", preset_cancel)
+    app.router.add_get("/api/candidates", candidates)
+    app.router.add_post("/api/candidates/resolve", resolve)
+    app.router.add_post("/api/candidates/restore", restore_candidates)
+    app.router.add_post("/api/candidates/public", treat_as_public)
+    app.router.add_post("/api/candidates/snooze", snooze_kind_offer)
+    app.router.add_get("/api/mapping", mapping)
+    app.router.add_post("/api/mapping/client", add_client)
+    app.router.add_post("/api/clients/join", join_client)
+    app.router.add_post("/api/clients/{cid}/index", renumber_client)
+    app.router.add_get("/api/additions", others_additions)
+    app.router.add_get("/api/wiki-index", wiki_index)
+    app.router.add_get("/api/wiki/{page}", wiki_page)
+    app.router.add_post("/api/additions", answer_addition)
+    app.router.add_post("/api/mapping/form", add_form)
+    app.router.add_post("/api/mapping/form/preview", preview_form_token)
+    app.router.add_post("/api/mapping/form/delete", delete_form)
+    app.router.add_post("/api/mapping/forms/delete", delete_forms)
+    app.router.add_post("/api/mapping/forms/restore", restore_forms)
+    app.router.add_post("/api/mapping/client/archive", archive_client)
+    app.router.add_post("/api/mapping/form/move", move_form)
+    app.router.add_post("/api/mapping/form/ignore", form_to_ignore)
+    app.router.add_post("/api/mapping/form/whole-word", whole_word)
+    app.router.add_post("/api/canary/ignore", canary_ignore)
+    app.router.add_post("/api/mapping/forms/ignore", forms_to_ignore)
+    app.router.add_post("/api/ignore/move", move_ignore)
+    app.router.add_get("/api/evidence", evidence)
+    app.router.add_get("/api/log", substitution_log)
+    app.router.add_get("/api/scan", scan_state)
+    app.router.add_post("/api/scan", scan_start)
+    app.router.add_get("/api/config", config_get)
+    app.router.add_get("/api/codetab", codetab_get)
+    app.router.add_get("/api/copilot", copilot_get)
+    app.router.add_get("/api/claudeai", claudeai_get)
+    app.router.add_post("/api/editor/complete", editor_complete)
+    app.router.add_get("/api/editor/services", editor_services)
+    app.router.add_post("/api/config", config_post)
+    app.router.add_post("/api/restart", restart_proxy)
+    app.router.add_get("/api/service", service_get)
+    app.router.add_post("/api/service", service_set)
+    app.router.add_get("/api/feedback/state", feedback_get_state)
+    app.router.add_post("/api/feedback/connect", feedback_connect)
+    app.router.add_post("/api/feedback/disconnect", feedback_disconnect)
+    app.router.add_post("/api/feedback/preview", feedback_preview)
+    app.router.add_get("/api/feedback/tickets", feedback_tickets)
+    app.router.add_post("/api/feedback/tickets", feedback_send)
+    app.router.add_post(r"/api/feedback/tickets/{number:\d+}/{action:comments|close}", feedback_ticket_action)
+    app.router.add_get("/api/updates", updates_info)
+    app.router.add_post("/api/updates/apply", updates_apply)
+    app.router.add_get("/api/setup/dns", setup_dns)
+    app.router.add_post("/api/setup/enable", setup_enable)
+    app.router.add_post("/api/setup/disable", setup_disable)
+    app.router.add_get("/api/aitools", aitools_get)
+    app.router.add_post("/api/aitools/install", aitools_install)
+    app.router.add_route("*", "/api/aitools/device", aitools_device)
+    app.router.add_route("*", "/api/aitools/claude-code/login", aitools_login)
+    app.router.add_post("/api/aitools/claude-code/login/code", aitools_login_code)
+    app.router.add_post("/api/aitools/claude-code/login/cancel", aitools_login_cancel)
+    app.router.add_get("/api/client-drafts", draft_list)
+    app.router.add_post("/api/client-drafts", draft_save)
+    app.router.add_get("/api/client-drafts/{did}", draft_get)
+    app.router.add_post("/api/client-drafts/{did}/delete", draft_delete)
+    app.router.add_get("/api/client-drafts/{did}/summary", draft_summary)
+    app.router.add_post("/api/client-drafts/{did}/finish", draft_finish)
+    app.router.add_post("/api/client-wizard/lookup", wizard_lookup)
+    app.router.add_post("/api/client-wizard/scan", wizard_scan)
+    app.router.add_post("/api/setup/remote", setup_remote)
+    app.router.add_get("/api/setup/remote/state", setup_remote_state)
+    app.router.add_post("/api/setup/remote/replace", setup_remote_replace)
+    app.router.add_get("/api/setup/remote/log", setup_remote_log)
+    app.router.add_get("/api/export/client/{cid}", export_client)
+    app.router.add_get("/api/export/all", export_all)
+    app.router.add_get("/api/export/public", export_public)
+    app.router.add_get("/api/public", public_summary)
+    app.router.add_get("/api/folders", folders_list)
+    app.router.add_get("/api/folders/roots", folders_roots)
+    app.router.add_post("/api/folders/new", folders_new)
+    app.router.add_get("/api/models", models)
+    app.router.add_post("/api/import", import_clients)
+    app.router.add_get("/api/secrets", secrets_list)
+    app.router.add_post("/api/secrets", secrets_add)
+    app.router.add_post("/api/secrets/delete", secrets_delete)
+    app.router.add_get("/api/secrets/mode", secrets_mode)
+    app.router.add_post("/api/secrets/mode", secrets_mode)
+    app.router.add_get("/api/ignore", ignore_list)
+    app.router.add_post("/api/ignore", ignore_add)
+    app.router.add_post("/api/ignore/delete", ignore_delete)
+    app.router.add_post("/api/ignore/tokenise", ignore_tokenise)

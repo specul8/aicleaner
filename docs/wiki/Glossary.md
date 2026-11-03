@@ -47,7 +47,7 @@ loaded as a client; the client is flagged.
 
 **Detail log** - See *substitution log*.
 
-**Dialect** - How aicleaner reads one AI service's API, chosen by the route prefix: `/anthropic/`
+**Dialect** - How AI Cleaner reads one AI service's API, chosen by the route prefix: `/anthropic/`
 (in use) or `/openai/` (built, not wired to any tool).
 
 **Entry** - One real value of a client and its token, for example `contoso.com` and
@@ -62,7 +62,7 @@ JSON, a canary hit, a broken client file.
 **Fail open** - The `canary.fail_open` emergency switch: a request the canary would refuse is sent
 anyway and marked in the evidence log. Off by default.
 
-**Footer** - A short line aicleaner appends to a reply when something new is waiting in Review.
+**Footer** - A short line AI Cleaner appends to a reply when something new is waiting in Review.
 Removed again from the history before it is sent back to the AI service.
 
 **Form** - See *entry*.
@@ -101,7 +101,7 @@ scan. Corrected before tokenising, or held back for review.
 **Placeholder** - A temporary stand-in for an unknown identifier, such as `pending-<hash>.invalid`,
 used until you decide about it in Review. Stable for a given value, and rehydrated in replies.
 
-**Preflight** - `aicleaner preflight <folder>`: scans a repository and its Claude Code history for
+**Preflight** - `AI Cleaner preflight <folder>`: scans a repository and its Claude Code history for
 identifiers the mapping does not know, and ends `READY` or `NOT READY`.
 
 **Profile** - A *project profile*: one engagement on the Project Sessions page - a name, a client, the
@@ -114,13 +114,13 @@ and what tools write and run, uses real names.
 **Review** - The page listing identifiers seen on the wire that the mapping does not know. Map each to
 a client or Global, or ignore it. See [Review](Review.md).
 
-**Scan** - `aicleaner scan <folder>`: lists what a folder would send that the mapping does not know.
+**Scan** - `AI Cleaner scan <folder>`: lists what a folder would send that the mapping does not know.
 `--add` maps the finds; `--queue` sends them to Review.
 
-**Seed** - `aicleaner seed <client-id>`: fills a client's entries from the tenant you are signed in to
+**Seed** - `AI Cleaner seed <client-id>`: fills a client's entries from the tenant you are signed in to
 (organisation name, domains, tenant and subscription ids; `--resources` adds resource names).
 
-**Session** - A *Project Session*: Claude Code run by aicleaner on this machine and driven from the
+**Session** - A *Project Session*: Claude Code run by AI Cleaner on this machine and driven from the
 browser, filtered exactly like a terminal session. One per profile at a time, plus worktree sessions.
 
 **Share** - Two meanings. *Sharing a client*: putting its folder in OneDrive and sharing it with the
@@ -129,7 +129,7 @@ a OneDrive folder per client, recorded in `client-shares.json` on this machine, 
 between this machine and the device driving a session.
 
 **Stamp** - The `_stamp` in a client file: a checksum, the machine and the time, plus a signature
-when the client has a key. A mismatch means the file was edited outside aicleaner.
+when the client has a key. A mismatch means the file was edited outside AI Cleaner.
 
 **Stand-in** - Any value sent in place of a real one: a token, a placeholder, or the stateless
 replacement every GUID gets.

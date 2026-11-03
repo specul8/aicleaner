@@ -4,7 +4,7 @@
 
 A client's file is the unit of sharing: a colleague with the same file gets the same tokens, so a
 conversation, document or commit that carries `Client42` rehydrates to the same real name on both
-machines. aicleaner shares through OneDrive, one folder per client, with exactly that engagement's
+machines. AI Cleaner shares through OneDrive, one folder per client, with exactly that engagement's
 people (DECISIONS 51 and 67).
 
 ## The layout
@@ -54,7 +54,7 @@ read, written, signed and watched like any client created locally. It is refused
 
 ## The key and the stamp
 
-Every client file aicleaner writes carries a `_stamp`: a SHA-256 checksum of the content, the
+Every client file AI Cleaner writes carries a `_stamp`: a SHA-256 checksum of the content, the
 machine that wrote it, and when. With the client's key the stamp is also **signed** (an HMAC over the
 same content), plus a short key id that names the key without revealing it.
 
@@ -62,7 +62,7 @@ same content), plus a short key id that names the key without revealing it.
 |---|---|
 | Signed with this client's key | Used straight away |
 | Unsigned, altered after signing, or signed with a different key | **Held for review**: the client shows "change waiting for review", listing the names added and taken out. The last good copy is used until you **Accept** (signs it with your key) or **Reject** (puts the last good copy back). |
-| No key on this machine | Used as it arrives; a checksum mismatch shows "edited outside aicleaner" |
+| No key on this machine | Used as it arrives; a checksum mismatch shows "edited outside AI Cleaner" |
 
 - The key is kept DPAPI-encrypted under `%USERPROFILE%\.aicleaner\keys`, readable only by your
   Windows account on this PC.
@@ -90,7 +90,7 @@ When two people save at once, OneDrive keeps both as `<id>.json` and `<id>-<COMP
 Tokens are derived from the client's index, then stored in the file. Two people who create
 different clients independently can land on the same index, and then could produce the same token.
 
-- aicleaner only refuses a real clash - two clients with the same token. The message names both
+- AI Cleaner only refuses a real clash - two clients with the same token. The message names both
   clients and the index they share, and suggests giving one a different index.
 - **Change the index** on the Names card gives a client a new index. Only tokens added from then on
   use it; tokens already in the file never change. Do it **before** sharing. It is refused when
@@ -109,7 +109,7 @@ for everyone.
 
 ## A missing folder is a red state
 
-aicleaner never deletes a client, so a client this PC has used whose file is no longer there means
+AI Cleaner never deletes a client, so a client this PC has used whose file is no longer there means
 the folder was unshared, is not syncing, or is online-only. The client shows **file missing** in red
 on the client page and in the status line. Its names are **still replaced**, from the last good copy
 on this machine, until the file is back. Check the folder is still shared with you, synced, and kept

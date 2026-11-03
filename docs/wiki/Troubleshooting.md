@@ -41,7 +41,7 @@ send when reporting a problem. Useful fields:
 | `<client>: conflict copy` (red) | OneDrive saved a second copy after two people edited at once; the copy is ignored | Merge any missing entries by hand, then delete the copy |
 | `<client>: a change is waiting for review` (red) | The file changed without the client's key; last good copy in use | Open the client and review the change |
 | `<client>: update aicleaner to read it` (red) | Written by a newer aicleaner | Update |
-| `a project routes around aicleaner` (red) | A repo's `.claude` settings send Claude Code elsewhere, unfiltered | Remove the override |
+| `a project routes around AI Cleaner` (red) | A repo's `.claude` settings send Claude Code elsewhere, unfiltered | Remove the override |
 | `N to Review` (amber) | New identifiers waiting | See [Review](Review.md) |
 | `N MCP servers get tokens until allowed` (amber) | A remote MCP server receives tokens, not names | Allow it on the Overview if it needs real names |
 | `client files are not in OneDrive` (amber) | Nothing syncs to colleagues | See [Sharing](Sharing.md) |
@@ -85,7 +85,7 @@ If the filter itself is what stops you, stop routing through it rather than unin
 
 ```powershell
 .\installer\Disable-AiCleaner.ps1     # point Claude Code and VS Code back at the real API
-.\installer\Enable-AiCleaner.ps1      # route through aicleaner again
+.\installer\Enable-AiCleaner.ps1      # route through AI Cleaner again
 ```
 
 `Disable-AiCleaner.ps1` changes only the two base-URL settings; the proxy, mapping, logs and settings

@@ -1,0 +1,81 @@
+<!-- aicleaner:start -->
+# Client-data handling (AI Cleaner)
+
+All model traffic from this machine goes through a local proxy that swaps client identifiers
+for tokens. The rules below close the paths the proxy cannot see.
+
+<!-- aicleaner:binaries:start -->
+## Files: always convert locally, never send binaries
+
+Never use the Read tool on `.pdf`, `.docx`, `.xlsx`, `.pptx`, `.msg`, `.eml` or any image file.
+Convert to text with a local command first, then Read the text output. Never convert a file to
+PDF or to an image as an intermediate step, and never render pages to images for "vision".
+
+| Type    | Convert with (run locally via Bash/PowerShell)                                  |
+|---------|----------------------------------------------------------------------------------|
+| .docx   | `pandoc -t gfm --wrap=none "<file>.docx" -o "<file>.md"`                         |
+| .xlsx   | `python -c "import openpyxl,sys;wb=openpyxl.load_workbook(sys.argv[1],data_only=True);[print(f'## {ws.title}') or [print('\t'.join('' if c is None else str(c) for c in r)) for r in ws.iter_rows(values_only=True)] for ws in wb]" "<file>.xlsx" > "<file>.txt"` |
+| .pptx   | `python -c "from pptx import Presentation;import sys;p=Presentation(sys.argv[1]);[print(f'## Slide {i+1}') or [print(sh.text_frame.text) for sh in s.shapes if sh.has_text_frame] for i,s in enumerate(p.slides)]" "<file>.pptx" > "<file>.txt"` |
+| .pdf    | `pdftotext -layout "<file>.pdf" "<file>.txt"` (poppler); if unavailable, `python -c "import fitz,sys;print('\n'.join(p.get_text() for p in fitz.open(sys.argv[1])))" "<file>.pdf" > "<file>.txt"` |
+| images  | Do not read. Ask the user to describe the content or supply it as text.          |
+
+Write conversions next to the source with a `.md` or `.txt` extension. Read only those.
+<!-- aicleaner:binaries:end -->
+<!-- aicleaner:reading:start -->
+## Files: images and PDFs are read on this machine
+
+Use the Read tool on images (screenshots included) and PDFs directly. The proxy reads them on this
+machine and sends only their text, filtered like the rest of the request; the picture or document
+itself never leaves. What arrives is text only - for an image, approximate, and without its layout,
+colours or diagrams - so ask the user when those matter. If a notice says a file was withheld,
+convert it locally as below.
+
+Never use the Read tool on `.docx`, `.xlsx`, `.pptx`, `.msg` or `.eml`: convert them to text with a
+local command first, then Read the text output.
+
+| Type    | Convert with (run locally via Bash/PowerShell)                                  |
+|---------|----------------------------------------------------------------------------------|
+| .docx   | `pandoc -t gfm --wrap=none "<file>.docx" -o "<file>.md"`                         |
+| .xlsx   | `python -c "import openpyxl,sys;wb=openpyxl.load_workbook(sys.argv[1],data_only=True);[print(f'## {ws.title}') or [print('\t'.join('' if c is None else str(c) for c in r)) for r in ws.iter_rows(values_only=True)] for ws in wb]" "<file>.xlsx" > "<file>.txt"` |
+| .pptx   | `python -c "from pptx import Presentation;import sys;p=Presentation(sys.argv[1]);[print(f'## Slide {i+1}') or [print(sh.text_frame.text) for sh in s.shapes if sh.has_text_frame] for i,s in enumerate(p.slides)]" "<file>.pptx" > "<file>.txt"` |
+| .pdf    | `pdftotext -layout "<file>.pdf" "<file>.txt"` (only when a PDF was withheld)    |
+
+Write conversions next to the source with a `.md` or `.txt` extension. Read only those.
+<!-- aicleaner:reading:end -->
+
+## Making documents
+
+The document tools AI Cleaner installs make Word, Excel, PowerPoint and PDF files locally; no extra
+install is needed. pandoc has no PDF engine here, so do not ask it for a PDF directly.
+
+| Make    | With                                                                                    |
+|---------|------------------------------------------------------------------------------------------|
+| .docx   | `pandoc "<file>.md" -o "<file>.docx"` (or python-docx for exact layout)                  |
+| .pdf    | `pandoc "<file>.md" -s -o "<file>.html"`, then Edge prints it: `& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" --headless=new --no-pdf-header-footer --print-to-pdf="<full path>.pdf" "<full path>.html"` |
+| .pdf (simple) | PyMuPDF: `import pymupdf; d = pymupdf.open(); p = d.new_page(); p.insert_htmlbox(p.rect + (72, 72, -72, -72), html); d.save(path)` |
+| .xlsx   | openpyxl or xlsxwriter                                                                   |
+| .pptx   | python-pptx                                                                              |
+
+## Identifiers
+
+Use client identifiers exactly as they appear in the context. Do not reformat, abbreviate,
+hyphenate, re-case or expand them, and do not invent variants. This matters for round-tripping.
+
+This includes names you make up for things you create - app registrations, certificates, groups,
+folders, resource names, tags. Build them from the whole identifier as written (for example
+`<identifier>-BuildTeam-Reader`), never from a shortened form made of its first letter and its
+number. If a shorter prefix is needed, ask for the real one.
+
+A token you see in something you wrote - a file name, a path, code, a command, a document - is
+correct: the proxy put the real name in when you wrote it, and it is on disk with the real name. You
+see the token only because your context is filtered. Never rename, rewrite or "correct" anything
+because it shows a token, and never swap a token for a generic or made-up name.
+
+## Commands that start worker processes
+
+Never run a test runner or build tool through `node -e`, `node -p` or `python -c` - write the script to a file and
+run the file, or use the tool's own command line. Jest is the known case: its workers start with the parent's
+arguments, so each one runs the whole `-e` script again and starts its own workers - thousands of processes in a
+minute, enough to freeze the machine. When a single run is enough, ask for it (`--runInBand` / `runInBand: true`,
+`-n 0`, `--workers=1`).
+<!-- aicleaner:end -->

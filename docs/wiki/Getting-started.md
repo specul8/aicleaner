@@ -3,13 +3,13 @@
 [Home](Home.md) > Getting started
 
 This page takes you from nothing to a filtered session. One run of the deploy script installs
-aicleaner, waits while you tell the filter about a client, then switches filtering on;
+AI Cleaner, waits while you tell the filter about a client, then switches filtering on;
 then you open a first Project Session. Allow an hour for the first client - most of
 it is deciding what names that client.
 
 ## Before you start
 
-aicleaner filters what an AI agent sends, so **the agent must already be installed**:
+AI Cleaner filters what an AI agent sends, so **the agent must already be installed**:
 
 | Agent | Install it with |
 |---|---|
@@ -95,7 +95,7 @@ the AI service directly until then.
    - in `%USERPROFILE%\.claude\settings.json`: `skipWebFetchPreflight`, and Claude Code's telemetry
      and error reporting off (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) - Claude Code still
      updates itself; VS Code's telemetry off too (local and VS Code Server settings);
-   - writes the aicleaner rules block into your user `CLAUDE.md` (images and PDFs are read on this machine and only their text is sent; Office files are converted first; client names are used exactly as written);
+   - writes the AI Cleaner rules block into your user `CLAUDE.md` (images and PDFs are read on this machine and only their text is sent; Office files are converted first; client names are used exactly as written);
    - removes opt-out variables and the weekly update task an earlier install left, reviews
      OpenTelemetry variables that would capture content around the proxy, and checks for settings
      that would route around it;
@@ -239,7 +239,7 @@ PowerShell signed in as the same user. It:
 
 Know the trade-offs: gateway mode uses a separate app profile (`Claude-3p`), so claude.ai chats and
 projects are not visible there, and usage is billed to the Console key, not a subscription. The same
-account on a phone, another PC or claude.ai in a browser has no aicleaner in front of it.
+account on a phone, another PC or claude.ai in a browser has no AI Cleaner in front of it.
 `-Remove` on the Desktop installer takes the policy away again.
 
 ## 4. Start a first Project Session

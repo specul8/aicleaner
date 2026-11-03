@@ -2,7 +2,7 @@
 
 [Home](Home.md) > Review
 
-Review is the inbox for identifiers aicleaner saw in outgoing traffic that the mapping does not
+Review is the inbox for identifiers AI Cleaner saw in outgoing traffic that the mapping does not
 know yet. You decide what each one is: a client's, nobody's, or not worth keeping.
 
 ## What lands here
@@ -89,7 +89,7 @@ When one type has been ignored 20 or more times and kept no more than 1 time in 
 ## Public values
 
 Identifiers that are the same in every tenant (built-in role and policy ids, Microsoft first-party
-application ids, vendor hosts) ship with aicleaner and are never queued. The Settings card
+application ids, vendor hosts) ship with AI Cleaner and are never queued. The Settings card
 [Shared identifiers](Settings.md#card-public-list) shows the list and what it has suppressed since the proxy
 started. **Treat as public** in Review is how you add your own: it goes on Global's ignore list.
 

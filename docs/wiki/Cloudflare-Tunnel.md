@@ -7,7 +7,7 @@ the encrypted tunnel, troubleshooting - is [Remote access](Remote-access.md).
 
 ## What you get
 
-aicleaner's pages, including your AI sessions, at a private address on a domain you own - for
+AI Cleaner's pages, including your AI sessions, at a private address on a domain you own - for
 example `https://cld-bsdq8.yourdomain.com` - from any browser, your phone included. The device you
 use is only a screen: the AI agent still runs on this machine, and everything it sends is still
 filtered here.
@@ -15,12 +15,12 @@ filtered here.
 ## Why it is safe
 
 - **Nothing is opened on this machine.** The tunnel dials out to Cloudflare; no port is opened and
-  aicleaner keeps listening on this machine only. There is nothing on your network to find or attack.
+  AI Cleaner keeps listening on this machine only. There is nothing on your network to find or attack.
 - **Nobody reaches the address without signing in.** Cloudflare Access stands in front of it. You
   choose the sign-in: your Cloudflare account, a one-time PIN emailed to you, or your Google,
   Microsoft or GitHub login - each with its own MFA. Only the email addresses you name get past it;
   everyone else is turned away at Cloudflare, before anything reaches this machine.
-- **aicleaner checks again.** It verifies the sign-in token Cloudflare adds to every request rather
+- **AI Cleaner checks again.** It verifies the sign-in token Cloudflare adds to every request rather
   than trusting it.
 - **With the encrypted tunnel on, nobody can read what crosses it - Cloudflare included.** Cloudflare
   handles the connection's encryption at its edge, so on its own it could see the pages in clear.
@@ -45,4 +45,4 @@ needs. Or do it by hand from the [steps in Remote access](Remote-access.md).
 ## Taking it down
 
 `installer\Uninstall-AiCleaner.ps1 -RemoteOnly` removes the tunnel, the DNS record and the sign-in
-rule, and aicleaner forgets them. Your domain and its other records are not touched.
+rule, and AI Cleaner forgets them. Your domain and its other records are not touched.

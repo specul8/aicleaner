@@ -136,7 +136,7 @@ own filter set to the same text. Clearing the box closes the clients it opened.
 | Card | What it does |
 |---|---|
 | Problem callouts | Shown only when something is wrong (see States below). |
-| **Names** | Client id, display name and index side by side, the matching `aicleaner scan <folder> --add <id>` command, **Change the index**, and **Open in OneDrive**. |
+| **Names** | Client id, display name and index side by side, the matching `AI Cleaner scan <folder> --add <id>` command, **Change the index**, and **Open in OneDrive**. |
 | Entries | The table, filter, bulk bar, **Export mapping and ignore policies** and **Archive**. |
 | Ignored for <client> | The ignore list and pattern offers. |
 | Scan a folder for this client | Runs a repo scan (below). Not on Global. |

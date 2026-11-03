@@ -1,9 +1,0 @@
-{
-  "version": "0.9.349",
-  "minimum": "",
-  "deploy": "installer",
-  "layout": {
-    "*": ""
-  },
-  "migrations": []
-}

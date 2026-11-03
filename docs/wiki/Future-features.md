@@ -53,7 +53,7 @@ Status words:
 | # | Area | What | Status |
 |---|---|---|---|
 | 12 | platform | macOS (and Safari): Keychain, launchd, shell equivalents of the scripts | v1.1 |
-| 18 | platform | aicleaner on an Android phone - today the answer is driving a filtered machine through [Remote access](Remote-access.md) | Open |
+| 18 | platform | AI Cleaner on an Android phone - today the answer is driving a filtered machine through [Remote access](Remote-access.md) | Open |
 
 ## Performance
 
