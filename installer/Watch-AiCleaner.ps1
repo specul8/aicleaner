@@ -55,7 +55,7 @@
     aicleaner's per-user folder. Default %USERPROFILE%\.aicleaner.
 
 .PARAMETER LogPath
-    Where this run's log goes. Default Watch-AiCleaner.log next to the app. Pass '' to turn it off.
+    Where this run's log goes. Default logs\Watch-AiCleaner-<yyyyMMdd>.log in the app folder, one a day (D219; 14 days kept). Pass '' to turn it off.
 
 .PARAMETER HealthDays
     How many days of os-health-*.csv files to keep. Default 14.
@@ -96,7 +96,9 @@ param(
     [string]$StateRoot = (Join-Path $env:USERPROFILE '.aicleaner'),
     [AllowEmptyString()][string]$LogPath = $(
         $dir = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
-        Join-Path $dir 'Watch-AiCleaner.log'
+        # One file a day, added to by each run (every 5 minutes), in logs\ (D219): a fixed name was
+        # overwritten by the next run.
+        Join-Path $dir ("logs\Watch-AiCleaner-{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
     ),
     [ValidateRange(1, 3650)][int]$HealthDays = 14,
     [switch]$NoOsHealth,
@@ -496,8 +498,35 @@ function Invoke-Watch {
     Write-Line $body -Level $(if ($started) { 'Done' } else { 'Error' })
 }
 
+function Initialize-LogFile {
+    <#
+    .SYNOPSIS
+        Makes the log's folder, and keeps only the newest logs of its kind beside it (D219). Never throws.
+    .DESCRIPTION
+        A log of the stamped shape, <name>-<yyyyMMdd>[-HHmmss].log, gets one file per run (or per day), so a run
+        never overwrites the last one's - a fixed name was, and the evidence of why aicleaner stopped went with it
+        (2026-10-29). Of the files of the same name and shape, the newest -Keep stay. A path of any other shape (one
+        passed in) is left as it is, and nothing beside it is touched. The same function is in every script that
+        writes a transcript; a test keeps the copies identical.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$Path, [int]$Keep = 30)
+    try {
+        $folder = Split-Path -Parent $Path
+        if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+        $shape = [regex]::Match((Split-Path -Leaf $Path), '^(?<kind>.+)-\d{8}(-\d{6})?\.log$')
+        if (-not $shape.Success -or -not $folder) { return }
+        $kind = $shape.Groups['kind'].Value
+        $same = '^' + [regex]::Escape($kind) + '-\d{8}(-\d{6})?\.log$'
+        if (-not $PSCmdlet.ShouldProcess($folder, "Keep the newest $Keep $kind logs")) { return }
+        Get-ChildItem -LiteralPath $folder -Filter "$kind-*.log" -File -ErrorAction Stop |
+            Where-Object { $_.Name -match $same } | Sort-Object Name -Descending | Select-Object -Skip $Keep |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch { Write-Verbose "log folder not prepared: $($_.Exception.Message)" }
+}
+
 $transcriptStarted = $false
-if ($LogPath) { try { Start-Transcript -Path $LogPath -Force | Out-Null; $transcriptStarted = $true } catch { Write-Verbose "no transcript: $($_.Exception.Message)" } }
+if ($LogPath) { try { Initialize-LogFile -Path $LogPath -Keep 14; Start-Transcript -Path $LogPath -Append | Out-Null; $transcriptStarted = $true } catch { Write-Verbose "no transcript: $($_.Exception.Message)" } }
 try {
     if ($Install) { Install-Safeguard -ProxyPort $Port -ServicePort $PacPort -ServiceFile $PacFile -Root $StateRoot; return }
     if ($Uninstall) { Uninstall-Safeguard; return }

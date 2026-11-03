@@ -3497,9 +3497,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         root = proxy.cfg.path.parent
         script = root / "installer" / "Enable-RemoteControl.ps1"
         from .restart import RestartError, powershell, spawn_detached
-        log_path = Path(proxy.cfg.log_dir) / "remote-setup.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_path.write_text("", encoding="utf-8")                    # this run's log only
+        from .logfiles import stamped
+        log_path = stamped(Path(proxy.cfg.log_dir), "remote-setup")     # this run's own log (D219)
         try:
             env = {"AICLEANER_CLOUDFLARE_TOKEN": token} if token else {}
             if client_secret:
@@ -3557,9 +3556,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         """What the remote-access run has said so far."""
         if proxy is None:
             return err(ValueError("unavailable"))
-        path = Path(proxy.cfg.log_dir) / "remote-setup.log"
+        from .logfiles import newest
+        path = newest(Path(proxy.cfg.log_dir), "remote-setup")          # the run under way is the newest (D219)
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace") if path else ""
         except OSError:
             text = ""
         failed = "FullyQualifiedErrorId" in text or "CategoryInfo" in text

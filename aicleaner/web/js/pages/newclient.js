@@ -8,7 +8,7 @@ import { postJSON, say, sayError } from '../api.js';
 import { refreshStatus } from '../app.js';
 import { h } from '../dom.js';
 import { openClientWizard, setWizardSkipped, wizardSkipped } from './clientwizard.js';
-import { arrangeSheet } from '../sheet.js';
+import { arrangeSheet, onBackdropClick } from '../sheet.js';
 
 // The short form (feature 111): the id and display name, with the wizard's help. The index is not
 // asked for: it is worked out from the id, every time.
@@ -60,9 +60,7 @@ export function askForNewClient(onCreated) {
     form.elements.label.placeholder = id ? `leave blank to use ${id} as the Display name` : 'e.g. ACME Pty Ltd';
   });
   dialog.addEventListener('close', () => dialog.remove());
-  dialog.addEventListener('click', (event) => {           // the backdrop, not the form
-    if (event.target === dialog) dialog.close();
-  });
+  onBackdropClick(dialog, () => dialog.close());          // the backdrop, not the form
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const id = form.elements.id.value.trim();

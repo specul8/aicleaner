@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 TASK_NAME = "aicleaner-proxy"
-LOG_NAME = "restart.log"
+LOG_NAME = "restart"                   # logs\restart-<stamp>.log, one per run (D219)
 
 
 class RestartError(RuntimeError):
@@ -60,8 +60,8 @@ def restart(root: Path, port: int, log_dir: Path) -> Path:
     missing = [p.name for p in (stop, start) if not p.is_file()]
     if missing:
         raise RestartError(f"{', '.join(missing)} not found beside the app in {root}; restart it by hand")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return spawn_detached(command(root, port), root, log_dir / LOG_NAME)
+    from .logfiles import stamped
+    return spawn_detached(command(root, port), root, stamped(log_dir, LOG_NAME))
 
 
 def spawn_detached(cmd: list[str], cwd: Path, log_path: Path, env: dict[str, str] | None = None) -> Path:

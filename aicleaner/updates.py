@@ -3,7 +3,8 @@
 **Installed** is the newest record in ~/.aicleaner/deployment.json (the repository and tag
 Deploy-AiCleaner.ps1 installed from), falling back to the package version.
 
-**Available** is the highest vX.Y.Z tag on that repository, read with one `git ls-remote --tags` -
+**Available** is the highest release tag on that repository (vX.Y.Z, or release-X.Y.Z from 1.0.0), read with one
+`git ls-remote --tags` -
 the same question Deploy-AiCleaner.ps1 asks before an update, answered with this machine's own git
 credentials (a private repository needs nothing more). Remembered for an hour.
 
@@ -28,8 +29,10 @@ from .restart import RestartError, powershell, spawn_detached
 
 CHECK_EVERY_S = 3600                 # the card's own check, at most this often
 AUTO_EVERY_S = 6 * 3600              # update.auto: how often the proxy looks
-TAG_RE = re.compile(r"refs/tags/v(\d+)\.(\d+)\.(\d+)$")
-LOG_NAME = "update.log"
+# A release is tagged vX.Y.Z up to the bridge and release-X.Y.Z from 1.0.0 (spec 2026-11-03-readme-and-1.0-design).
+TAG_RE = re.compile(r"refs/tags/(?P<tag>(?:v|release-)(\d+)\.(\d+)\.(\d+))$")
+LOG_NAME = "update"                    # logs\update-<stamp>.log, one per run (D219)
+OUTCOME_NAME = "last-update.json"      # Deploy's record of the last update (AI Cleaner 1.0), beside deployment.json
 
 
 def deployment_file() -> Path:
@@ -52,20 +55,34 @@ def installed(path: Path | None = None, root: Path | None = None) -> dict[str, s
             "version": __version__}
 
 
+def last_update(path: Path | None = None) -> dict[str, Any] | None:
+    """The last update's outcome as Deploy recorded it - {at, steps: [{from, to, outcome, reason, at}], log} - or None."""
+    path = path or deployment_file().with_name(OUTCOME_NAME)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def version_key(text: str) -> tuple[int, int, int] | None:
-    found = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", text.strip())
+    found = re.fullmatch(r"(?:v|release-)?(\d+)\.(\d+)\.(\d+)", text.strip())
     return tuple(int(n) for n in found.groups()) if found else None
 
 
 def highest_tag(ls_remote: str) -> str:
-    """The highest vX.Y.Z among `git ls-remote --tags` lines, '' when there is none."""
-    best: tuple[int, int, int] | None = None
+    """The highest release tag among `git ls-remote --tags` lines, as named; '' when there is none. Of a
+    vX.Y.Z and a release-X.Y.Z of the same version, release- wins."""
+    best: tuple[tuple[int, int, int], int] | None = None
+    name = ""
     for line in ls_remote.splitlines():
         found = TAG_RE.search(line.strip())
         if found:
-            key = tuple(int(n) for n in found.groups())
-            best = key if best is None or key > best else best
-    return "v{}.{}.{}".format(*best) if best else ""
+            tag = found.group("tag")
+            key = (tuple(int(n) for n in found.groups()[1:]), int(tag.startswith("release-")))
+            if best is None or key > best:
+                best, name = key, tag
+    return name
 
 
 def latest_tag(repo: str, run: Callable[..., Any] = subprocess.run) -> str:
@@ -103,7 +120,7 @@ class UpdateState:
     def view(self, mine: dict[str, str], auto: bool) -> dict[str, Any]:
         have, can = version_key(mine["version"]), version_key(self.latest)
         return {**mine, "latest": self.latest, "newer": bool(have and can and can > have),
-                "checked_at": self.checked_at, "error": self.error, "auto": auto,
+                "checked_at": self.checked_at, "error": self.error, "auto": auto, "last": last_update(),
                 "updating": bool(self.started_at and time.time() - self.started_at < 900)}
 
 
@@ -120,7 +137,5 @@ def start_update(root: Path, log_dir: Path) -> Path:
     script = root / "installer" / "Deploy-AiCleaner.ps1"
     if not script.is_file():
         raise RestartError(f"{script} is missing, so this install cannot update itself; run the installer by hand")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / LOG_NAME
-    log_path.write_text("", encoding="utf-8")                      # this run's log only
-    return spawn_detached(command(root), root, log_path)
+    from .logfiles import stamped
+    return spawn_detached(command(root), root, stamped(log_dir, LOG_NAME))

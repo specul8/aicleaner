@@ -1686,7 +1686,7 @@ class Proxy:
             raise updates.RestartError(f"{', '.join(busy)} {'is' if len(busy) == 1 else 'are'} in the middle of "
                                        "a turn; update when the turn has finished")
         if self.updates.view(updates.installed(root=root), self.cfg.update_auto)["updating"]:
-            raise updates.RestartError("an update is already under way; see logs/update.log")
+            raise updates.RestartError("an update is already under way; see the newest logs/update-*.log")
         log_path = updates.start_update(root, Path(self.cfg.log_dir))
         self.updates.started_at = time.time()
         log.info("update handed off to Deploy-AiCleaner.ps1 -Action Update (log: %s)", log_path)

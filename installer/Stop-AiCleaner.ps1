@@ -31,10 +31,13 @@ param(
     [switch]$StopSessions,
     # Only brokers keeping their session under this folder are stopped - the install's own. A test
     # run points it at its temp folder, so running the suite never ends a real session.
-    [string]$SessionsRoot = (Join-Path $env:USERPROFILE '.aicleaner\sessions')
+    [string]$SessionsRoot = (Join-Path $env:USERPROFILE '.aicleaner\sessions'),
+    # The app to stop (AI Cleaner 1.0): an update runs the release's own Stop from where it was fetched, not from the
+    # app, and says which app it is. Left out, the app is this script's own folder, as it has always been.
+    [string]$AppFolder = ''
 )
-# The app folder: this script's own, or its parent when it sits in installer\ (feature 102).
-$script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
+# The app folder: -AppFolder, else this script's own, or its parent when it sits in installer\ (feature 102).
+$script:AppFolder = if ($AppFolder) { $AppFolder } elseif (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -162,17 +165,90 @@ function Stop-UnlistenedProxy {
     if ($stale.Count) { Write-Host "==> $($stale.Count) aicleaner process(es) no longer holding port $ProxyPort stopped" -ForegroundColor Green }
 }
 
-$conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $conn) {
+function Wait-PortFree {
+    <# .SYNOPSIS True once nothing listens on the port, false if something still does after the given seconds. #>
+    param([int]$ProxyPort, [int]$Seconds = 20)
+    $until = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $until -and (Get-NetTCPConnection -LocalPort $ProxyPort -State Listen -ErrorAction SilentlyContinue)) {
+        Start-Sleep -Milliseconds 500
+    }
+    return -not (Get-NetTCPConnection -LocalPort $ProxyPort -State Listen -ErrorAction SilentlyContinue)
+}
+
+function Stop-HiddenListener {
+    <#
+    .SYNOPSIS
+        Stops aicleaner on a port whose listener Windows names no owner for; returns the exit code (0 or 1).
+    .DESCRIPTION
+        Windows can name pid 0 as the owner of a listener it will not show this session (2026-10-29, after a boot
+        start: the owner read as Idle, the real proxy was taken for a stale one and stopped, and the stop then failed
+        on "Idle"). So the listener is asked who it is: aicleaner answers /healthz with its forms. Started with the
+        computer it is asked to stop; otherwise it is found by its command line, as a stale proxy is.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([int]$ProxyPort = 8787)
+    $health = $null
+    try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ProxyPort/healthz" -TimeoutSec 5 -ErrorAction Stop } catch { $health = $null }
+    if (-not ($health -and $health.PSObject.Properties['ok'] -and $health.PSObject.Properties['forms'])) {
+        Write-Warning "Port $ProxyPort is held by a process this session cannot see, and it is not aicleaner; not stopping it"
+        return 1
+    }
+    if (-not $PSCmdlet.ShouldProcess("aicleaner on port $ProxyPort (owner not visible)", 'Stop aicleaner proxy')) { return 0 }
+    if ($health.PSObject.Properties['service'] -and [string]$health.service) {
+        try {
+            Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$ProxyPort/api/restart" -ContentType 'application/json' `
+                -Body '{}' -TimeoutSec 10 -ErrorAction Stop | Out-Null
+        } catch {
+            Write-Warning "aicleaner did not take the request to stop: $($_.Exception.Message)"
+            return 1
+        }
+    } else {
+        Stop-UnlistenedProxy -ProxyPort $ProxyPort -Confirm:$false
+    }
+    if (-not (Wait-PortFree -ProxyPort $ProxyPort)) {
+        Write-Warning "aicleaner was asked to stop but still holds port $ProxyPort"
+        return 1
+    }
+    Write-Host "==> aicleaner stopped (its process was not visible to this session)" -ForegroundColor Green
+    Remove-CopilotProxy
+    return 0
+}
+
+function Exit-StopFailed {
+    <#
+    .SYNOPSIS
+        Ends a stop that did not happen with exit code 1, taking stopped-on-purpose away again (D220).
+    .DESCRIPTION
+        The marker is written before anything is stopped, so the start-up task's loop does not start aicleaner again
+        under the stop. Left behind by a stop that failed, it kept aicleaner down: the loop saw the proxy end with the
+        marker there and ended too, and the watchdog would not start it (2026-10-29, twice in an afternoon). A stop
+        that did not happen is not a stop on purpose, so the marker goes and the watchdog may bring aicleaner back.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$Marker)
+    if ($PSCmdlet.ShouldProcess($Marker, 'Take the stopped-on-purpose marker away again')) {
+        Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue
+    }
+    exit 1
+}
+
+$listeners = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+if (-not $listeners) {
     Stop-UnlistenedProxy -ProxyPort $Port
     Write-Host "==> Nothing is listening on port $Port; aicleaner is not running" -ForegroundColor Green; Remove-CopilotProxy; exit 0
+}
+# Pid 0 and 4 are never aicleaner: with only those named, the owner is hidden from this session.
+$conn = $listeners | Where-Object { $_.OwningProcess -gt 4 } | Select-Object -First 1
+if (-not $conn) {
+    if ((Stop-HiddenListener -ProxyPort $Port) -ne 0) { Exit-StopFailed -Marker $stoppedMarker }
+    exit 0
 }
 Stop-UnlistenedProxy -ProxyPort $Port -KeepPid $conn.OwningProcess
 $proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue
 if (-not $proc) { Write-Host "==> Port $Port is held by pid $($conn.OwningProcess), which is no longer running" -ForegroundColor Yellow; Remove-CopilotProxy; exit 0 }
 if ($proc.ProcessName -notlike 'python*') {
     Write-Warning "Port $Port is held by $($proc.ProcessName) (pid $($proc.Id)), not aicleaner; not stopping it"
-    exit 1
+    Exit-StopFailed -Marker $stoppedMarker
 }
 # Feature 107: started with the computer, aicleaner runs in another Windows logon session, and a process there cannot
 # be ended from this one ("Access is denied" - the 2026-10-25 live test). It is asked to end itself instead, through
@@ -186,15 +262,11 @@ if ($health -and $health.PSObject.Properties['service'] -and [string]$health.ser
                 -Body '{}' -TimeoutSec 10 -ErrorAction Stop | Out-Null
         } catch {
             Write-Warning "aicleaner did not take the request to stop: $($_.Exception.Message)"
-            exit 1
+            Exit-StopFailed -Marker $stoppedMarker
         }
-        $until = (Get-Date).AddSeconds(20)
-        while ((Get-Date) -lt $until -and (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) {
-            Start-Sleep -Milliseconds 500
-        }
-        if (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue) {
+        if (-not (Wait-PortFree -ProxyPort $Port)) {
             Write-Warning "aicleaner was asked to stop but still holds port $Port"
-            exit 1
+            Exit-StopFailed -Marker $stoppedMarker
         }
         Write-Host "==> aicleaner stopped (was pid $($proc.Id), started with the computer)" -ForegroundColor Green
         Remove-CopilotProxy
@@ -202,7 +274,8 @@ if ($health -and $health.PSObject.Properties['service'] -and [string]$health.ser
     exit 0
 }
 if ($PSCmdlet.ShouldProcess("pid $($proc.Id) ($($proc.ProcessName))", 'Stop aicleaner proxy')) {
-    Stop-Process -Id $proc.Id -Force
+    try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop }
+    catch { Write-Warning "aicleaner (pid $($proc.Id)) could not be stopped: $($_.Exception.Message)"; Exit-StopFailed -Marker $stoppedMarker }
     Start-Sleep -Milliseconds 800
     Write-Host "==> aicleaner stopped (was pid $($proc.Id))" -ForegroundColor Green
     Remove-CopilotProxy

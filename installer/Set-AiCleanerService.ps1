@@ -86,7 +86,8 @@ param(
     [switch]$NoRelaunch,
     [AllowEmptyString()][string]$LogPath = $(
         $dir = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
-        Join-Path $dir 'Set-AiCleanerService.log'
+        # One file per run, stamped, in logs\ (D219): a fixed name was overwritten by the next run.
+        Join-Path $dir ("logs\Set-AiCleanerService-{0}.log" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
     )
 )
 
@@ -347,7 +348,7 @@ function Enable-Service {
         if ($state -and $state.password_problem) {
             Write-Line 'Windows could not sign the task in. Run this again and enter your password.' -Level Error
         } else {
-            Write-Line "aicleaner did not answer within 3 minutes; see $App\Run-AiCleanerService.log and $App\logs" -Level Warn
+            Write-Line "aicleaner did not answer within 3 minutes; see the newest Run-AiCleanerService-*.log in $App\logs" -Level Warn
         }
     }
     return $true
@@ -442,8 +443,35 @@ if (-not $WhatIfPreference -and -not (Test-Elevated)) {
     exit 2
 }
 
+function Initialize-LogFile {
+    <#
+    .SYNOPSIS
+        Makes the log's folder, and keeps only the newest logs of its kind beside it (D219). Never throws.
+    .DESCRIPTION
+        A log of the stamped shape, <name>-<yyyyMMdd>[-HHmmss].log, gets one file per run (or per day), so a run
+        never overwrites the last one's - a fixed name was, and the evidence of why aicleaner stopped went with it
+        (2026-10-29). Of the files of the same name and shape, the newest -Keep stay. A path of any other shape (one
+        passed in) is left as it is, and nothing beside it is touched. The same function is in every script that
+        writes a transcript; a test keeps the copies identical.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$Path, [int]$Keep = 30)
+    try {
+        $folder = Split-Path -Parent $Path
+        if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+        $shape = [regex]::Match((Split-Path -Leaf $Path), '^(?<kind>.+)-\d{8}(-\d{6})?\.log$')
+        if (-not $shape.Success -or -not $folder) { return }
+        $kind = $shape.Groups['kind'].Value
+        $same = '^' + [regex]::Escape($kind) + '-\d{8}(-\d{6})?\.log$'
+        if (-not $PSCmdlet.ShouldProcess($folder, "Keep the newest $Keep $kind logs")) { return }
+        Get-ChildItem -LiteralPath $folder -Filter "$kind-*.log" -File -ErrorAction Stop |
+            Where-Object { $_.Name -match $same } | Sort-Object Name -Descending | Select-Object -Skip $Keep |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch { Write-Verbose "log folder not prepared: $($_.Exception.Message)" }
+}
+
 $transcriptStarted = $false
-if ($LogPath) { try { Start-Transcript -Path $LogPath -Force | Out-Null; $transcriptStarted = $true } catch { Write-Verbose "no transcript: $($_.Exception.Message)" } }
+if ($LogPath) { try { Initialize-LogFile -Path $LogPath; Start-Transcript -Path $LogPath -Force | Out-Null; $transcriptStarted = $true } catch { Write-Verbose "no transcript: $($_.Exception.Message)" } }
 $exitCode = 0
 try {
     Write-Line "aicleaner start-up task: $Mode, for $UserName, app $AppFolder"

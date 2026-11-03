@@ -165,8 +165,10 @@ export function imageButton(onFiles) {
   const picture = mark('image');
   const page = mark('pdf');
   const button = h('button', { type: 'button', id: 'session-read-image', class: 'btn upload-button',
-    'aria-label': 'Upload an image or PDF: its text is read on this machine and put in the prompt to check',
-    title: 'Read the text in an image or PDF on this machine and put it in the prompt to check' },
+    // What happens depends on Settings > Pictures > On the Session page (D216), so it is named, not assumed.
+    'aria-label': 'Upload an image or PDF: read to text here, or a picture attached, as Settings > Pictures says',
+    title: 'Upload an image or PDF. A PDF is read to text on this machine; a picture is read to text, attached, or '
+      + 'both, as Settings > Pictures > On the Session page says' },
   'Upload ', picture, ' / ', page);
   button.addEventListener('click', () => input.click());
   return h('span', { class: 'read-image' }, button, input);

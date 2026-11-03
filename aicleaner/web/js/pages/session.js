@@ -4397,6 +4397,12 @@ export async function render(main, context = {}) {
       else await downloadMany(items);
       return;
     }
+    // One file's Download (Brad, 2026-11-03: the menu stayed open after it). Closed on the next turn, not now: the
+    // link has to stay in the page until the browser - or the sealed download through the tunnel - has taken it.
+    if (event.target.closest('a.tree-download')) {
+      setTimeout(() => { tree.menu = null; showTree(); }, 0);
+      return;
+    }
     if (event.target.closest('.tree-menu')) return;
     // The triangle opens or closes its folder and does nothing else - no actions menu.
     const toggle = event.target.closest('button.tree-toggle');

@@ -10,7 +10,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Deploy-AiCleaner.p
 set "code=%errorlevel%"
 echo.
 if not "%code%"=="0" (
-    echo Setup stopped with an error. The log is Deploy-AiCleaner.log, beside this file.
+    echo Setup stopped with an error. The log is the newest Deploy-AiCleaner-*.log in %TEMP%.
 ) else (
     echo Setup finished.
 )

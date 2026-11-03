@@ -49,16 +49,30 @@ export function arrangeSheet(dialog, opts = {}) {
   dialog.addEventListener('input', () => { edited = true; });
   dialog.addEventListener('change', (event) => { if (!event.target.matches('input[type=file]')) edited = true; });
   const dirty = opts.dirty || (() => edited);
-  // A click on the backdrop reaches the dialog itself, outside its box.
-  dialog.addEventListener('click', (event) => {
-    if (event.target !== dialog) return;
-    const box = dialog.getBoundingClientRect();
-    const inside = event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom;
-    if (inside) return;
+  onBackdropClick(dialog, () => {
     if (dirty()) { say('There are changes here: use Cancel to discard them, or finish first.', 'warn'); return; }
     requestCancel(dialog);
   });
   return dialog;
+}
+
+// A click on a modal dialog's backdrop: pressed AND released outside its box, as one click (Brad, 2026-11-03). The
+// browser gives a click that started in a field and ended outside - selecting text and letting go past the edge - to
+// the dialog itself, which is where a backdrop click lands too, so the release alone closed the dialog mid-selection.
+export function onBackdropClick(dialog, handler) {
+  const outside = (event) => {
+    if (event.target !== dialog) return false;
+    const box = dialog.getBoundingClientRect();
+    return event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom;
+  };
+  let pressedOutside = false;
+  // Every press decides afresh, so a press inside followed by one outside counts only the second.
+  dialog.addEventListener('pointerdown', (event) => { pressedOutside = event.isPrimary && outside(event); });
+  dialog.addEventListener('click', (event) => {
+    const counts = pressedOutside && outside(event);
+    pressedOutside = false;
+    if (counts) handler(event);
+  });
 }
 
 function layOut(dialog, opts) {

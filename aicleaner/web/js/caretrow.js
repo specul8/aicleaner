@@ -5,8 +5,8 @@
 // recalled the previous prompt instead of moving up a row. VS Code (and this now) only walks the
 // history from the first row (Up) or the last row (Down) as the text is actually laid out.
 //
-// The layout is measured, not guessed: a hidden copy of the box, same width, font and wrapping,
-// holds the text up to the caret, and a marker at its end says how far down the caret sits.
+// The layout is measured, not guessed: a hidden copy of the box, same text width, font and wrapping,
+// holds the whole text with a marker at the caret, and the marker says how far down the caret sits.
 
 const COPIED = ['boxSizing', 'width', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
   'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'fontFamily', 'fontSize',
@@ -44,13 +44,27 @@ function measured(box, position) {
   }
   const style = getComputedStyle(box);
   for (const name of COPIED) mirror.style[name] = style[name];
+  // The room the text really has: clientWidth leaves out the borders and the scroll bar (Brad, 2026-10-29: once the
+  // box scrolled, the copy was a scroll bar wider, kept the wrapped word on the first row, and Up on it recalled the
+  // previous prompt instead of moving up). Padding stays, so the copy takes the width as border-box with no border.
+  // Not clientWidth itself: it is rounded to a whole pixel, and a box 660.6 px wide made a copy 661 px wide, which
+  // kept a word on the first row that the box had wrapped to the second (Brad, 2026-10-29, no scroll bar showing).
+  // The exact width less the borders, less the scroll bar (whole pixels, so offsetWidth - clientWidth is exact).
+  const borders = parseFloat(style.borderLeftWidth) + parseFloat(style.borderRightWidth);
+  const bar = Math.max(0, box.offsetWidth - box.clientWidth - Math.round(borders));
+  mirror.style.boxSizing = 'border-box';
+  mirror.style.width = `${box.getBoundingClientRect().width - borders - bar}px`;
+  for (const side of ['Top', 'Right', 'Bottom', 'Left']) mirror.style[`border${side}Width`] = '0';
   // A textarea always wraps; the copy has to wrap the same way, whatever the stylesheet says.
   mirror.style.whiteSpace = 'pre-wrap';
   mirror.style.overflowWrap = 'break-word';
+  // The whole text, the marker at the caret (Brad, 2026-10-29): with only the text before it, the caret inside a word
+  // the box wraps to the next row - the start of the word fitting where the whole word does not - measured on the row
+  // above, and Up there recalled the previous prompt. A word joiner: no width, and no break where the caret is.
   mirror.textContent = box.value.slice(0, position);
   const marker = document.createElement('span');
-  marker.textContent = '​';           // takes up no width, still has a line to sit on
-  mirror.append(marker);
+  marker.textContent = '⁠';
+  mirror.append(marker, document.createTextNode(box.value.slice(position)));
   return marker;
 }
 

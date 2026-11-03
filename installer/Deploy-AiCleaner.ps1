@@ -146,7 +146,7 @@ ollback\, so a code drop that will not start can be undone
     Folder for the deployment record. Default %USERPROFILE%\.aicleaner.
 
 .PARAMETER LogPath
-    Transcript path. Default %TEMP%\Deploy-AiCleaner.log. Pass '' to disable.
+    Transcript path. Default %TEMP%\Deploy-AiCleaner-<yyyyMMdd-HHmmss>.log (D219; the newest 30 kept). Pass '' to disable.
 
 .EXAMPLE
     .\Deploy-AiCleaner.ps1
@@ -208,7 +208,7 @@ param(
     [ValidateSet('', 'On', 'Off')][string]$Copilot = '',
     [switch]$AssumeDefaults,
     [string]$StateRoot = (Join-Path $env:USERPROFILE '.aicleaner'),
-    [AllowEmptyString()][string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) 'Deploy-AiCleaner.log'),
+    [AllowEmptyString()][string]$LogPath = (Join-Path ([IO.Path]::GetTempPath()) ('Deploy-AiCleaner-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))),
     [switch]$NoSelfUpdate,
     [switch]$SelfUpdated
 )
@@ -725,11 +725,27 @@ function Resolve-RepoUrl {
     throw "Refusing the repository '$url': only https:// addresses (or a local folder) are accepted"
 }
 
+function Test-ReleaseRef {
+    <#
+    .SYNOPSIS
+        True for a release tag: vX.Y.Z (up to the bridge) or release-X.Y.Z (from 1.0.0). Anything else is a branch or
+        a working copy, which an install follows as it is.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$Ref)
+    return [bool]($Ref -match '^(v|release-)\d+\.\d+\.\d+$')
+}
+
 function Resolve-Release {
     <#
     .SYNOPSIS
-        The ref to deploy and its commit: -Ref when given, else the highest vX.Y.Z tag, else main.
+        The ref to deploy, its commit and version: -Ref when given, else the highest release tag, else main.
         Annotated tags are peeled to their commit.
+    .DESCRIPTION
+        A release is tagged vX.Y.Z up to the bridge and release-X.Y.Z from 1.0.0 (spec 2026-11-03-readme-and-1.0-design).
+        A Deploy from before the bridge reads only vX.Y.Z, so it never sees a release- tag. Of the two shapes of one
+        version, release- wins.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Url, [string]$Wanted = '')
@@ -751,22 +767,65 @@ function Resolve-Release {
             if ($found.Count -gt 0) {
                 $name = $found[0].Substring($found[0].IndexOf('/') + 1)
                 if ($name -cne $Wanted) { Write-Status "Using '$name' (the repository's spelling of '$Wanted')" -Level Detail }
-                return [pscustomobject]@{ Ref = $name; Commit = $refs[$found[0]] }
+                $named = [regex]::Match($name, '^(?:v|release-)(?<v>\d+\.\d+\.\d+)$')
+                $version = if ($named.Success) { [version]$named.Groups['v'].Value } else { $null }
+                return [pscustomobject]@{ Ref = $name; Commit = $refs[$found[0]]; Version = $version }
             }
         }
         throw "The repository has no tag or branch named '$Wanted'"
     }
-    $versions = @($refs.Keys | Where-Object { $_ -match '^tags/v\d+\.\d+\.\d+$' } | ForEach-Object {
-        [pscustomobject]@{ Name = $_.Substring(5); Version = [version]$_.Substring(6) } } | Sort-Object Version)
+    $versions = @($refs.Keys | ForEach-Object {
+        $tag = [regex]::Match($_, '^tags/(?<name>(?<shape>v|release-)(?<v>\d+\.\d+\.\d+))$')
+        if ($tag.Success) {
+            [pscustomobject]@{ Name = $tag.Groups['name'].Value; Version = [version]$tag.Groups['v'].Value
+                               Shape = [int]($tag.Groups['shape'].Value -eq 'release-') }
+        } } | Sort-Object Version, Shape)
     if ($versions.Count -gt 0) {
-        $newest = $versions[$versions.Count - 1].Name
-        return [pscustomobject]@{ Ref = $newest; Commit = $refs["tags/$newest"] }
+        $newest = $versions[$versions.Count - 1]
+        return [pscustomobject]@{ Ref = $newest.Name; Commit = $refs["tags/$($newest.Name)"]; Version = $newest.Version }
     }
     if ($refs.ContainsKey('heads/main')) {
         Write-Status 'The repository has no release tags (vX.Y.Z); using main, which may be unreleased work' -Level Warn
-        return [pscustomobject]@{ Ref = 'main'; Commit = $refs['heads/main'] }
+        return [pscustomobject]@{ Ref = 'main'; Commit = $refs['heads/main']; Version = $null }
     }
     throw 'The repository has no release tags and no main branch'
+}
+
+function Get-ReleaseRef {
+    <# Every release tag of a repository, oldest first: {Ref; Commit; Version}. Both shapes (vX.Y.Z, release-X.Y.Z). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Url)
+    $pattern = [regex]'^(?<sha>[0-9a-f]{40,64})\s+refs/tags/(?<name>(?:v|release-)(?<v>\d+\.\d+\.\d+))(?<peeled>\^\{\})?$'
+    $found = @{}
+    foreach ($line in (Invoke-Git -Arguments @('ls-remote', '--tags', $Url))) {
+        $tag = $pattern.Match($line)
+        if (-not $tag.Success) { continue }
+        $name = $tag.Groups['name'].Value
+        if ($tag.Groups['peeled'].Success -or -not $found.ContainsKey($name)) {
+            $found[$name] = [pscustomobject]@{ Ref = $name; Commit = $tag.Groups['sha'].Value; Version = [version]$tag.Groups['v'].Value }
+        }
+    }
+    return @($found.Values | Sort-Object Version, @{ Expression = { [int]$_.Ref.StartsWith('release-') } })
+}
+
+function Select-UpdateHop {
+    <#
+    .SYNOPSIS
+        The release to install next (AI Cleaner 1.0): the newest, unless its signpost names a minimum the install is
+        below - then the release of that version first (release- before v of the same version). The next run carries
+        on from there.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Installed, [Parameter(Mandatory)]$Newest, [string]$Minimum = '',
+          [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Refs)
+    if (-not $Minimum) { return [string]$Newest.Ref }
+    $have = [version]($Installed -replace '^(v|release-)', '')
+    $least = [version]($Minimum -replace '^(v|release-)', '')
+    if ($have -ge $least) { return [string]$Newest.Ref }
+    $step = @($Refs | Where-Object { $_.Version -eq $least } | Sort-Object @{ Expression = { [int]([string]$_.Ref).StartsWith('release-') } })
+    if ($step.Count -eq 0) { throw "$($Newest.Ref) needs $Minimum installed first, and the repository has no release $Minimum" }
+    return [string]$step[$step.Count - 1].Ref
 }
 
 # What a copy of the source never contains: build leftovers, someone else's editor and tool state,
@@ -835,6 +894,59 @@ function Get-SourceFile {
     return $found.ToArray()
 }
 
+function Convert-ReleasePath {
+    <#
+    .SYNOPSIS
+        A repository path ('/' separated) as the install path it lands at, or $null when it is not installed.
+    .DESCRIPTION
+        The signpost's layout (Read-Signpost): the longest matching prefix wins; "*" is anything else; a prefix mapped
+        to $null is not installed. From 1.0 the code is under src/ and lands where it always has: src/installer/x.ps1
+        -> installer/x.ps1 (spec 2026-11-03-readme-and-1.0-design.md).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][System.Collections.IDictionary]$Layout)
+    $best = $null
+    foreach ($prefix in @($Layout.Keys)) {
+        if ($prefix -eq '*') { continue }
+        if ($Path.StartsWith([string]$prefix, [StringComparison]::OrdinalIgnoreCase) -and
+            ($null -eq $best -or ([string]$prefix).Length -gt $best.Length)) { $best = [string]$prefix }
+    }
+    if ($null -ne $best) {
+        $to = $Layout[$best]
+        if ($null -eq $to) { return $null }
+        return [string]$to + $Path.Substring($best.Length)
+    }
+    if (-not $Layout.Contains('*')) { return $Path }
+    $rest = $Layout['*']
+    if ($null -eq $rest) { return $null }
+    return [string]$rest + $Path
+}
+
+function Convert-ReleaseFileList {
+    <#
+    .SYNOPSIS
+        Turns a fetched release's (or working copy's) repository paths into install paths, by its signpost.
+    .DESCRIPTION
+        Files becomes the install paths (what the record, role selection and the dropped-files step have always
+        held), and Sources maps each back to the repository path Copy-Release copies from. Run after the signature
+        check, which needs the repository paths.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Fetched)
+    $layout = (Read-Signpost -Folder $Fetched.Folder).layout
+    $sources = @{}
+    $installed = New-Object System.Collections.Generic.List[string]
+    foreach ($repoPath in @($Fetched.Files)) {
+        $to = Convert-ReleasePath -Path $repoPath -Layout $layout
+        if ($null -eq $to -or $to -eq '') { continue }
+        $sources[$to] = $repoPath
+        $installed.Add($to)
+    }
+    $Fetched | Add-Member -NotePropertyName 'Files' -NotePropertyValue $installed.ToArray() -Force
+    $Fetched | Add-Member -NotePropertyName 'Sources' -NotePropertyValue $sources -Force
+    return $Fetched
+}
+
 function Get-WorkingCopy {
     <#
     .SYNOPSIS
@@ -856,27 +968,39 @@ function Get-WorkingCopy {
         try { $head = @(Invoke-Git -Arguments @('-C', $Folder, 'rev-parse', 'HEAD'))[0] } catch { $head = '' }
     } else {
         # A copy of the source - through OneDrive, a file share, a zip - has no tracked-file list.
-        if (-not (Test-Path -LiteralPath (Join-Path $Folder 'aicleaner\__init__.py'))) {
-            throw "$Folder does not hold the aicleaner source (no aicleaner\__init__.py). Point -SourcePath at the copy, or use -Action GetSource to clone it"
+        if (-not (Test-Path -LiteralPath (Join-Path $Folder 'aicleaner\__init__.py')) -and
+            -not (Test-Path -LiteralPath (Join-Path $Folder 'src\aicleaner\__init__.py'))) {
+            throw "$Folder does not hold the aicleaner source (no aicleaner\__init__.py, or src\aicleaner\__init__.py from 1.0). Point -SourcePath at the copy, or use -Action GetSource to clone it"
         }
         $files = @(Get-PlainCopyFiles -Folder $Folder)
         Write-Status "No .git here, so this is a copy rather than a clone: taking every file except build leftovers and deployment data" -Level Warn
         Write-Status 'A clone deploys exactly what is tracked; -Action GetSource makes one.' -Level Detail
     }
     if ($files.Count -eq 0) { throw "$Folder has no tracked files" }
-    $version = ''
-    $init = Join-Path $Folder 'aicleaner\__init__.py'
-    if (Test-Path -LiteralPath $init) {
-        $declared = [regex]::Match((Get-Content -LiteralPath $init -Raw), '__version__\s*=\s*"(?<v>[^"]+)"')
-        if ($declared.Success) { $version = $declared.Groups['v'].Value }
-    }
+    $version = Get-PackageVersion -Folder $Folder
     if ($isClone) {
         $dirty = @(Invoke-Git -Arguments @('-C', $Folder, 'status', '--porcelain') | Where-Object { $_ })
         if ($dirty.Count -gt 0) {
             Write-Status "$($dirty.Count) uncommitted change(s) in the working copy; they are deployed as they are" -Level Warn
         }
     }
-    return [pscustomobject]@{ Folder = $Folder; Files = $files; Version = $version; Commit = $head }
+    # Mapped like a release (AI Cleaner 1.0): a working copy with its code under src/ installs as a release does.
+    return Convert-ReleaseFileList -Fetched ([pscustomobject]@{ Folder = $Folder; Files = $files; Version = $version; Commit = $head })
+}
+
+function Get-PackageVersion {
+    <# The __version__ a source folder carries: src\aicleaner\ from 1.0, aicleaner\ before; '' when there is none. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Folder)
+    foreach ($inside in @('src\aicleaner\__init__.py', 'aicleaner\__init__.py')) {
+        $init = Join-Path $Folder $inside
+        if (Test-Path -LiteralPath $init) {
+            $declared = [regex]::Match((Get-Content -LiteralPath $init -Raw), '__version__\s*=\s*"(?<v>[^"]+)"')
+            if ($declared.Success) { return $declared.Groups['v'].Value }
+        }
+    }
+    return ''
 }
 
 function Get-Release {
@@ -900,13 +1024,10 @@ function Get-Release {
     $pinned = [string]$script:PinnedSigningKey
     $unsignedOk = $script:AllowUnsignedRelease -or ($AlreadyInstalled -and -not $pinned)
     $signingKey = Assert-ReleaseSigned -Folder $script:Stage -Files $files -Pinned $pinned -AllowUnsigned:$unsignedOk
-    $version = ''
-    $init = Join-Path $script:Stage 'aicleaner\__init__.py'
-    if (Test-Path -LiteralPath $init) {
-        $declared = [regex]::Match((Get-Content -LiteralPath $init -Raw), '__version__\s*=\s*"(?<v>[^"]+)"')
-        if ($declared.Success) { $version = $declared.Groups['v'].Value }
-    }
-    return [pscustomobject]@{ Folder = $script:Stage; Files = $files; Version = $version; SigningKey = $signingKey }
+    $version = Get-PackageVersion -Folder $script:Stage
+    # Install paths from here on (AI Cleaner 1.0): the signature was checked on the repository's.
+    return Convert-ReleaseFileList -Fetched ([pscustomobject]@{ Folder = $script:Stage; Files = $files; Version = $version
+                                                             SigningKey = $signingKey })
 }
 
 # ---------------------------------------------------------------------------
@@ -956,6 +1077,63 @@ function Find-SshKeygen {
     return ''
 }
 
+function Find-ReleaseFolder {
+    <#
+    .SYNOPSIS
+        The folder of a fetched release (or working copy) that holds its RELEASE-MANIFEST: src\release from 1.0,
+        release\ since feature 102, else the folder itself (a release from before feature 102).
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Folder)
+    foreach ($inside in @('src\release', 'release')) {
+        $candidate = Join-Path $Folder $inside
+        if (Test-Path -LiteralPath (Join-Path $candidate 'RELEASE-MANIFEST')) { return $candidate }
+    }
+    return $Folder
+}
+
+function Read-Signpost {
+    <#
+    .SYNOPSIS
+        What a release says about itself (AI Cleaner 1.0, spec 2026-11-03-readme-and-1.0-design.md).
+    .DESCRIPTION
+        RELEASE.json beside the signed manifest (and listed in it, so it is signed): version; minimum, the lowest
+        installed version that may update straight to this one; deploy, the repository folder holding Deploy, Stop
+        and Start; layout, repository path prefix -> install path prefix (the longest match wins, "*" is anything
+        else, $null is not installed); migrations, one-off steps ({id; script; touches}). A release from before the
+        signpost has none and reads as its defaults, with the version from the package it carries.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Folder)
+    $said = [ordered]@{ version = ''; minimum = ''; deploy = 'installer'; layout = [ordered]@{ '*' = '' }; migrations = @() }
+    $file = Join-Path (Find-ReleaseFolder -Folder $Folder) 'RELEASE.json'
+    if (Test-Path -LiteralPath $file) {
+        $json = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($name in 'version', 'minimum', 'deploy') {
+            if ($json.PSObject.Properties[$name] -and $null -ne $json.$name) { $said[$name] = [string]$json.$name }
+        }
+        if ($json.PSObject.Properties['layout'] -and $json.layout) {
+            $map = [ordered]@{}
+            foreach ($entry in $json.layout.PSObject.Properties) { $map[$entry.Name] = $entry.Value }
+            $said.layout = $map
+        }
+        if ($json.PSObject.Properties['migrations'] -and $json.migrations) {
+            $said.migrations = @($json.migrations | Where-Object { $null -ne $_ })
+        }
+    }
+    if (-not $said.version) {
+        foreach ($inside in @('src\aicleaner\__init__.py', 'aicleaner\__init__.py')) {
+            $init = Join-Path $Folder $inside
+            if (Test-Path -LiteralPath $init) {
+                $declared = [regex]::Match((Get-Content -LiteralPath $init -Raw), '__version__\s*=\s*"(?<v>[^"]+)"')
+                if ($declared.Success) { $said.version = $declared.Groups['v'].Value; break }
+            }
+        }
+    }
+    return [pscustomobject]$said
+}
+
 function Assert-ReleaseSigned {
     <#
     .SYNOPSIS
@@ -974,8 +1152,8 @@ function Assert-ReleaseSigned {
           [string]$Pinned = '', [switch]$AllowUnsigned, [switch]$Subset)
     # The signer identity and the namespace, both: tools/sign_release.py signs with the same.
     $identity = 'aicleaner-release'
-    # In release\ since feature 102; a release tagged before the move keeps them at its root.
-    $releaseDir = if (Test-Path -LiteralPath (Join-Path $Folder 'release\RELEASE-MANIFEST')) { Join-Path $Folder 'release' } else { $Folder }
+    # In src\release from 1.0, release\ since feature 102; a release tagged before that keeps them at its root.
+    $releaseDir = Find-ReleaseFolder -Folder $Folder
     $manifest = Join-Path $releaseDir 'RELEASE-MANIFEST'
     $signature = Join-Path $releaseDir 'RELEASE-MANIFEST.sig'
     $named = Join-Path $releaseDir 'release-signing.pub'
@@ -1042,7 +1220,8 @@ function Assert-ReleaseSigned {
         $entry = [regex]::Match($line, '^(?<hash>[0-9a-f]{64})  (?<path>.+)$')
         if ($entry.Success) { $listed[$entry.Groups['path'].Value] = $entry.Groups['hash'].Value }
     }
-    $unlisted = @('RELEASE-MANIFEST', 'RELEASE-MANIFEST.sig', 'release/RELEASE-MANIFEST', 'release/RELEASE-MANIFEST.sig')
+    $unlisted = @('RELEASE-MANIFEST', 'RELEASE-MANIFEST.sig', 'release/RELEASE-MANIFEST', 'release/RELEASE-MANIFEST.sig',
+                  'src/release/RELEASE-MANIFEST', 'src/release/RELEASE-MANIFEST.sig')
     $shipped = @($Files | Where-Object { $unlisted -notcontains $_ })
     foreach ($relative in $shipped) {
         if (-not $listed.ContainsKey($relative)) { throw "$relative is in the release but not in its signed manifest: refusing it." }
@@ -1229,7 +1408,12 @@ function Copy-Release {
         $destination = Join-Path $AppRoot $native
         $folder = Split-Path -Parent $destination
         if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
-        Copy-Item -LiteralPath (Join-Path $Fetched.Folder $native) -Destination $destination -Force
+        # Where it is in the repository (AI Cleaner 1.0: src/... for most files); the same path before the move.
+        $from = $native
+        if ($Fetched.PSObject.Properties['Sources'] -and $Fetched.Sources -and $Fetched.Sources.ContainsKey($relative)) {
+            $from = ([string]$Fetched.Sources[$relative]).Replace('/', '\')
+        }
+        Copy-Item -LiteralPath (Join-Path $Fetched.Folder $from) -Destination $destination -Force
     }
     Write-Status "Copied $($Fetched.Files.Count) files to $AppRoot" -Level Detail
 }
@@ -1324,7 +1508,7 @@ function Invoke-Rollback {
         Data is untouched, exactly as Save-Rollback did not copy it.
     #>
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$StateFolder)
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$StateFolder, [switch]$Unattended)
     $snapshots = @(Get-RollbackSnapshots -StateFolder $StateFolder)
     if ($snapshots.Count -eq 0) {
         Write-Status "No kept build to roll back to under $(Get-RollbackRoot -StateFolder $StateFolder)" -Level Error
@@ -1335,7 +1519,8 @@ function Invoke-Rollback {
     $recordPath = Join-Path $snapshot.FullName 'rollback-record.json'
     $keptRecord = Read-JsonFile -Path $recordPath
     $keptRef = if ($keptRecord.PSObject.Properties.Name -contains 'ref') { [string]$keptRecord.ref } else { 'an earlier build' }
-    if (-not (Confirm-Action -Message "Put the build from $($snapshot.Name) ($keptRef) back into ${AppRoot}?" -Default 'Yes')) {
+    # -Unattended (AI Cleaner 1.0): an update that failed puts the previous build back by itself, asking nobody.
+    if (-not $Unattended -and -not (Confirm-Action -Message "Put the build from $($snapshot.Name) ($keptRef) back into ${AppRoot}?" -Default 'Yes')) {
         Write-Status 'Rollback declined' -Level Detail
         return $false
     }
@@ -1347,16 +1532,132 @@ function Invoke-Rollback {
     $restored = 0
     foreach ($item in @(Get-ChildItem -LiteralPath $snapshot.FullName -File -Recurse)) {
         $relative = $item.FullName.Substring($snapshot.FullName.Length).TrimStart('\')
-        if ($relative -eq 'rollback-record.json') { continue }
+        if ($relative -eq 'rollback-record.json' -or $relative.StartsWith('migration-data\')) { continue }
         $destination = Join-Path $AppRoot $relative
         $folder = Split-Path -Parent $destination
         if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
         Copy-Item -LiteralPath $item.FullName -Destination $destination -Force
         $restored++
     }
+    # The data the update's one-off steps changed (AI Cleaner 1.0), put back where it came from.
+    foreach ($root in @(@{ Name = 'app'; To = $AppRoot }, @{ Name = 'state'; To = $StateFolder })) {
+        $kept = Join-Path $snapshot.FullName "migration-data\$($root.Name)"
+        if (-not (Test-Path -LiteralPath $kept)) { continue }
+        foreach ($item in @(Get-ChildItem -LiteralPath $kept -File -Recurse)) {
+            $destination = Join-Path $root.To $item.FullName.Substring($kept.Length).TrimStart('\')
+            $folder = Split-Path -Parent $destination
+            if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+            Copy-Item -LiteralPath $item.FullName -Destination $destination -Force
+            $restored++
+        }
+    }
     Save-Deployment -Record $keptRecord
     Write-Status "Rolled back to $keptRef ($restored files). Start the proxy with Start-AiCleaner.ps1 -Detach" -Level Done
     return $true
+}
+
+function Invoke-PendingMigration {
+    <#
+    .SYNOPSIS
+        A release's one-off steps not yet run on this install, in order (AI Cleaner 1.0). Returns the ids run.
+    .DESCRIPTION
+        From the signpost: {id; script (a repository path in the release); touches ("app:<path>" or "state:<path>")}.
+        What a step touches is copied into the update's rollback snapshot (migration-data\app, migration-data\state)
+        first, so a rollback puts the data back with the code. Each runs as -AppRoot <app> -StateFolder <state>; one
+        that fails throws, and the update rolls back. The caller records the ids once the update has succeeded.
+    #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([Parameter(Mandatory)]$Signpost, [Parameter(Mandatory)][string]$Stage, [Parameter(Mandatory)][string]$AppRoot,
+          [Parameter(Mandatory)][string]$StateFolder, [Parameter(Mandatory)]$Record, [string]$Snapshot = '')
+    $done = if ($Record.PSObject.Properties['migrations'] -and $Record.migrations) { @($Record.migrations | ForEach-Object { [string]$_ }) } else { @() }
+    $ran = New-Object System.Collections.Generic.List[string]
+    foreach ($step in @($Signpost.migrations)) {
+        if (-not $step -or -not $step.PSObject.Properties['id']) { continue }
+        $id = [string]$step.id
+        if ($done -contains $id) { continue }
+        if ($Snapshot -and $step.PSObject.Properties['touches']) {
+            foreach ($touched in @($step.touches)) {
+                $where = [regex]::Match([string]$touched, '^(?<root>app|state):(?<path>.+)$')
+                if (-not $where.Success) { continue }
+                $base = if ($where.Groups['root'].Value -eq 'app') { $AppRoot } else { $StateFolder }
+                $relative = $where.Groups['path'].Value.Replace('/', '\')
+                $from = Join-Path $base $relative
+                if (-not (Test-Path -LiteralPath $from -PathType Leaf)) { continue }
+                $to = Join-Path $Snapshot ("migration-data\$($where.Groups['root'].Value)\$relative")
+                $folder = Split-Path -Parent $to
+                if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+                Copy-Item -LiteralPath $from -Destination $to -Force
+            }
+        }
+        Write-Status "One-off step $id" -Level Detail
+        Invoke-AppScript -Path (Join-Path $Stage ([string]$step.script).Replace('/', '\')) -Arguments @('-AppRoot', $AppRoot, '-StateFolder', $StateFolder)
+        $ran.Add($id)
+    }
+    return $ran.ToArray()
+}
+
+function Set-UpdateInProgress {
+    <#
+    .SYNOPSIS
+        Notes, just before anything is stopped, that an update is under way (AI Cleaner 1.0). Removed when the update
+        ends either way; found by the next run when it was cut off part-way (Resume-InterruptedUpdate).
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$StateFolder, [string]$From = '', [string]$To = '', [string]$Snapshot = '')
+    if (-not $PSCmdlet.ShouldProcess($StateFolder, 'Note that an update is under way')) { return }
+    Write-JsonFile -Path (Join-Path $StateFolder 'update-in-progress.json') -Object ([pscustomobject]@{
+        from_ref = $From; to_ref = $To; rollback = $Snapshot; at = (Get-Date).ToString('o') })
+}
+
+function Clear-UpdateInProgress {
+    <# The update ended, whichever way. #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$StateFolder)
+    $marker = Join-Path $StateFolder 'update-in-progress.json'
+    if ((Test-Path -LiteralPath $marker) -and $PSCmdlet.ShouldProcess($marker, 'Remove')) {
+        Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Resume-InterruptedUpdate {
+    <#
+    .SYNOPSIS
+        An earlier update that never finished (its marker is still there): the previous build put back and started
+        before anything else, so this run starts from working code. True when it did.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$StateFolder)
+    $marker = Join-Path $StateFolder 'update-in-progress.json'
+    if (-not (Test-Path -LiteralPath $marker)) { return $false }
+    $said = Read-JsonFile -Path $marker
+    $from = if ($said -and $said.PSObject.Properties['from_ref']) { [string]$said.from_ref } else { 'the previous version' }
+    $to = if ($said -and $said.PSObject.Properties['to_ref']) { [string]$said.to_ref } else { 'a newer one' }
+    Write-Status "An earlier update ($from to $to) did not finish; putting $from back first" -Level Warn
+    [void](Invoke-Rollback -AppRoot $AppRoot -StateFolder $StateFolder -Unattended)
+    Update-Runtime -AppRoot $AppRoot -WheelCache ''
+    Clear-UpdateInProgress -StateFolder $StateFolder
+    return $true
+}
+
+function Complete-Update {
+    <#
+    .SYNOPSIS
+        After the new version was started: it answers within -Seconds (60), or the previous build is put back and
+        started. {Outcome = 'installed' | 'rolled-back'; Reason}. A Workstation (no proxy) has nothing to wait for.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$StateFolder, [Parameter(Mandatory)][int]$Port,
+          [bool]$RunsProxy = $true, [int]$Seconds = 60, [string]$PreviousCache = '')
+    if (-not $RunsProxy) { return [pscustomobject]@{ Outcome = 'installed'; Reason = '' } }
+    if (Wait-ProxyHealth -Port $Port -Seconds $Seconds) { return [pscustomobject]@{ Outcome = 'installed'; Reason = '' } }
+    Write-Status "The new version did not answer within $Seconds seconds; putting the previous one back" -Level Warn
+    $back = Invoke-Rollback -AppRoot $AppRoot -StateFolder $StateFolder -Unattended
+    if ($back) { Update-Runtime -AppRoot $AppRoot -WheelCache $PreviousCache }
+    $reason = "the new version did not answer within $Seconds seconds"
+    if (-not (Wait-ProxyHealth -Port $Port -Seconds $Seconds)) { $reason += '; the previous version did not answer either - see the log' }
+    return [pscustomobject]@{ Outcome = 'rolled-back'; Reason = $reason }
 }
 
 function Remove-RecordedFiles {
@@ -1442,6 +1743,27 @@ function Copy-ContactFile {
 # ---------------------------------------------------------------------------
 # Wiring (the existing installers, run as child processes of the same PowerShell)
 # ---------------------------------------------------------------------------
+
+function Get-StopCommand {
+    <#
+    .SYNOPSIS
+        How an update stops AI Cleaner: {Path; Arguments} for Invoke-AppScript.
+    .DESCRIPTION
+        The release's own Stop-AiCleaner.ps1, from the fetched and signature-checked release, so a fix to stopping
+        takes effect in the same update (AI Cleaner 1.0; 2026-10-29's outages came from the installed Stop). It runs
+        from the stage, so it is told the app (-AppFolder); a release whose Stop cannot be told (older than the bridge)
+        is not used, and the installed one is.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][int]$Port, $Fetched = $null)
+    $installed = [pscustomobject]@{ Path = (Get-AppFile -AppRoot $AppRoot -Name 'Stop-AiCleaner.ps1'); Arguments = @('-Port', [string]$Port) }
+    if (-not $Fetched -or -not $Fetched.PSObject.Properties['Sources'] -or -not $Fetched.Sources) { return $installed }
+    $repoPath = $Fetched.Sources['installer/Stop-AiCleaner.ps1']
+    if (-not $repoPath) { return $installed }
+    $offered = Join-Path $Fetched.Folder ([string]$repoPath).Replace('/', '\')
+    if (-not (Test-Path -LiteralPath $offered) -or (@(Get-ScriptParameterName -Path $offered) -notcontains 'AppFolder')) { return $installed }
+    return [pscustomobject]@{ Path = $offered; Arguments = @('-Port', [string]$Port, '-AppFolder', $AppRoot) }
+}
 
 function Invoke-AppScript {
     <#
@@ -1610,10 +1932,95 @@ function Get-ConfiguredPort {
     return 8787
 }
 
+function Get-FreeSpace {
+    <# The free space on the drive holding $Path, which need not exist yet. #>
+    [CmdletBinding()]
+    [OutputType([int64])]
+    param([Parameter(Mandatory)][string]$Path)
+    $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
+    return [int64]([IO.DriveInfo]::new($root).AvailableFreeSpace)
+}
+
+function Get-PipDownloadArgumentList {
+    <# pip, fetching the locked wheels (hash-checked) into a cache before anything is stopped (AI Cleaner 1.0). #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([Parameter(Mandatory)][string]$Lock, [Parameter(Mandatory)][string]$Cache)
+    # $Lock is the release's requirements.lock.
+    return @('-m', 'pip', 'download', '--quiet', '--disable-pip-version-check', '--require-hashes', '--only-binary', ':all:', '-r', $Lock, '-d', $Cache)
+}
+
+function Get-PipInstallArgumentList {
+    <# pip, installing the locked wheels from the cache only - no network once AI Cleaner is stopped (AI Cleaner 1.0). #>
+    [CmdletBinding()]
+    [OutputType([string[]])]
+    param([Parameter(Mandatory)][string]$Lock, [Parameter(Mandatory)][string]$Cache)
+    return @('-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '--require-hashes', '--only-binary', ':all:', '--no-index', '--find-links', $Cache, '-r', $Lock)   # -Lock is the installed requirements.lock
+}
+
+function Invoke-Pip {
+    <# Runs pip with the venv's Python; returns its exit code. #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param([Parameter(Mandatory)][string]$Python, [Parameter(Mandatory)][string[]]$Arguments)
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Python @Arguments 2>&1 | ForEach-Object { Write-Status "$_" -Level Detail } }
+    finally { $ErrorActionPreference = $savedEap }
+    return [int]$LASTEXITCODE
+}
+
+function Test-UpdateReady {
+    <#
+    .SYNOPSIS
+        Everything an update needs, checked before anything is stopped (AI Cleaner 1.0): {Ready; Reason; WheelCache}.
+    .DESCRIPTION
+        The Python environment is there; the release's locked packages download (hash-checked) into
+        <state>\wheels\<version>, so after the stop they install from there with no network; and the app's drive has
+        three times the release's size free (the copy, the rollback copy and the stage). Not ready: the update ends
+        here with AI Cleaner still running on the version it has.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Fetched, [Parameter(Mandatory)][string]$AppRoot, [Parameter(Mandatory)][string]$StateFolder,
+          [string]$VenvPython = (Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'), [bool]$NeedsPython = $true)
+    $version = if ($Fetched.PSObject.Properties['Version'] -and $Fetched.Version) { [string]$Fetched.Version } else { 'unversioned' }
+    $cache = Join-Path $StateFolder "wheels\$version"
+    $sources = if ($Fetched.PSObject.Properties['Sources'] -and $Fetched.Sources) { $Fetched.Sources } else { @{} }
+    $size = [int64]0
+    foreach ($file in @($Fetched.Files)) {
+        $from = if ($sources.ContainsKey($file)) { [string]$sources[$file] } else { [string]$file }
+        $item = Get-Item -LiteralPath (Join-Path $Fetched.Folder $from.Replace('/', '\')) -ErrorAction SilentlyContinue
+        if ($item) { $size += $item.Length }
+    }
+    $reason = ''
+    $free = Get-FreeSpace -Path $AppRoot
+    if ($free -lt 3 * $size) {
+        $reason = "not enough disk space on $([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($AppRoot))): " +
+                  "$([Math]::Round($free / 1MB)) MB free, $([Math]::Round(3 * $size / 1MB)) MB needed"
+    } elseif (-not $NeedsPython) {
+        return [pscustomobject]@{ Ready = $true; Reason = ''; WheelCache = '' }
+    } elseif (-not (Test-Path -LiteralPath $VenvPython)) {
+        $reason = "the Python environment ($VenvPython) is missing; run Deploy-AiCleaner.ps1 again to rebuild it"
+    } else {
+        $lockPath = @($Fetched.Files | Where-Object { $_ -like '*requirements.lock' } | Select-Object -First 1)
+        if ($lockPath.Count -gt 0) {
+            $from = if ($sources.ContainsKey($lockPath[0])) { [string]$sources[$lockPath[0]] } else { [string]$lockPath[0] }
+            $lock = Join-Path $Fetched.Folder $from.Replace('/', '\')
+            $wanted = @(Get-Content -LiteralPath $lock -ErrorAction SilentlyContinue | Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') })
+            if ($wanted.Count -gt 0) {
+                if (-not (Test-Path -LiteralPath $cache)) { New-Item -ItemType Directory -Path $cache -Force | Out-Null }
+                $code = Invoke-Pip -Python $VenvPython -Arguments (Get-PipDownloadArgumentList -Lock $lock -Cache $cache)
+                if ($code -ne 0) { $reason = "the release's Python packages could not be downloaded (pip exit $code)" }
+            }
+        }
+    }
+    return [pscustomobject]@{ Ready = -not $reason; Reason = $reason; WheelCache = $cache }
+}
+
 function Update-Runtime {
     <# After new code is in place on a wired machine: requirements, validation, proxy start. #>
     [CmdletBinding(SupportsShouldProcess)]
-    param([Parameter(Mandatory)][string]$AppRoot)
+    param([Parameter(Mandatory)][string]$AppRoot, [string]$WheelCache = '')
     $venvPython = Join-Path $env:USERPROFILE '.aicleaner\venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $venvPython)) {
         # Nothing to start the proxy with. Saying so beats a start that fails with a path nobody chose.
@@ -1624,7 +2031,10 @@ function Update-Runtime {
     if ($PSCmdlet.ShouldProcess('requirements.lock', 'pip install')) {
         # Exactly the wheels whose SHA-256 is in the lock, or nothing (H17): a malicious release of a
         # dependency would otherwise run inside the process holding every client mapping.
-        & $venvPython -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary :all: -r (Get-AppFile -AppRoot $AppRoot -Name 'requirements.lock')
+        # From the cache Test-UpdateReady filled before the stop (AI Cleaner 1.0): no network needed now.
+        $lockFile = Get-AppFile -AppRoot $AppRoot -Name 'requirements.lock'
+        if ($WheelCache -and (Test-Path -LiteralPath $WheelCache)) { & $venvPython @(Get-PipInstallArgumentList -Lock $lockFile -Cache $WheelCache) }
+        else { & $venvPython -m pip install --quiet --disable-pip-version-check --require-hashes --only-binary :all: -r (Get-AppFile -AppRoot $AppRoot -Name 'requirements.lock') }
         if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
         # From the app folder: the venv holds aiohttp, and aicleaner is imported from there. Run
         # from wherever this script was launched, it reports "No module named aicleaner".
@@ -2965,7 +3375,9 @@ function Update-Deployment {
     .SYNOPSIS
         Brings a deployment's code up to the newest release (or the working copy it came from).
     .DESCRIPTION
-        Sets $script:UpdateOutcome to what happened: 'current', 'updated', 'declined' or 'whatif'.
+        Sets $script:UpdateOutcome to what happened: 'current', 'updated', 'declined', 'whatif', 'not-updated'
+        (with $script:UpdateReason) when the checks before the stop failed, or 'rolled-back' (with the reason) when the
+        new version failed part-way or did not answer, and the previous one was put back.
         It does NOT return it: this function runs child scripts, and capturing its output
         ($x = Update-Deployment) turns their console into a pipe. The proxy it starts inherits that
         pipe's handle and holds it open for as long as it runs, so the caller waited for ever on a
@@ -2980,10 +3392,16 @@ function Update-Deployment {
     [CmdletBinding(SupportsShouldProcess)]
     param([Parameter(Mandatory)]$Record, [switch]$SkipRuntime,
           [string]$StateFolder = '')
-    $script:UpdateOutcome = ''
+    $script:UpdateOutcome = ''; $script:UpdateReason = ''; $script:NextHop = $false; $script:MigrationsRun = @()
     $appRoot = [string]$Record.install_path
     $targets = @($Record.targets)
     $runsProxy = @($targets | Where-Object { @('VSCode', 'Desktop') -contains $_ }).Count -gt 0
+    $stateForUpdate = if ($StateFolder) { $StateFolder } else { $script:StateFolder }
+    # An update cut off part-way (AI Cleaner 1.0): put the previous build back and start it before anything else.
+    if ($stateForUpdate -and (Resume-InterruptedUpdate -AppRoot $appRoot -StateFolder $stateForUpdate)) {
+        $Record = @(Get-DeploymentRecords | Where-Object { (Test-SameFolder -Left ([string]$_.install_path) -Right $appRoot) } | Select-Object -Last 1)[0]
+        if (-not $Record) { throw 'The deployment record went missing while an interrupted update was put back' }
+    }
     $source = Resolve-UpdateSource -Record $Record -FromWorkingCopy:$FromWorkingCopy -RepoUrl $RepoUrl `
         -RunFolder $script:ScriptFolder
     # Said before anything is asked, so "update from where?" is answered without reading the record.
@@ -3015,7 +3433,7 @@ function Update-Deployment {
         # channel: leaving one for the repository means the newest release (D52).
         $follow = $Ref
         if (-not $follow -and [string]$Record.ref -and [string]$Record.ref -ne 'working-copy' -and
-            [string]$Record.ref -notmatch '^v\d+\.\d+\.\d+$') {
+            -not (Test-ReleaseRef -Ref ([string]$Record.ref))) {
             $follow = [string]$Record.ref
         }
         Resolve-RepoAccess -Url $url -TokenPath (Join-Path $script:StateFolder 'secrets\github-token.dpapi')
@@ -3032,37 +3450,112 @@ function Update-Deployment {
         # The key this install trusts (H16); none yet means the first signed release pins one.
         $script:PinnedSigningKey = if ($Record.PSObject.Properties['signing_key']) { [string]$Record.signing_key } else { '' }
         $fetched = Get-Release -Url $url -Release $release
+        # A release may need an earlier one first (AI Cleaner 1.0): its signpost's minimum. Below it, that one is
+        # installed now and the next run carries on (the hop's own Deploy, relaunched at the end).
+        $script:NextHop = $false
+        if (-not $follow -and [string]$Record.version) {
+            $minimum = [string](Read-Signpost -Folder $fetched.Folder).minimum
+            $hop = Select-UpdateHop -Installed ([string]$Record.version) -Newest $release -Minimum $minimum -Refs (Get-ReleaseRef -Url $url)
+            if ($hop -ne $release.Ref) {
+                Write-Status "$($release.Ref) needs $minimum installed first: installing $hop now, then $($release.Ref)" -Level Step
+                Remove-Stage
+                $release = Resolve-Release -Url $url -Wanted $hop
+                $fetched = Get-Release -Url $url -Release $release
+                $script:NextHop = $true
+            }
+        }
         $newRef = $release.Ref
         $newCommit = $release.Commit
         $newUrl = $url
     }
+    $script:TargetVersion = [string]$fetched.Version
     $wanted = @(Select-RoleFiles -Files $fetched.Files -Targets $targets)
     $fetched | Add-Member -NotePropertyName 'Files' -NotePropertyValue $wanted -Force
-    if ($runsProxy) { Invoke-AppScript -Path (Get-AppFile -AppRoot $appRoot -Name 'Stop-AiCleaner.ps1') -Arguments @('-Port', [string](Get-ConfiguredPort -AppRoot $appRoot)) }
-    # Keep what is about to be overwritten, before overwriting it (#61). A failing code drop
-    # takes the AI tooling down with it, and the remedy has to be something that does not depend
-    # on the thing that broke.
-    if ($StateFolder) { [void](Save-Rollback -AppRoot $appRoot -StateFolder $StateFolder -Record $Record) }
-    Copy-Release -Fetched $fetched -AppRoot $appRoot
-    Remove-Stage
-    $dropped = @(@($Record.files) | Where-Object { $wanted -notcontains $_ })
-    if ($dropped.Count -gt 0) {
-        Remove-RecordedFiles -AppRoot $appRoot -Files $dropped
-        Write-Status "Removed $($dropped.Count) files no longer in the release" -Level Detail
+    # Everything checked before anything is stopped (AI Cleaner 1.0): not ready leaves AI Cleaner running as it is.
+    $ready = Test-UpdateReady -Fetched $fetched -AppRoot $appRoot -StateFolder $stateForUpdate -NeedsPython $runsProxy
+    if (-not $ready.Ready) {
+        Write-Status "Not updated: $($ready.Reason). aicleaner keeps running on $($Record.ref)" -Level Warn
+        if ($source.Kind -ne 'working-copy') { Remove-Stage }
+        $script:UpdateOutcome = 'not-updated'; $script:UpdateReason = $ready.Reason
+        return
     }
-    Update-TaskPath -AppRoot $appRoot
-    $Record.ref = $newRef; $Record.commit = $newCommit; $Record.version = $fetched.Version
-    $Record.repo_url = $newUrl; $Record.files = $wanted
-    # Pinned from the first signed release on; an unsigned one (-AllowUnsigned) never unpins it.
-    if ($fetched.PSObject.Properties['SigningKey'] -and [string]$fetched.SigningKey) {
-        $Record | Add-Member -NotePropertyName 'signing_key' -NotePropertyValue ([string]$fetched.SigningKey) -Force
+    $script:WheelCache = $ready.WheelCache
+    $previousCache = if ($stateForUpdate -and [string]$Record.version) { Join-Path $stateForUpdate "wheels\$([string]$Record.version)" } else { '' }
+    # Keep what is about to be overwritten, before overwriting it (#61), and note the update before anything stops: a
+    # failing code drop takes the AI tooling down with it, and the way back must not depend on the thing that broke.
+    $snapshot = ''
+    if ($stateForUpdate) {
+        $snapshot = [string](Save-Rollback -AppRoot $appRoot -StateFolder $stateForUpdate -Record $Record)
+        Set-UpdateInProgress -StateFolder $stateForUpdate -From ([string]$Record.ref) -To $newRef -Snapshot $snapshot
     }
-    Save-Deployment -Record $Record
-    # No data migrations exist yet; a versioned migration step belongs here (FUTURE-FEATURES #14).
-    # A re-run leaves the runtime to the installer that follows: it builds the venv if it has gone,
-    # installs the requirements, checks the mapping and starts the proxy, in that order. Starting the
-    # proxy here first failed whenever the venv was missing - which is exactly when a repair is run.
-    if ($runsProxy -and -not $SkipRuntime) { Update-Runtime -AppRoot $appRoot }
+    if ($runsProxy) {
+        try {
+            $stop = Get-StopCommand -AppRoot $appRoot -Port (Get-ConfiguredPort -AppRoot $appRoot) -Fetched $fetched
+            Invoke-AppScript -Path $stop.Path -Arguments $stop.Arguments
+        } catch {
+            # D220 (2026-10-29): a stop that failed partway had already ended the proxy, and the update then gave up
+            # with nothing running. Nothing has been copied yet, so the version still installed is started again
+            # before the failure is reported.
+            Write-Status 'The stop failed; starting aicleaner again on the version still installed' -Level Warn
+            if ($stateForUpdate) { Clear-UpdateInProgress -StateFolder $stateForUpdate }
+            try { Invoke-AppScript -Path (Get-AppFile -AppRoot $appRoot -Name 'Start-AiCleaner.ps1') -Arguments @('-Detach') }
+            catch { Write-Status "aicleaner could not be started again: $($_.Exception.Message)" -Level Warn }
+            throw
+        }
+    }
+    try {
+        Copy-Release -Fetched $fetched -AppRoot $appRoot
+        $dropped = @(@($Record.files) | Where-Object { $wanted -notcontains $_ })
+        if ($dropped.Count -gt 0) {
+            Remove-RecordedFiles -AppRoot $appRoot -Files $dropped
+            Write-Status "Removed $($dropped.Count) files no longer in the release" -Level Detail
+        }
+        Update-TaskPath -AppRoot $appRoot
+        # The one-off steps run from the fetched release (its signpost and scripts), so before the stage goes.
+        $script:MigrationsRun = @()
+        if ($stateForUpdate) {
+            $script:MigrationsRun = @(Invoke-PendingMigration -Signpost (Read-Signpost -Folder $fetched.Folder) -Stage $fetched.Folder `
+                -AppRoot $appRoot -StateFolder $stateForUpdate -Record $Record -Snapshot $snapshot)
+        }
+        Remove-Stage
+        $Record.ref = $newRef; $Record.commit = $newCommit; $Record.version = $fetched.Version
+        $Record.repo_url = $newUrl; $Record.files = $wanted
+        # Pinned from the first signed release on; an unsigned one (-AllowUnsigned) never unpins it.
+        if ($fetched.PSObject.Properties['SigningKey'] -and [string]$fetched.SigningKey) {
+            $Record | Add-Member -NotePropertyName 'signing_key' -NotePropertyValue ([string]$fetched.SigningKey) -Force
+        }
+        Save-Deployment -Record $Record
+        # No data migrations exist yet; a versioned migration step belongs here (FUTURE-FEATURES #14).
+        # A re-run leaves the runtime to the installer that follows: it builds the venv if it has gone,
+        # installs the requirements, checks the mapping and starts the proxy, in that order. Starting the
+        # proxy here first failed whenever the venv was missing - which is exactly when a repair is run.
+        if ($runsProxy -and -not $SkipRuntime) { Update-Runtime -AppRoot $appRoot -WheelCache $script:WheelCache }
+    } catch {
+        # Anything that failed between the stop and the start (AI Cleaner 1.0): the previous build back, not nothing.
+        Write-Status "The update failed part-way ($($_.Exception.Message)); putting the previous version back" -Level Warn
+        if ($stateForUpdate -and (Invoke-Rollback -AppRoot $appRoot -StateFolder $stateForUpdate -Unattended)) {
+            if ($runsProxy) { Update-Runtime -AppRoot $appRoot -WheelCache $previousCache }
+        }
+        if ($stateForUpdate) { Clear-UpdateInProgress -StateFolder $stateForUpdate }
+        $script:UpdateOutcome = 'rolled-back'; $script:UpdateReason = "the update failed part-way: $($_.Exception.Message)"
+        return
+    }
+    if (-not $SkipRuntime -and $stateForUpdate) {
+        $done = Complete-Update -AppRoot $appRoot -StateFolder $stateForUpdate -Port (Get-ConfiguredPort -AppRoot $appRoot) `
+            -RunsProxy $runsProxy -PreviousCache $previousCache
+        if ($done.Outcome -eq 'rolled-back') {
+            Clear-UpdateInProgress -StateFolder $stateForUpdate
+            $script:UpdateOutcome = 'rolled-back'; $script:UpdateReason = $done.Reason
+            return
+        }
+    }
+    if ($stateForUpdate) { Clear-UpdateInProgress -StateFolder $stateForUpdate }
+    if (@($script:MigrationsRun).Count -gt 0) {
+        # Recorded only now the update has succeeded: a rolled-back step runs again next time.
+        $before = if ($Record.PSObject.Properties['migrations'] -and $Record.migrations) { @($Record.migrations) } else { @() }
+        $Record | Add-Member -NotePropertyName 'migrations' -NotePropertyValue @($before + $script:MigrationsRun) -Force
+        Save-Deployment -Record $Record
+    }
     Update-AgentTool -AppRoot $appRoot -Targets @($Record.targets)
     Write-Status "aicleaner updated to $newRef ($($wanted.Count) files)" -Level Done
     $script:UpdateOutcome = 'updated'
@@ -3199,13 +3692,57 @@ function Update-AgentTool {
     catch { Write-Status "Telemetry setting not checked: $($_.Exception.Message)" -Level Warn }
 }
 
+function Write-UpdateOutcome {
+    <#
+    .SYNOPSIS
+        The update's result, where Settings > Updates reads it: <state>\last-update.json (AI Cleaner 1.0).
+    .DESCRIPTION
+        One step per release installed (or not). The steps of one run - a minimum-version step and the release after
+        it, each by its own Deploy - share AICLEANER_UPDATE_CHAIN (set by the first, inherited by the one it starts)
+        and are listed together; a new run starts a new list.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$StateFolder, [string]$From = '', [string]$To = '',
+          [Parameter(Mandatory)][string]$Outcome, [string]$Reason = '', [string]$Log = '')
+    if (-not $env:AICLEANER_UPDATE_CHAIN) { $env:AICLEANER_UPDATE_CHAIN = [guid]::NewGuid().ToString('N') }
+    $path = Join-Path $StateFolder 'last-update.json'
+    if (-not $PSCmdlet.ShouldProcess($path, "Record the update's outcome ($Outcome)")) { return }
+    $steps = @()
+    if (Test-Path -LiteralPath $path) {
+        $before = Read-JsonFile -Path $path
+        if ($before -and $before.PSObject.Properties['chain'] -and [string]$before.chain -eq $env:AICLEANER_UPDATE_CHAIN -and
+            $before.PSObject.Properties['steps']) { $steps = @($before.steps) }
+    }
+    $now = (Get-Date).ToString('o')
+    $steps += [pscustomobject]@{ from = $From; to = $To; outcome = $Outcome; reason = $Reason; at = $now }
+    Write-JsonFile -Path $path -Object ([pscustomobject]@{ at = $now; chain = $env:AICLEANER_UPDATE_CHAIN; steps = $steps; log = $Log })
+}
+
 function Invoke-Update {
     [CmdletBinding(SupportsShouldProcess)]
     param()
     $record = Select-Deployment -Verb 'update'
     if (-not $record) { throw "No deployment record at $script:RecordPath; use -Action Install" }
+    $fromVersion = [string]$record.version
+    $script:TargetVersion = ''
     Update-Deployment -Record $record -StateFolder $script:StateFolder
+    # Where Settings > Updates shows it (AI Cleaner 1.0); then, when a minimum came first, the next step.
+    $shown = @{ updated = 'installed'; current = 'current'; 'not-updated' = 'not-updated'; 'rolled-back' = 'rolled-back' }
+    if ($shown.ContainsKey([string]$script:UpdateOutcome) -and $script:StateFolder) {
+        $toVersion = if ($script:TargetVersion) { $script:TargetVersion } else { $fromVersion }
+        Write-UpdateOutcome -StateFolder $script:StateFolder -From $fromVersion -To $toVersion -Outcome $shown[[string]$script:UpdateOutcome] `
+            -Reason ([string]$script:UpdateReason) -Log ([string]$script:LogFile)
+    }
+    if ($script:UpdateOutcome -eq 'updated' -and $script:NextHop) {
+        # The next step: the Deploy just installed updates itself to the newest release's first (its self-check), so
+        # each hop is installed by its own release's scripts.
+        Write-Status 'Carrying on to the newest release' -Level Step
+        Invoke-AppScript -Path (Get-AppFile -AppRoot ([string]$record.install_path) -Name 'Deploy-AiCleaner.ps1') `
+            -Arguments @('-Action', 'Update', '-AssumeDefaults', '-StateRoot', $script:StateRoot)
+    }
     if ($script:UpdateOutcome -eq 'declined') { throw 'Stopped at your request' }
+    if ($script:UpdateOutcome -eq 'not-updated') { throw "Not updated: $script:UpdateReason (aicleaner is still running as it was)" }
+    if ($script:UpdateOutcome -eq 'rolled-back') { throw "The update was rolled back: $script:UpdateReason" }
     if ($script:CodeTabWanted) { Set-CodeTab -AppRoot ([string]$record.install_path) -State $script:CodeTabWanted }
     if ($script:CopilotWanted) { Set-Copilot -AppRoot ([string]$record.install_path) -State $script:CopilotWanted }
 }
@@ -3356,7 +3893,7 @@ function Get-SelfUpdateSource {
     $isLocal = $url -match '^file://' -or (Test-Path -LiteralPath $url -PathType Container)
     if ($url -notmatch '^https://[^\s/]+/\S+$' -and -not $isLocal) { return $null }
     $wanted = $Ref
-    if (-not $wanted -and $last -and [string]$last.ref -notmatch '^v\d+\.\d+\.\d+$') { $wanted = [string]$last.ref }
+    if (-not $wanted -and $last -and -not (Test-ReleaseRef -Ref ([string]$last.ref))) { $wanted = [string]$last.ref }
     $pinned = if ($last -and $last.PSObject.Properties['signing_key']) { [string]$last.signing_key } else { '' }
     return [pscustomobject]@{ Url = $url; Wanted = $wanted; Pinned = $pinned }
 }
@@ -3371,6 +3908,20 @@ function Get-ScriptParameterName {
     $tree = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$problems)
     if (-not $tree.ParamBlock) { return @() }
     return @($tree.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+}
+
+function Get-OfferedDeploy {
+    <#
+    .SYNOPSIS
+        Where a fetched release keeps its Deploy-AiCleaner.ps1: {Path; Listed}, Listed being the repository path the
+        signed manifest names. The signpost's deploy folder (src/installer from 1.0), installer\ before it.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Stage)
+    $folder = ([string](Read-Signpost -Folder $Stage).deploy).Trim('/')
+    if (-not $folder) { $folder = 'installer' }
+    return [pscustomobject]@{ Path = Join-Path $Stage ($folder.Replace('/', '\') + '\Deploy-AiCleaner.ps1')
+                              Listed = "$folder/Deploy-AiCleaner.ps1" }
 }
 
 function Invoke-SelfUpdate {
@@ -3418,17 +3969,19 @@ function Invoke-SelfUpdate {
         $release = Resolve-Release -Url $source.Url -Wanted $source.Wanted
         Invoke-Git -Arguments @('-c', 'advice.detachedHead=false', 'clone', '--quiet', '--depth', '1', '--filter=blob:none',
             '--sparse', '--branch', $release.Ref, $source.Url, $stage) | Out-Null
-        Invoke-Git -Arguments @('-C', $stage, 'sparse-checkout', 'set', 'installer', 'release') | Out-Null
-        $offered = Join-Path $stage 'installer\Deploy-AiCleaner.ps1'
+        # Both layouts: installer\ and release\ until 1.0, src\installer and src\release from it (the signpost says).
+        Invoke-Git -Arguments @('-C', $stage, 'sparse-checkout', 'set', 'installer', 'release', 'src/installer', 'src/release') | Out-Null
+        $deploy = Get-OfferedDeploy -Stage $stage
+        $offered = $deploy.Path
         if (-not (Test-Path -LiteralPath $offered)) {
-            Write-Status "Self-check: $($release.Ref) has no installer\Deploy-AiCleaner.ps1; carrying on with this one" -Level Detail
+            Write-Status "Self-check: $($release.Ref) has no $($deploy.Listed); carrying on with this one" -Level Detail
             return $null
         }
         if ((Get-NormalisedHash -Path $offered) -eq (Get-NormalisedHash -Path $ScriptPath)) {
             Write-Status "Deploy-AiCleaner.ps1 is the one in $($release.Ref)" -Level Detail
             return $null
         }
-        $manifest = Join-Path $stage 'release\RELEASE-MANIFEST'
+        $manifest = Join-Path (Find-ReleaseFolder -Folder $stage) 'RELEASE-MANIFEST'
         if (-not (Test-Path -LiteralPath $manifest)) {
             Write-Status "$($release.Ref) has a different Deploy-AiCleaner.ps1, but the ref is not signed" -Level Warn
             if (-not (Confirm-Action -Message 'Use that unsigned script instead of this one?' -Default 'No')) {
@@ -3436,7 +3989,7 @@ function Invoke-SelfUpdate {
                 return $null
             }
         } else {
-            [void](Assert-ReleaseSigned -Folder $stage -Files @('installer/Deploy-AiCleaner.ps1') -Pinned $source.Pinned -Subset)
+            [void](Assert-ReleaseSigned -Folder $stage -Files @($deploy.Listed) -Pinned $source.Pinned -Subset)
         }
         if (-not $PSCmdlet.ShouldProcess($ScriptPath, "Replace with the copy in $($release.Ref)")) { return $null }
         Write-Status "A newer Deploy-AiCleaner.ps1 is in $($release.Ref); updating myself and starting again" -Level Step
@@ -3478,9 +4031,37 @@ if (-not $NoSelfUpdate -and -not $SelfUpdated -and $PSCommandPath) {
 
 Write-ContactAttribution
 
+function Initialize-LogFile {
+    <#
+    .SYNOPSIS
+        Makes the log's folder, and keeps only the newest logs of its kind beside it (D219). Never throws.
+    .DESCRIPTION
+        A log of the stamped shape, <name>-<yyyyMMdd>[-HHmmss].log, gets one file per run (or per day), so a run
+        never overwrites the last one's - a fixed name was, and the evidence of why aicleaner stopped went with it
+        (2026-10-29). Of the files of the same name and shape, the newest -Keep stay. A path of any other shape (one
+        passed in) is left as it is, and nothing beside it is touched. The same function is in every script that
+        writes a transcript; a test keeps the copies identical.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([string]$Path, [int]$Keep = 30)
+    try {
+        $folder = Split-Path -Parent $Path
+        if ($folder -and -not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+        $shape = [regex]::Match((Split-Path -Leaf $Path), '^(?<kind>.+)-\d{8}(-\d{6})?\.log$')
+        if (-not $shape.Success -or -not $folder) { return }
+        $kind = $shape.Groups['kind'].Value
+        $same = '^' + [regex]::Escape($kind) + '-\d{8}(-\d{6})?\.log$'
+        if (-not $PSCmdlet.ShouldProcess($folder, "Keep the newest $Keep $kind logs")) { return }
+        Get-ChildItem -LiteralPath $folder -Filter "$kind-*.log" -File -ErrorAction Stop |
+            Where-Object { $_.Name -match $same } | Sort-Object Name -Descending | Select-Object -Skip $Keep |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch { Write-Verbose "log folder not prepared: $($_.Exception.Message)" }
+}
+
 $transcriptStarted = $false
+$script:LogFile = if ($LogPath -and -not $WhatIfPreference) { $LogPath } else { '' }   # shown with an update's outcome
 if ($LogPath -and -not $WhatIfPreference) {
-    try { Start-Transcript -Path $LogPath -Force | Out-Null; $transcriptStarted = $true }
+    try { Initialize-LogFile -Path $LogPath; Start-Transcript -Path $LogPath -Force | Out-Null; $transcriptStarted = $true }
     catch { Write-Status "Could not start transcript at ${LogPath}: $($_.Exception.Message)" -Level Warn }
 }
 

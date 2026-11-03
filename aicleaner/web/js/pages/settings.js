@@ -1530,6 +1530,8 @@ function updatesCard(s) {
   const installedLine = h('p', { class: 'updates-installed' }, 'Installed: ...');
   const availableLine = h('p', { class: 'updates-available' }, 'Checking for a newer release...');
   const checkedLine = h('p', { class: 'hint updates-checked' });
+  // The last update's outcome (AI Cleaner 1.0): each release installed, or why not, and the log.
+  const lastList = h('ul', { class: 'updates-last', hidden: true });
   const check = h('button', { type: 'button', class: 'updates-check' }, 'Check now');
   const apply = h('button', { type: 'button', class: 'primary updates-apply' }, 'Update now');
   // Always shown (E3 part 9, feedback #2): it appeared only when a newer release existed, so someone up
@@ -1541,9 +1543,21 @@ function updatesCard(s) {
     installedLine.textContent = `Installed: v${info.version}${from}`;
     availableLine.className = `updates-available${info.newer ? ' ok' : ''}`;
     availableLine.textContent = info.error ? `Could not check: ${info.error}`
-      : info.updating ? 'An update is under way - see logs/update.log.'
+      : info.updating ? 'An update is under way - see the newest logs/update-*.log.'
         : info.newer ? `${info.latest} is available.` : info.latest ? `Up to date (newest release: ${info.latest}).` : 'No releases found.';
     checkedLine.textContent = info.checked_at ? `Last checked ${shortTime(new Date(info.checked_at * 1000).toISOString())}.` : '';
+    const steps = (info.last && Array.isArray(info.last.steps)) ? info.last.steps : [];
+    lastList.replaceChildren(...steps.map((step) => {
+      const when = step.at ? ` ${shortTime(step.at)}` : '';
+      const failed = step.outcome === 'not-updated' || step.outcome === 'rolled-back';
+      const said = step.outcome === 'installed' ? `${step.to} installed${when}`
+        : step.outcome === 'current' ? `Up to date (${step.to})${when}`
+          : step.outcome === 'rolled-back' ? `Update to ${step.to} failed and was rolled back${when}: ${step.reason}`
+            : `Not updated to ${step.to}${when}: ${step.reason}`;
+      const log = failed && info.last.log ? ` Log: ${info.last.log}` : '';
+      return h('li', { class: failed ? 'warn' : '' }, said + log);
+    }));
+    lastList.hidden = !steps.length;
     apply.disabled = !info.newer || info.updating;
     apply.textContent = info.newer ? `Update now to ${info.latest}` : info.latest ? `Up to date (${info.latest})` : 'Update now';
   };
@@ -1565,8 +1579,8 @@ function updatesCard(s) {
   });
   load(false);
   return card('updates', 'Version and updates',
-    'Updates come from the repository this install came from: the newest vX.Y.Z release there. Update now runs the installer\'s own update (Deploy-AiCleaner.ps1 -Action Update) on this machine, which stops the proxy, installs the release and starts it again; sessions carry on. Output goes to logs/update.log.',
-    [installedLine, availableLine, h('div', { class: 'form-row' }, check, apply), checkedLine,
+    'Updates come from the repository this install came from: the newest release there (vX.Y.Z, or release-X.Y.Z from 1.0). Update now runs the installer\'s own update (Deploy-AiCleaner.ps1 -Action Update) on this machine: it checks everything first, stops the proxy, installs the release and starts it again, and puts the previous version back if the new one does not answer; sessions carry on. Output goes to the newest logs/update-*.log, and the last update\'s result shows here.',
+    [installedLine, availableLine, h('div', { class: 'form-row' }, check, apply), checkedLine, lastList,
       h('div', { class: 'form-row' }, auto)],
     () => ({ 'update.auto': auto.querySelector('input').checked }));
 }

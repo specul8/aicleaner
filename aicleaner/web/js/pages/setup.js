@@ -431,7 +431,7 @@ function remoteForm(r, domain) {
         return;
       }
     }
-    said.textContent = 'Still running after five minutes - see logs\\remote-setup.log.';
+    said.textContent = 'Still running after five minutes - see the newest logs\\remote-setup-*.log.';
     go.disabled = false;
   });
   return h('div', { class: 'setup-remote' },
