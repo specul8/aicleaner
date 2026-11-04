@@ -109,6 +109,33 @@ function atBottom(log) {
   return log.scrollHeight - log.scrollTop - log.clientHeight <= NEAR_BOTTOM_PX;
 }
 
+// Feature 156 (Brad, 2026-11-04): View previous prompt / View previous response. A prompt is a "you" turn; a response
+// starts at the first "claude" turn after a prompt (its later parts, between tool calls, belong to the same reply).
+// Whatever the log holds counts - the earlier lines Show earlier adds (up to 1000) too; above those, the buttons are
+// greyed out and Show earlier is the way further back.
+function turnStarts(log, kind) {
+  const turns = [...log.querySelectorAll(':scope > .turn')];
+  if (kind === 'prompt') return turns.filter((t) => t.classList.contains('you'));
+  const starts = [];
+  let sincePrompt = true;
+  for (const t of turns) {
+    if (t.classList.contains('you')) sincePrompt = true;
+    else if (t.classList.contains('claude') && sincePrompt) { starts.push(t); sincePrompt = false; }
+  }
+  return starts;
+}
+
+// The nearest start above the top of what is shown now, as a scroll position in the log; null when there is none.
+function previousStart(log, kind) {
+  const top = log.getBoundingClientRect().top;
+  let found = null;
+  for (const t of turnStarts(log, kind)) {
+    const at = t.getBoundingClientRect().top - top + log.scrollTop;
+    if (at < log.scrollTop - 4) found = at;
+  }
+  return found;
+}
+
 // Held by the line being read, not by a scroll offset (D116, the user, 2026-10-06). Once the history
 // is full each new line takes one off the top, and the same offset then showed later lines: what was
 // being read moved up and out of view. The first line in view is found again after the change and
@@ -238,7 +265,7 @@ function paintLog(log, events, key) {
   const latest = document.getElementById('session-latest');
   if (latest) {
     if (atBottom(log)) log.unseen = 0;
-    latest.hidden = atBottom(log);
+    latest.disabled = atBottom(log);
     latest.textContent = log.unseen ? `View latest (${log.unseen} new)` : 'View latest';
   }
 }
@@ -471,6 +498,12 @@ const noteSettings = (s) => {
   }
 };
 window.addEventListener('aicleaner:settings', (event) => noteSettings(event.detail || {}));
+// Feature 154: a file Claude has opened for review goes into its session's tabs, in Preview, behind the tab in front.
+window.addEventListener('aicleaner:reviews', (event) => {
+  const { session, reviews } = event.detail || {};
+  if (!view.tabs) return;
+  for (const r of reviews || []) view.tabs.openForReview(session, r.root, r.path, r.name);
+});
 
 // What this session does with a picture now: attaching needs pictures to leave at all (Pictures not on Text only)
 // and a Claude Code session (another agent's bridge passes words only).
@@ -2605,19 +2638,38 @@ export async function render(main, context = {}) {
   // and where the eye is leaving from.
   const doing = h('div', { id: 'session-doing', class: 'hint', hidden: true });
   const background = h('div', { id: 'session-background', hidden: true });
-  const toLatest = h('button', { type: 'button', id: 'session-latest', class: 'to-latest', hidden: true },
+  // All three always shown, greyed out when there is nothing to go to (Brad, 2026-11-04).
+  const toLatest = h('button', { type: 'button', id: 'session-latest', class: 'to-latest', disabled: true },
     'View latest');
+  // Back to the previous prompt or reply from where the transcript is (feature 156), beside View latest.
+  const toPrompt = h('button', { type: 'button', id: 'session-prev-prompt', class: 'to-previous' }, 'View previous prompt');
+  const toReply = h('button', { type: 'button', id: 'session-prev-reply', class: 'to-previous' }, 'View previous response');
+  const previousButtons = () => {
+    toPrompt.disabled = previousStart(log, 'prompt') === null;
+    toReply.disabled = previousStart(log, 'reply') === null;
+  };
+  for (const [button, kind] of [[toPrompt, 'prompt'], [toReply, 'reply']]) {
+    button.addEventListener('click', () => {
+      const at = previousStart(log, kind);
+      if (at === null) return;
+      log.scrollTop = Math.max(0, at - 6);
+      previousButtons();
+    });
+  }
+  log.addEventListener('scroll', previousButtons);
+  new MutationObserver(previousButtons).observe(log, { childList: true });
+  new ResizeObserver(previousButtons).observe(log);
   toLatest.addEventListener('click', () => {
     log.scrollTop = log.scrollHeight;
-    toLatest.hidden = true;
+    toLatest.disabled = true;
     log.unseen = 0;
     toLatest.textContent = 'View latest';
   });
   // Shown only while the reader is away from the bottom - while they are at it, following is
   // automatic and a button offering to do what is already happening is noise.
   log.addEventListener('scroll', () => {
-    toLatest.hidden = atBottom(log);
-    if (toLatest.hidden) { log.unseen = 0; toLatest.textContent = 'View latest'; }
+    toLatest.disabled = atBottom(log);
+    if (toLatest.disabled) { log.unseen = 0; toLatest.textContent = 'View latest'; }
   });
   const list = h('aside', { id: 'session-list', class: 'card tree' });
   const panel = h('aside', { id: 'session-files', class: 'card tree' }, h('p', { class: 'muted' }, 'Loading files...'));
@@ -3633,7 +3685,8 @@ export async function render(main, context = {}) {
   // background, with Claude's questions and permission requests to its right.
   // File tabs over the transcript (DECISIONS 50): the conversation is the first tab; a file tab
   // shows in the transcript's place while the prompt stays below it.
-  const stream = h('div', { class: 'session-stream' }, log, h('div', { class: 'session-underlog' }, doing, toLatest));
+  const stream = h('div', { class: 'session-stream' }, log,
+    h('div', { class: 'session-underlog' }, doing, h('span', { class: 'to-group' }, toPrompt, toReply, toLatest)));
   const tabStrip = h('div', { id: 'file-tabs', class: 'file-tabs', role: 'tablist', hidden: true });
   const filePane = h('div', { id: 'file-pane', class: 'file-pane', hidden: true });
   // The code editor in the prompt box's place, and the ways into it (feature 116).
@@ -3642,18 +3695,19 @@ export async function render(main, context = {}) {
   let snippetMarks = 0;
   const snippetKey = (name) => `aicleaner.snippet.${name}`;
   const forgetSnippet = () => { try { sessionStorage.removeItem(snippetKey(view.name)); } catch (error) { /* not stored */ } };
-  // A placeholder on its own line at the caret, replaced by the snippet (or removed) when done.
-  const placeMark = () => {
+  // A placeholder on its own line at the caret, replaced by the snippet (or removed) when done. In whichever text part
+  // the caret is (the three backticks of feature 157 can be typed in any of them).
+  const placeMark = (target = box) => {
     snippetMarks += 1;
     const mark = `[code snippet being written #${Date.now().toString(36)}${snippetMarks}]`;
-    const at = box.selectionStart === null ? box.value.length : box.selectionStart;
-    const to = box.selectionEnd === null ? at : box.selectionEnd;
-    const before = box.value.slice(0, at);
+    const at = target.selectionStart === null ? target.value.length : target.selectionStart;
+    const to = target.selectionEnd === null ? at : target.selectionEnd;
+    const before = target.value.slice(0, at);
     const lead = before && !before.endsWith('\n') ? '\n' : '';
-    const after = box.value.slice(to);
+    const after = target.value.slice(to);
     const tail = after && !after.startsWith('\n') ? '\n' : '';
-    box.value = before + lead + mark + tail + after;
-    box.dispatchEvent(new Event('input', { bubbles: true }));
+    target.value = before + lead + mark + tail + after;
+    target.dispatchEvent(new Event('input', { bubbles: true }));
     return mark;
   };
   // The mark is in whichever text part it was put in; a snippet written into it becomes an object
@@ -3695,6 +3749,17 @@ export async function render(main, context = {}) {
     });
   };
   insertCodeButton.addEventListener('click', () => openNewSnippet(placeMark()));
+  // Feature 157 (Brad, 2026-11-04): three backticks typed in the prompt open the snippet editor there, the backticks
+  // taken out. Typed only - a paste holding ``` is left as it is.
+  prompt.element.addEventListener('input', (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLTextAreaElement) || event.inputType !== 'insertText' || event.data !== '`') return;
+    const at = target.selectionStart;
+    if (at === null || at !== target.selectionEnd || at < 3 || target.value.slice(at - 3, at) !== '```') return;
+    target.value = target.value.slice(0, at - 3) + target.value.slice(at);
+    target.setSelectionRange(at - 3, at - 3);
+    openNewSnippet(placeMark(target));
+  });
   // A snippet being written when the page was reloaded or the session switched comes back.
   view.resumeSnippet = () => {
     code.close();
@@ -4269,7 +4334,7 @@ export async function render(main, context = {}) {
       await refresh();
       // Answered: what comes next is at the bottom, so that is where the transcript goes (D103).
       log.scrollTop = log.scrollHeight;
-      toLatest.hidden = true;
+      toLatest.disabled = true;
       log.unseen = 0;
     } catch (error) {
       answering.delete(id);

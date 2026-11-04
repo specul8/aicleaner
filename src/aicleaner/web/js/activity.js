@@ -10,7 +10,7 @@
 // "Somewhere you are not looking" is the page, not the session: being on the Session page for one
 // session does not count as watching another.
 
-import { postJSON, say } from './api.js';
+import { getJSON, postJSON, say } from './api.js';
 
 const notices = new Map();   // key -> { level, text, href } - kept until its page is visited
 let previous = null;
@@ -19,6 +19,20 @@ let previous = null;
 // an alert someone has seen anywhere goes everywhere. A question answered anywhere drops `waiting` to 0.
 const reported = new Map();  // session -> the turn count already told to AI Cleaner as seen
 const heldFinish = new Set(); // sessions whose turn ended while background work still ran (D202)
+// Feature 154: Markdown files Claude has opened for review - per session, those not looked at yet. The Session page
+// opens them (aicleaner:reviews); the flag goes when each file's tab has been in front (aicleaner:tab-shown).
+const unread = new Map();     // session -> Map(root|path -> review)
+const handed = new Map();     // session -> the review number already handed to the page
+let reviewFiles = true;       // session.review_files, on by default
+const noteReviewSetting = (s) => { if ('session.review_files' in s) reviewFiles = s['session.review_files'] !== false; };
+window.addEventListener('aicleaner:settings', (event) => noteReviewSetting(event.detail || {}));
+getJSON('/api/config').then((config) => noteReviewSetting(config.settings || {})).catch(() => {});
+window.addEventListener('aicleaner:tab-shown', (event) => {
+  const { session, root, path } = event.detail || {};
+  const waiting = unread.get(session);
+  if (!waiting || !waiting.delete(`${root}|${path}`)) return;
+  if (!waiting.size) { unread.delete(session); drop(`review:${session}`); }
+});
 
 function drop(key) {
   const notice = notices.get(key);
@@ -73,6 +87,7 @@ export function noticeActivity(activity, route, shown) {
       }
     }
   }
+  noticeReviews(now.sessions || []);
   // Cleared wherever it was dealt with (D200): looked at on any computer, or the question answered.
   for (const s of now.sessions || []) {
     if ((s.seen_turns || 0) >= s.turns) drop(`turn:${s.name}`);
@@ -90,6 +105,33 @@ export function noticeActivity(activity, route, shown) {
     }
   }
   previous = now;
+}
+
+// Feature 154: reviews newer than the last ones handed over. The page's first poll only remembers where things stand,
+// so a page loaded later does not reopen files reviewed before it; a session that appears after that (started since)
+// counts from its first review.
+let reviewBaseline = false;
+function noticeReviews(sessions) {
+  const first = !reviewBaseline;
+  reviewBaseline = true;
+  for (const s of sessions) {
+    const latest = s.review_n || 0;
+    if (!handed.has(s.name)) {
+      handed.set(s.name, first ? latest : 0);
+      if (first) continue;
+    }
+    const from = handed.get(s.name);
+    if (latest <= from) continue;
+    handed.set(s.name, latest);
+    if (!reviewFiles) continue;
+    const fresh = (s.reviews || []).filter((r) => r.n > from);
+    if (!fresh.length) continue;
+    if (!unread.has(s.name)) unread.set(s.name, new Map());
+    for (const r of fresh) unread.get(s.name).set(`${r.root}|${r.path}`, r);
+    window.dispatchEvent(new CustomEvent('aicleaner:reviews', { detail: { session: s.name, reviews: fresh } }));
+    // Said even while the session is on screen: the file opens behind the tab in front, so this is the clue.
+    announce(`review:${s.name}`, 'green', `${s.name}: Claude has opened a file to review`, sessionHref(s.name));
+  }
 }
 
 // Visiting what a notice points at is looking at it: the entry goes, and so does its toast if it is

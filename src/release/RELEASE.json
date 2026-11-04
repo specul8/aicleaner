@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.0.2",
   "minimum": "0.9.349",
   "deploy": "src/installer",
   "layout": {

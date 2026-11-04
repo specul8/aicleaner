@@ -1,7 +1,8 @@
 // Feature 116: the code editor that takes the prompt box's place - a line-number gutter that scrolls
 // with the text, no wrapping, sideways scrolling, a monospace font (built like the file editor, D101).
-// Enter is a new line and never sends; Tab indents; Ctrl+Enter adds; Escape cancels (twice when
-// something was typed, so a stray key does not throw it away).
+// Enter is a new line and never sends; Tab indents; Ctrl+Enter or Shift+Enter adds (feature 157) - back to the prompt,
+// the snippet at its place there, nothing when it is empty; Escape cancels (twice when something was typed, so a stray
+// key does not throw it away).
 import { h } from './dom.js';
 import { loadMonaco, monacoReady, MonacoBox } from './monacoedit.js';
 import { LANGUAGES, MAX_LINES } from './snippets.js';
@@ -51,7 +52,7 @@ export function codeEditor({ slot, pane, say }) {
     if (options.lang && !LANGUAGES.some(([value]) => value === options.lang)) {
       select.append(h('option', { value: options.lang, selected: true }, options.lang));
     }
-    const hint = h('span', { class: 'hint code-editor-hint' }, 'Ctrl+Enter adds it; Escape cancels');
+    const hint = h('span', { class: 'hint code-editor-hint' }, 'Ctrl+Enter or Shift+Enter adds it; Escape cancels');
     const done = h('button', { type: 'button', class: 'primary code-editor-done' },
       options.update ? 'Update snippet' : 'Add snippet to prompt');
     const cancel = h('button', { type: 'button', class: 'btn code-editor-cancel' }, 'Cancel');
@@ -78,7 +79,7 @@ export function codeEditor({ slot, pane, say }) {
     const abandon = () => { close(); if (options.onCancel) options.onCancel(); };
     box.addEventListener('input', () => {
       armed = false;
-      hint.textContent = 'Ctrl+Enter adds it; Escape cancels';
+      hint.textContent = 'Ctrl+Enter or Shift+Enter adds it; Escape cancels';
       if (options.onChange) options.onChange(state());
     });
     select.addEventListener('change', () => {
@@ -86,6 +87,7 @@ export function codeEditor({ slot, pane, say }) {
       if (options.onChange) options.onChange(state());
     });
     box.bindKey((mod, key) => mod.CtrlCmd | key.Enter, finish);
+    box.bindKey((mod, key) => mod.Shift | key.Enter, finish);
     // Escape: the editor's own popups (suggestions, find) close first; with none open, it cancels.
     box.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape' || host.querySelector('.suggest-widget.visible, .find-widget.visible')) return;
@@ -117,7 +119,7 @@ export function codeEditor({ slot, pane, say }) {
     if (options.lang && !LANGUAGES.some(([value]) => value === options.lang)) {
       select.append(h('option', { value: options.lang, selected: true }, options.lang));
     }
-    const hint = h('span', { class: 'hint code-editor-hint' }, 'Ctrl+Enter adds it; Escape cancels');
+    const hint = h('span', { class: 'hint code-editor-hint' }, 'Ctrl+Enter or Shift+Enter adds it; Escape cancels');
     const done = h('button', { type: 'button', class: 'primary code-editor-done' },
       options.update ? 'Update snippet' : 'Add snippet to prompt');
     const cancel = h('button', { type: 'button', class: 'btn code-editor-cancel' }, 'Cancel');
@@ -138,13 +140,13 @@ export function codeEditor({ slot, pane, say }) {
       numberLines(gutter, box, first);
       gutter.scrollTop = box.scrollTop;
       armed = false;
-      hint.textContent = 'Ctrl+Enter adds it; Escape cancels';
+      hint.textContent = 'Ctrl+Enter or Shift+Enter adds it; Escape cancels';
       if (options.onChange) options.onChange(state());
     });
     select.addEventListener('change', () => { if (options.onChange) options.onChange(state()); });
     box.addEventListener('scroll', () => { gutter.scrollTop = box.scrollTop; });
     box.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); finish(); return; }
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey || event.shiftKey)) { event.preventDefault(); finish(); return; }
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();

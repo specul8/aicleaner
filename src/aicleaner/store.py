@@ -788,8 +788,8 @@ class MappingStore:
         # A client this PC has used whose file is no longer there (DECISIONS 67): a shared folder
         # unsynced, access removed, files not downloaded. It used to stop loading in silence, and its
         # names went out as written. Its last-good copy keeps it protected, and it is reported
-        # `missing` - red on the status bar - until the file is back. aicleaner never deletes a
-        # client, so a last-good copy with no file is always this.
+        # `missing` - red on the status bar - until the file is back. Archiving takes the last-good copy with
+        # the file (D222), so a last-good copy with no file is always this.
         for good in sorted(self.state_dir.glob("lastgood/*.json")) if self.state_dir else []:
             cid = good.stem
             if cid in taken or cid == GLOBAL_ID or cid.startswith("_"):
@@ -2310,6 +2310,12 @@ class MappingStore:
             _write(self.mapping_path, doc)
         else:
             path.replace(target)
+        # Its last-good copy goes with it (D222, 2026-11-04): left behind, it read as a client whose file had gone
+        # missing (DECISIONS 67) - loaded from that copy, still replaced, and red as "client file missing".
+        if self.state_dir is not None:
+            good = self.state_dir / "lastgood" / f"{cid}.json"
+            if good.is_file():
+                good.replace(archive / f"{cid}.lastgood-{datetime.now():%Y%m%d-%H%M%S}.json")
         return target
 
     def archived(self) -> list[str]:

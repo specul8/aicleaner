@@ -33,7 +33,7 @@ Talk to your favourite AI service about clients the same way you talk to your wo
 - **The canary** is a last check on every request: if a known real name is still in it, the request is stopped and
   nothing is sent.
 - **Pictures, Word, Excel, PowerPoint and PDF files** are converted to text on your computer and filtered like
-  anything else - or, for pictures, sent with names blacked out, as you choose.
+  anything else - or, for pictures and scanned PDFs, sent with names blacked out, as you choose.
 
 What it cannot catch, said plainly:
 

@@ -634,7 +634,7 @@ function imagesCard(s) {
   const session = sessionPicturesField(s, picked);
   mode.addEventListener('change', session.follow);
   const section = card('images', 'Pictures',
-    'Text only (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. Redacted picture: the picture goes too, with every client name, unmapped identifier and secret the reader can see blacked out, and it is read again before it leaves - a name still legible keeps it back. What the reader cannot read (handwriting, a logo, tiny or rotated text) is not blacked out. Picture as it is: JPEG, PNG, GIF and WebP are sent unfiltered, so any client name in them reaches the provider (replies are still filtered). Other image types are always withheld. PDFs and Office documents are read to text and filtered either way.',
+    'Text only (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. Redacted picture: the picture goes too, with every client name, unmapped identifier and secret the reader can see blacked out, and it is read again before it leaves - a name still legible keeps it back. What the reader cannot read (handwriting, a logo, tiny or rotated text) is not blacked out. Picture as it is: JPEG, PNG, GIF and WebP are sent unfiltered, so any client name in them reaches the provider (replies are still filtered). Other image types are always withheld. Office documents and PDFs with text are read to text and filtered either way; a scanned PDF (no text) goes as redacted pictures, page by page, with Redacted picture, and is read to text otherwise.',
     [mode,
      session.field,
      // Saying this plainly is part of the decision to do it at all (feature 36). A proxy that
@@ -892,6 +892,9 @@ function sessionCard(s) {
     s['session.show_thinking'] !== false);
   const summary = checkbox('turn-summary', 'Turn summary: a message sent while Claude works is answered when the task is done, unless it asks for something now ("quickly change x, then carry on")',
     s['session.turn_summary'] === true);
+  // Feature 154 (on by default): a Markdown file Claude wrote and names in its reply is opened for review.
+  const review = checkbox('review-files', 'Open files for review: a Markdown file Claude has just written and names in its reply opens in Preview, in a tab behind the one in front, with "Claude has opened a file to review" in the menu',
+    s['session.review_files'] !== false);
   const cleanup = checkbox('job-cleanup', "End a session's leftover processes when its broker ends (a crash, a kill or a shutdown) - new sessions only",
     s['session.job_cleanup'] === true);
   // Caps on each session as a whole (D208): a runaway - a fork bomb, a leak - is refused inside its own session
@@ -920,6 +923,7 @@ function sessionCard(s) {
       h('div', { class: 'form-row' }, titles),
       h('div', { class: 'form-row' }, thinking),
       h('div', { class: 'form-row' }, summary),
+      h('div', { class: 'form-row' }, review),
       h('div', { class: 'form-row' }, cleanup),
       h('div', { class: 'form-row' }, h('label', { class: 'field' },
         'Most processes one session may run at once (0 = no cap). New sessions only.', capProcs)),
@@ -933,6 +937,7 @@ function sessionCard(s) {
       'session.job_cleanup': cleanup.querySelector('input').checked,
       'session.show_thinking': thinking.querySelector('input').checked,
       'session.turn_summary': summary.querySelector('input').checked,
+      'session.review_files': review.querySelector('input').checked,
       'session.max_processes': capProcs.value.trim() === '' ? 400 : Math.max(0, Math.floor(Number(capProcs.value) || 0)),
       'session.max_memory_gb': capMemory.value.trim() === '' ? 16 : Math.max(0, Math.floor(Number(capMemory.value) || 0)),
       'session.idle_offer_hours': idleHoursIn.value.trim() === '' ? 8 : Math.max(0, Math.floor(Number(idleHoursIn.value) || 0)),

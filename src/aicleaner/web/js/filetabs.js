@@ -144,10 +144,9 @@ export function fileTabs(ctx) {
   // are, and put back the first time a session is shown. Only where each file is and how it was
   // shown; its contents are read afresh, the active tab at once and the others when chosen.
   const restored = new Set();
-  function persist() {
-    const name = ctx.name();
+  function persist(name = ctx.name()) {
     if (!name) return;
-    const s = state();
+    const s = bySession.get(name) || state();
     postJSON('/api/session/tabs-state', { name, active: s.active || '',
       tabs: s.tabs.map((t) => ({ root: t.root, path: t.path, name: t.name, view: t.view, mode: t.mode })) })
       .catch(() => { /* forgotten on refresh; the tabs themselves are fine */ });
@@ -359,6 +358,36 @@ export function fileTabs(ctx) {
     paint();
     persist();
     startChecking();
+    shown(ctx.name(), tab);
+  }
+
+  // A file now in front, so a review flag for it can go (feature 154).
+  function shown(session, tab) {
+    if (tab) window.dispatchEvent(new CustomEvent('aicleaner:tab-shown', { detail: { session, root: tab.root, path: tab.path } }));
+  }
+
+  // Feature 154 (Brad, 2026-11-03): a Markdown file Claude has written for review, in Preview, in that session's tabs.
+  // Never a second copy of a file (one already open is put into Preview and read again), and never a change to which
+  // tab is in front - in this session or any other. Another session's saved tabs are read first, so they are kept.
+  async function openForReview(session, root, path, name) {
+    if (!session) return;
+    if (!restored.has(session)) { restored.add(session); await restore(session); }
+    if (!bySession.has(session)) bySession.set(session, { tabs: [], active: null });
+    const s = bySession.get(session);
+    const key = `${root}|${path}`;
+    let tab = s.tabs.find((t) => t.key === key);
+    if (!tab) {
+      tab = { key, root, path, name, view: 'text', modified: 0, stale: false, gone: false, data: null, mode: 'preview' };
+      s.tabs.push(tab);
+    }
+    tab.mode = 'preview';
+    if (session === ctx.name()) {
+      load(tab);
+      paint();
+      startChecking();
+      if (s.active === key) shown(session, tab);
+    }
+    persist(session);
   }
 
   async function close(key) {
@@ -447,6 +476,7 @@ export function fileTabs(ctx) {
     if (chosen && !chosen.data && !chosen.error) load(chosen);
     paint();
     persist();
+    shown(ctx.name(), chosen);
   });
 
   // Leaving the page with an edit not yet saved (a refused save, or one still in flight): the
@@ -536,6 +566,7 @@ export function fileTabs(ctx) {
 
   return {
     open,
+    openForReview,
     paint,
     check,
     active: activeTab,

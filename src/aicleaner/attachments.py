@@ -172,7 +172,31 @@ class _Scrubber:
                                                "data": base64.b64encode(result.image).decode("ascii")}}
         return [picture, _notice(f"{said}\n\n{self._read(result.text)}" if result.text.strip() else said)]
 
-    def pdf(self, data_b64: str, name: str) -> dict[str, str]:
+    def _redacted_pages(self, raw: bytes, name: str) -> list[dict[str, Any]] | None:
+        """Feature 155 (Brad, 2026-11-03): a scanned PDF's pages as redacted pictures, each with its text, while
+        pictures go with client names blacked out - so a design scanned in keeps its diagrams. Up to ocr_max_pages
+        pages. None - and the whole PDF goes as text, as before - when a page cannot be drawn or redacted: a document
+        is never sent with some pages pictured and others not."""
+        if self.picture is None:
+            return None
+        try:
+            pages = pdf_pages_to_images(raw, self.ocr_max_pages, self.ocr_timeout_s)
+        except ConversionError:
+            return None
+        if not pages:
+            return None
+        blocks: list[dict[str, Any]] = []
+        for page in pages:
+            sent = self._redacted(page)
+            if sent is None:
+                return None
+            blocks.extend(sent)
+        self.counts["pdf_redacted"] += 1
+        head = _notice(f"[aicleaner: {_the_pdf(name)} is a scan; its {len(pages)} page(s) follow as pictures with client "
+                       "names and identifiers blacked out, each with its text.]")
+        return [head, *blocks]
+
+    def pdf(self, data_b64: str, name: str, as_pictures: bool = False) -> Any:
         raw = _decode(data_b64)
         if raw is None:
             return self.other("application/pdf, unreadable")
@@ -187,7 +211,12 @@ class _Scrubber:
             return _notice(f"[aicleaner: {_the_pdf(name)} was withheld: the local PDF text tool (pdftotext) is not installed.]")
         pages = max(1, text.count("\f"))
         if len(re.sub(r"\s", "", text)) < MIN_CHARS_PER_PAGE * pages:
-            # No text layer: a scan. Rasterise it and read the pages instead.
+            # No text layer: a scan. Its pages as redacted pictures where pictures go that way (feature 155); else
+            # rasterised and read.
+            if as_pictures:
+                sent = self._redacted_pages(raw, name)
+                if sent is not None:
+                    return sent
             scanned = self._read(self._read_scan(raw) or "")
             if scanned:
                 self.counts["pdf_read"] += 1
@@ -224,14 +253,15 @@ class _Scrubber:
 
     # ---- one content block -----------------------------------------------------------------
 
-    def _base64_document(self, block: dict[str, Any], media: str, data: str, name: str) -> dict[str, Any]:
+    def _base64_document(self, block: dict[str, Any], media: str, data: str, name: str) -> Any:
         """One attachment carried as base64, whatever wrapper it arrived in.
 
         The original block is carried through because an image may be allowed rather than read,
         and `allow_images` returns the block itself - a stand-in would blank the attachment.
         """
         if media == "application/pdf":
-            return self.pdf(data, name)
+            # Pictures in its place only in Anthropic's own document block, whose pictures go back in the same shape.
+            return self.pdf(data, name, as_pictures=block.get("type") == "document")
         if media in OFFICE_TYPES:
             return self.document(data, media, name)
         if media.startswith("image/"):
@@ -282,8 +312,9 @@ class _Scrubber:
             out: list[Any] = []
             for item in x:
                 done = self.walk(item)
-                # A redacted picture becomes two blocks, the picture and its text, side by side (feature 114).
-                if isinstance(done, list) and isinstance(item, dict) and item.get("type") == "image":
+                # A redacted picture becomes two blocks, the picture and its text, side by side (feature 114); a
+                # scanned PDF sent as pictures, one pair per page (feature 155).
+                if isinstance(done, list) and isinstance(item, dict) and item.get("type") in ("image", "document"):
                     out.extend(done)
                 else:
                     out.append(done)

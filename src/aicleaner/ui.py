@@ -140,7 +140,7 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "canary.fail_open",
                    "highlight.terminal", "session.enabled", "session.max_running", "session.auto_titles", "update.auto",
                    "session.job_cleanup", "session.max_processes", "session.max_memory_gb",
-                   "session.show_thinking", "session.turn_summary",
+                   "session.show_thinking", "session.turn_summary", "session.review_files",
                    "session.idle_offer_hours",
                    # What the Session page does with a picture (D216): read, attach or both. The proxy still decides
                    # what leaves (attachments.*, local only), so this weakens nothing.

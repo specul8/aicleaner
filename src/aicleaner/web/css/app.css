@@ -759,7 +759,9 @@ form.rename { margin: 0; }
 .bg-since { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
 .bg-insert { border: 0; background: none; color: inherit; cursor: pointer; opacity: .6; padding: 0 .25rem; }
 .bg-insert:hover, .bg-insert:focus { opacity: 1; }
-.to-latest { margin-left: auto; font-size: 12px; padding: 2px 8px; }
+.to-group { margin-left: auto; display: inline-flex; gap: .35rem; flex-wrap: wrap; justify-content: flex-end; }
+.to-latest, .to-previous { font-size: 12px; padding: 2px 8px; }
+.to-previous:disabled, .to-latest:disabled { opacity: .45; cursor: default; }
 .tree-root { font-weight: 600; margin-top: .5rem; white-space: nowrap; }
 /* Files heading with its Refresh beside it: listings are cached now, so there has to be a way
    to ask again (D32, D33). */

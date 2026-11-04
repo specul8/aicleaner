@@ -756,6 +756,11 @@ class Session(_FindsClaude):
         # alert up to here is cleared on every computer, not only the one it was opened on.
         self.seen_turns = 0
         self.seen_waiting = 0       # questions waiting when it was last looked at; reported capped at what waits now
+        # Feature 154: Markdown files Claude wrote that a reply then names - opened for review on the page.
+        self._md_pending: dict[str, str] = {}               # tool_use id -> the path it writes
+        self._md_written: dict[str, dict[str, Any]] = {}    # normalised path -> {path, at, mtime, reviewed}
+        self.reviews: deque = deque(maxlen=20)
+        self.review_n = 0
         self.background = 0         # background tasks still running (D202), from the CLI's live list
         self.busy = False
         # What Claude is doing now ("thinking...", a tool's name), from the fragments the buffer
@@ -802,7 +807,8 @@ class Session(_FindsClaude):
         return {"name": self.profile.name if self.profile else "", "running": self.running,
                 "busy": self.busy, "turns": self.turns, "waiting": len(self.pending),
                 "seen_turns": self.seen_turns, "seen_waiting": min(self.seen_waiting, len(self.pending)),
-                "background": self.background if self.running else 0}
+                "background": self.background if self.running else 0,
+                "review_n": self.review_n, "reviews": list(self.reviews)[-5:]}
 
     def mark_seen(self, turns: int) -> None:
         """A page looked at this session with `turns` finished (D200). Only moves forward, and never
@@ -1802,6 +1808,80 @@ class Session(_FindsClaude):
                     log.warning("could not note conversation %s: %s", found, exc)
             self.session_id = found
 
+    # Feature 154 (Brad, 2026-11-03): a Markdown file is opened for review when a reply names it, it was written in the
+    # last REVIEW_WINDOW_S, and this session's Claude was the last to write it - its time on disk is still the one taken
+    # when Claude's write finished. No hook is needed: every Write and Edit passes through here as a tool call.
+    REVIEW_WINDOW_S = 600
+    REVIEW_TOOLS = frozenset({"Write", "Edit", "MultiEdit"})
+
+    def _note_review(self, event: dict[str, Any]) -> None:
+        kind = event.get("type")
+        content = (event.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            return
+        if kind == "assistant":
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and block.get("name") in self.REVIEW_TOOLS:
+                    target = str((block.get("input") or {}).get("file_path") or "")
+                    if target.lower().endswith((".md", ".markdown")):
+                        self._md_pending[str(block.get("id") or "")] = target
+                elif block.get("type") == "text" and isinstance(block.get("text"), str):
+                    self._review_mentions(block["text"])
+        elif kind == "user":
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                target = self._md_pending.pop(str(block.get("tool_use_id") or ""), None)
+                if target is None or block.get("is_error"):
+                    continue
+                path = Path(target) if Path(target).is_absolute() else Path(self.project or ".") / target
+                try:
+                    mtime = path.stat().st_mtime
+                except OSError:
+                    continue
+                self._md_written[os.path.normcase(str(path))] = {"path": path, "at": time.time(), "mtime": mtime,
+                                                                 "reviewed": None}
+
+    def _review_mentions(self, text: str) -> None:
+        now = time.time()
+        lowered = text.lower()
+        for key, entry in list(self._md_written.items()):
+            if now - entry["at"] > self.REVIEW_WINDOW_S:
+                del self._md_written[key]
+                continue
+            path: Path = entry["path"]
+            if path.name.lower() not in lowered:
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime != entry["mtime"] or entry["reviewed"] == mtime:
+                continue                          # changed since by someone else, or already offered as it is
+            place = self._review_place(path)
+            if place is None:
+                continue
+            entry["reviewed"] = mtime
+            self.review_n += 1
+            self.reviews.append({"n": self.review_n, "root": place[0], "path": place[1], "name": path.name})
+
+    def _review_place(self, path: Path) -> tuple[str, str] | None:
+        """(root, path under it) of a file inside one of this session's folders, as the file tabs name it."""
+        share = getattr(self.profile, "share", None) if self.profile else None
+        try:
+            _projects, browsable = self._allowed_roots(share)
+            resolved = path.resolve()
+        except OSError:
+            return None
+        for root in browsable:
+            try:
+                return str(root), resolved.relative_to(root).as_posix()
+            except ValueError:
+                continue
+        return None
+
     def _emit(self, event: dict[str, Any]) -> None:
         self._sequence += 1
         # An event that already knows when it happened keeps it - a replayed message was said
@@ -1822,6 +1902,11 @@ class Session(_FindsClaude):
                     self.on_reply(self)        # a new conversation's title (E3 part 10)
         elif event.get("type") in ("exited", "stopped"):
             self.busy = False
+        if not self._replaying:
+            try:
+                self._note_review(event)
+            except Exception as exc:  # noqa: BLE001 - a hint for the page, never a fault in the session
+                log.debug("review note: %s", exc)
         self.doing = doing_after(self.doing, event)
         # Everything is broadcast; only what the page draws or reads back is kept (KEPT_EVENTS).
         if kept(event):

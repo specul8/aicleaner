@@ -264,6 +264,8 @@ class Config:
     session_show_thinking: bool = True
     # A message sent while Claude works waits for the task's end-of-turn summary, unless it asks for something now.
     session_turn_summary: bool = False
+    # Feature 154: a Markdown file Claude wrote and names in its reply opens in a Preview tab, with a flag (on by default).
+    session_review_files: bool = True
     # Caps on each new session as a whole (D208): processes alive at once, and memory committed (0 = no cap).
     session_max_processes: int = 400
     session_max_memory_gb: int = 16
@@ -374,6 +376,7 @@ class Config:
         "session.job_cleanup": ("session_job_cleanup", bool),
         "session.show_thinking": ("session_show_thinking", bool),
         "session.turn_summary": ("session_turn_summary", bool),
+        "session.review_files": ("session_review_files", bool),
         "session.max_processes": ("session_max_processes", int),
         "session.max_memory_gb": ("session_max_memory_gb", int),
         "session.idle_offer_hours": ("session_idle_offer_hours", int),
@@ -635,6 +638,7 @@ class Config:
         cfg.session_job_cleanup = _flag(ses, "job_cleanup", False, "session.job_cleanup")
         cfg.session_show_thinking = _flag(ses, "show_thinking", True, "session.show_thinking")
         cfg.session_turn_summary = _flag(ses, "turn_summary", False, "session.turn_summary")
+        cfg.session_review_files = _flag(ses, "review_files", True, "session.review_files")
         # D208's caps: missing or not a number = the default, never "no cap" by accident.
         for attr, key, default in (("session_max_processes", "max_processes", 400),
                                    ("session_max_memory_gb", "max_memory_gb", 16),
