@@ -28,7 +28,7 @@ const GROUPS = [
   { key: 'filtering', label: 'Filtering',
     cards: ['kinds', 'near-miss', 'public-list', 'tools', 'images', 'ocr', 'scan-markers'] },
   { key: 'ai-apps', label: 'AI apps', cards: ['aitools', 'routing', 'bash-guard', 'codetab', 'claudeai', 'copilot'] },
-  { key: 'remote-access', label: 'Remote access', cards: ['tunnel', 'folders'] },
+  { key: 'remote-access', label: 'Remote access', cards: ['tunnel', 'folders', 'remote-desktop'] },
   { key: 'logs', label: 'Logs', cards: ['logging', 'diagnostics', 'advanced'] },
   { key: 'danger-zone', label: 'Danger zone', cards: ['bypass', 'fail-open', 'uninspected'] },
 ];
@@ -71,6 +71,7 @@ const BUILTIN_WORDS = {
   copilot: ['VS Code', 'Visual Studio Code', 'GitHub', 'code completion', 'certificate'],
   tunnel: ['remote access', 'VPN', 'phone', 'Cloudflare', 'away from desk', 'mobile', 'encryption'],
   folders: ['directories', 'paths', 'file picker', 'OneDrive', 'allowed folders'],
+  'remote-desktop': ['RDP', 'aicleaner-rdp', 'remote desktop', 'menu link', 'another machine'],
   logging: ['logs', 'audit', 'history', 'retention', 'detail log'],
   diagnostics: ['telemetry', 'tracing', 'performance', 'timings', 'slow', 'speed', 'debug'],
   advanced: ['config file', 'port', 'listening', 'aicleaner-config.json', 'technical'],
@@ -464,7 +465,7 @@ function paintCards() {
     toolsCard(s), routingCard(), restartCard(),
     view.config.windows ? serviceCard() : null,    // feature 107: shown remotely too, locked there
     updatesCard(s), feedbackCard(),
-    foldersCard(s), scanMarkersCard(s),
+    foldersCard(s), remoteDesktopCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
     contactCard(status.contact), editorCard(s), autocorrectCard(s), diagnosticsCard(s, status),
     advancedCard(status, view.config, view.config.dialects || []),
@@ -730,6 +731,24 @@ function foldersCard(s) {
   return card('folders', 'Folders the pages can open', hint,
     [h('div', { class: 'form-row' }, area), inUse, refused],
     () => ({ 'folders.roots': area.value.split('\n').map((line) => line.trim()).filter(Boolean) }));
+}
+
+// Remote desktops (feature 158, aicleaner-rdp): the menu's links to each machine's aicleaner-rdp page, one per line as
+// "Name = https://address". The aicleaner-rdp installer adds its own machine here; another machine is added by hand.
+// The server checks each line (https only, no user name in the address, at most 20) and says which one it refused.
+function remoteDesktopCard(s) {
+  const area = h('textarea', { name: 'remote-desktops', rows: '3', 'aria-label': 'Remote desktops',
+    placeholder: 'BSDEVQ8 = https://rmt-bsdevq8.example.com' });
+  area.value = (s['remote_desktop.hosts'] || []).map((host) => `${host.name} = ${host.url}`).join('\n');
+  const hint = 'One per line, a name and its address: Name = https://address. Each becomes an entry in the menu that '
+    + 'opens that machine\'s remote desktop page in a new tab. The address comes from aicleaner-rdp, which is installed '
+    + 'on each machine whose desktop you want to reach.';
+  return card('remote-desktop', 'Remote desktops', hint, [h('div', { class: 'form-row' }, area)], () => ({
+    'remote_desktop.hosts': area.value.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+      const at = line.indexOf('=');
+      return at < 0 ? { name: '', url: line } : { name: line.slice(0, at).trim(), url: line.slice(at + 1).trim() };
+    }),
+  }));
 }
 
 // Which folders inside a repository hold output rather than something somebody wrote. A scan reads

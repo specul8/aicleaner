@@ -29,6 +29,9 @@ API (JSON; writes need Content-Type application/json):
   POST /api/tool/check                     {tool_use_id} stop a call whose spellings collapse to one name (PreToolUse hook; this machine only)
   POST /api/tool/names                     {tool_use_id} whether real names went into a call (PostToolUse hook, D199; this machine only)
   POST /api/activity/seen                  {session, turns} a session was looked at: its alerts clear on every page (D200)
+  GET  /api/alerts                         the open alerts (feature 161)
+  POST /api/alerts/raise                   {title, summary, session, level, key} a persistent alert (this machine only)
+  POST /api/alerts/dismiss                 {id} or {key} dismiss one, on every page and device
   POST /api/session/suggest                {name, path, language, line, before, after, instruction} code for the editor's cursor (feature 139)
   POST /api/session/permission-mode        {name, mode} how it asks before it acts
   POST /api/session/permission             {id, allow} answer a waiting permission request
@@ -929,7 +932,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # opens them, and they used to be what "all" added.
             if request.query.get("all") == "1":
                 limit = 5000
-            past = await asyncio.to_thread(session_host().past, name, limit, False)
+            from . import timing
+            # Step times while timings are recorded (D224: the first list after a start took 7 s).
+            past = await asyncio.to_thread(session_host().past, name, limit, False,
+                                           request.get(timing.REQUEST_PARTS))
             return web.json_response({"projects": past})
         except SessionError as problem:
             return err(problem, status=404)
@@ -2152,6 +2158,40 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             except (TypeError, ValueError):
                 return err(ValueError("turns must be a number"))
         return web.json_response({"ok": True, "seen_turns": target.seen_turns if target is not None else 0})
+
+    # ---- persistent alerts (feature 161) ---------------------------------------------------------
+
+    _alert_store: list[Any] = []
+
+    def alert_store() -> Any:
+        """One store per process, in the state folder (made on first use, so a page that never alerts never reads it)."""
+        from .alerts import AlertStore
+
+        if not _alert_store:
+            state = getattr(proxy.cfg, "state_dir", "") if proxy is not None else ""
+            folder = Path(state) if state else Path.home() / ".aicleaner"
+            _alert_store.append(AlertStore(folder))
+        return _alert_store[0]
+
+    async def alerts_list(request: web.Request) -> web.Response:
+        return web.json_response({"alerts": alert_store().open_alerts()})
+
+    async def alerts_raise(request: web.Request) -> web.Response:
+        """Raised by a script or a session on this machine; the guard refuses it through remote access."""
+        from .alerts import AlertError
+
+        body = await json_or_empty(request)
+        try:
+            alert = await asyncio.to_thread(alert_store().raise_alert, body.get("title"), body.get("summary", ""),
+                                            body.get("session", ""), body.get("level", "amber"), body.get("key", ""))
+        except AlertError as exc:
+            return err(exc)
+        return web.json_response({"ok": True, "alert": alert})
+
+    async def alerts_dismiss(request: web.Request) -> web.Response:
+        body = await json_or_empty(request)
+        gone = await asyncio.to_thread(alert_store().dismiss, str(body.get("id", "") or ""), str(body.get("key", "") or ""))
+        return web.json_response({"ok": True, "dismissed": gone})
 
     async def tool_names(request: web.Request) -> web.Response:
         """Asked by the PostToolUse hook after every tool call, with its id: whether real names were put
@@ -3727,7 +3767,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         scan = ({k: job.get(k) for k in ("id", "state", "client", "kind", "folder", "finished")}
                 if job else None)
         opened = proxy.model_requests() if proxy is not None and hasattr(proxy, "model_requests") else []
-        return {"sessions": sessions, "scan": scan, "model_requests": opened}
+        return {"sessions": sessions, "scan": scan, "model_requests": opened, "alerts": alert_store().open_alerts()}
 
     async def client_view(request: web.Request) -> web.Response:
         try:
@@ -4038,6 +4078,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/tool/check", tool_check)
         app.router.add_post("/api/tool/names", tool_names)
         app.router.add_post("/api/activity/seen", activity_seen)
+        app.router.add_get("/api/alerts", alerts_list)
+        app.router.add_post("/api/alerts/raise", alerts_raise)
+        app.router.add_post("/api/alerts/dismiss", alerts_dismiss)
         app.router.add_post("/api/session/suggest", session_suggest)
         app.router.add_post("/api/session/permission-mode", session_permission_mode)
         app.router.add_post("/api/session/permission", session_permission)

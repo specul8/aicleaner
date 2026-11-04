@@ -808,7 +808,10 @@ class Session(_FindsClaude):
                 "busy": self.busy, "turns": self.turns, "waiting": len(self.pending),
                 "seen_turns": self.seen_turns, "seen_waiting": min(self.seen_waiting, len(self.pending)),
                 "background": self.background if self.running else 0,
-                "review_n": self.review_n, "reviews": list(self.reviews)[-5:]}
+                "review_n": self.review_n, "reviews": list(self.reviews)[-5:],
+                # For a scheduled run (feature 161): prompts waiting their turn, and when anything last happened.
+                "queued": len(self.queued),
+                "last_at": (self.events[-1].get("at") or 0.0) if self.events else 0.0}
 
     def mark_seen(self, turns: int) -> None:
         """A page looked at this session with `turns` finished (D200). Only moves forward, and never
@@ -2684,7 +2687,8 @@ class SessionHost(_FindsClaude):
         return {"events": events[-wanted:], "more": more}
 
     @_agent_history
-    def past(self, name: str = "", limit: int = 25, include_robots: bool = False) -> list[dict[str, Any]]:
+    def past(self, name: str = "", limit: int = 25, include_robots: bool = False,
+             parts: list[tuple[str, float]] | None = None) -> list[dict[str, Any]]:
         """Conversations already held in this profile's folders, newest first.
 
         The page names a profile, never a path, so nothing a browser sends can point this at
@@ -2693,15 +2697,30 @@ class SessionHost(_FindsClaude):
         """
         from .history import conversations, our_conversations
 
+        clock = time.perf_counter()
+
+        def step(label: str) -> None:
+            nonlocal clock
+            if parts is not None:
+                now = time.perf_counter()
+                parts.append((label, (now - clock) * 1000))
+                clock = now
+
         profile = self.profile(name)
         ours = our_conversations(self.sessions_dir)
+        step("ours")
         # Every folder a conversation of this profile may be filed in, home first (DECISIONS 64).
         # They were split into the profile's folders and "not in this profile yet" (feature 50),
         # with an offer to add the folder: a session runs in its home now and every folder is
         # passed to Claude Code, so any of these conversations can be continued as it is.
         from .titles import load as load_titles
-        return conversations(self.conversation_folders(profile), limit=limit,
-                             include_robots=include_robots, ours=ours, labels=load_titles(self.state_dir()))
+        folders = self.conversation_folders(profile)
+        step("folders")
+        labels = load_titles(self.state_dir())
+        step("titles")
+        listed = conversations(folders, limit=limit, include_robots=include_robots, ours=ours, labels=labels)
+        step("list")
+        return listed
 
     @_agent_history
     def search_conversations(self, name: str, query: str, everywhere: bool = False) -> dict[str, Any]:

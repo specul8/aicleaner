@@ -106,6 +106,7 @@ def forget_remembered() -> None:
     """Drop what is kept (tests, and nothing else needs to)."""
     _HEADS.clear()
     _LATEST.clear()
+    _INDEX.clear()
 
 
 def transcript_root(home: str | Path = "") -> Path:
@@ -134,12 +135,38 @@ def folders_for(project: str | Path, root: Path) -> list[Path]:
     c:\\repos and C:\\Repos leave two folders side by side holding the same project's history.
     Both are the project's, so both are read.
     """
-    wanted = folder_for(project).lower()
+    return list(_project_index(root).get(folder_for(project).lower(), []))
+
+
+# The folders under a projects folder by lower-case name (D224). Looked up once per folder of a profile, the listing
+# was made 24 times for one client's profile, with a disk call for each of its 1,242 entries every time: about 30,000 calls, 6.5 s
+# cold, all before Start could be pressed. Listed once with scandir now - which says what is a folder without asking
+# the disk again - and kept while the folder's own modified time stays put (it moves when an entry is added) and for
+# at most INDEX_SECONDS (Windows did not always move it for a removal; a removed folder listed a few seconds longer
+# only reads as empty).
+INDEX_SECONDS = 10.0
+_INDEX: dict[str, tuple[int, float, dict[str, list[Path]]]] = {}
+
+
+def _project_index(root: Path) -> dict[str, list[Path]]:
     try:
-        return [child for child in root.iterdir()
-                if child.is_dir() and child.name.lower() == wanted]
+        stamp = root.stat().st_mtime_ns
     except OSError:
-        return []
+        return {}
+    key = str(root)
+    held = _INDEX.get(key)
+    if held is not None and held[0] == stamp and time.monotonic() - held[1] < INDEX_SECONDS:
+        return held[2]
+    index: dict[str, list[Path]] = {}
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    index.setdefault(entry.name.lower(), []).append(Path(entry.path))
+    except OSError:
+        return {}
+    _remember(_INDEX, key, (stamp, time.monotonic(), index))
+    return index
 
 
 def _text_of(message: Any) -> str:

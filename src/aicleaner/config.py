@@ -106,6 +106,48 @@ NEVER_HELD_BACK = frozenset({"name"})
 ALWAYS_STOOD_IN = frozenset({"guid"})
 
 
+# The remote desktops the menu links to (feature 158, aicleaner-rdp): each a name and an https address, opened in a new
+# tab. Nothing is embedded in AI Cleaner's page - its security policy is unchanged.
+REMOTE_DESKTOP_MAX = 20
+
+
+def remote_desktop_hosts(value: Any, strict: bool = True) -> list[dict[str, str]]:
+    """The hosts, cleaned: a name (1-60 characters) and an https address with no user name in it; one entry per
+    address (a later one replaces an earlier); at most 20. strict=False (a file edited by hand) skips a bad entry."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    if not isinstance(value, list):
+        if strict:
+            raise ValueError("remote_desktop.hosts is a list of {name, url}")
+        return []
+    found: dict[str, dict[str, str]] = {}
+    for entry in value:
+        try:
+            if not isinstance(entry, dict):
+                raise ValueError("each remote desktop has a name and an address")
+            name = str(entry.get("name") or "").strip()
+            if not name or len(name) > 60:
+                raise ValueError("a remote desktop's name is 1 to 60 characters")
+            parts = urlsplit(str(entry.get("url") or "").strip())
+            if parts.scheme.lower() != "https":
+                raise ValueError(f"{name}: the address must start with https://")
+            if parts.username or parts.password:
+                raise ValueError(f"{name}: an address with a user name or password in it is not taken")
+            if not parts.hostname:
+                raise ValueError(f"{name}: not an address")
+            url = urlunsplit(("https", parts.netloc.lower(), parts.path or "/", parts.query, ""))
+            found.pop(url, None)
+            found[url] = {"name": name, "url": url}
+        except ValueError:
+            if strict:
+                raise
+    if len(found) > REMOTE_DESKTOP_MAX:
+        if strict:
+            raise ValueError(f"at most {REMOTE_DESKTOP_MAX} remote desktops")
+        return list(found.values())[:REMOTE_DESKTOP_MAX]
+    return list(found.values())
+
+
 def _default_presets() -> list[dict]:
     from .presets import default_presets
     return default_presets()
@@ -247,6 +289,7 @@ class Config:
     debug_timings_since: int = 0
     # Your own words for Settings cards (feature 153), found by "Find a setting"; see setting_keywords().
     ui_setting_keywords: dict[str, list[str]] = field(default_factory=dict)
+    remote_desktop_hosts: list[dict[str, str]] = field(default_factory=list)
     session_claude: str = "claude"
     session_projects: list[str] = field(default_factory=list)
     session_permission_mode: str = "manual"
@@ -417,6 +460,7 @@ class Config:
         "prompt.autocorrect_replace": ("prompt_autocorrect_replace", list),
         "debug.timings_since": ("debug_timings_since", int),
         "ui.setting_keywords": ("ui_setting_keywords", dict),
+        "remote_desktop.hosts": ("remote_desktop_hosts", "remote_desktops"),
     }
 
     def settings(self) -> dict[str, Any]:
@@ -441,6 +485,8 @@ class Config:
                     value = _held_back(value)
             elif typ is dict:
                 value = setting_keywords(value)
+            elif typ == "remote_desktops":
+                value = remote_desktop_hosts(value)
             elif typ == "presets":
                 # Against the cap as it will be after this save, when the same save changes it.
                 from .presets import normalise_presets
@@ -622,6 +668,8 @@ class Config:
             cfg.debug_timings_since = 0
         ui_cfg = data.get("ui") if isinstance(data.get("ui"), dict) else {}
         cfg.ui_setting_keywords = setting_keywords(ui_cfg.get("setting_keywords"), strict=False)
+        rd_cfg = data.get("remote_desktop") if isinstance(data.get("remote_desktop"), dict) else {}
+        cfg.remote_desktop_hosts = remote_desktop_hosts(rd_cfg.get("hosts") or [], strict=False)
         ses = data.get("session") or {}
         cfg.session_enabled = _flag(ses, "enabled", True, "session.enabled")
         cfg.session_casual_folder = os.path.expandvars(str(ses.get("casual_folder", "") or "")).strip()

@@ -151,6 +151,18 @@ While it is on:
 
 On the AI Cleaner machine itself nothing changes.
 
+## Remote desktops
+
+Settings > [Remote desktops](Settings.md#card-remote-desktop) lists the machines whose Windows desktop you can open from AI
+Cleaner's menu, one per line as `Name = https://address`. Each becomes a menu entry that opens that machine's page in
+a new tab: its own address, behind the same Cloudflare sign-in, sealed end to end like the encrypted tunnel. Nothing is
+embedded in AI Cleaner's page.
+
+The desktop page itself is **aicleaner-rdp**, a separate bolt-on installed on each machine whose desktop you want to
+reach; its installer adds its own machine to this list when AI Cleaner runs beside it. An address must be `https://`
+and may not hold a user name or password; at most 20. The list is changed on the AI Cleaner machine - through remote
+access it is shown, not changed.
+
 ## If it is not acceptable for an engagement
 
 Turn `remote.enabled` off (or run `Enable-RemoteControl.ps1 -Remove`) and drive sessions from the

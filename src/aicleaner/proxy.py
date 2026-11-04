@@ -328,6 +328,7 @@ class Proxy:
         # Updates from the Settings page (2026-10-16): the last check, and update.auto's loop.
         self.updates = updates.UpdateState()
         self._auto_update: asyncio.Task | None = None
+        self._warm_lists: asyncio.Task | None = None
         self.lifecycle: lifecycle.Monitor | None = None
         self.codetab_error = ""
         # Copilot in VS Code (release 6): what keeps VS Code from being pointed here, the last failure, when
@@ -1651,6 +1652,8 @@ class Proxy:
             except Exception as exc:  # noqa: BLE001 - a proxy that cannot re-attach still starts
                 log.warning("could not re-attach running sessions: %s", exc)
         self._auto_update = asyncio.create_task(self._auto_update_loop())
+        if self.session is not None and writes_settings:
+            self._warm_lists = asyncio.create_task(self._warm_conversation_lists())
         # The lifecycle log and its watcher (spec 2026-10-24-session-lifecycle-instrumentation.md): only for an
         # installed proxy or a test home, like every other write to this machine's state above.
         if writes_settings:
@@ -1659,6 +1662,28 @@ class Proxy:
             self.lifecycle = lifecycle.Monitor(self._lifecycle_sessions, self._lifecycle_owners)
             self.lifecycle.on_resources = self._session_resources
             self.lifecycle.start()
+
+    WARM_AFTER_S = 20.0
+
+    async def _warm_conversation_lists(self) -> None:
+        """Every profile's Continue list read once, a little after a start, one at a time (D224). The first list after a
+        start read each conversation's opening and latest message from disk - 5.8 s for one profile from Brad's phone,
+        2026-11-05 - and every one after it took milliseconds. Read here, before anyone opens a session, the first one a
+        person opens is one of the quick ones. Nothing is drawn or kept but what the list keeps anyway."""
+        try:
+            await asyncio.sleep(self.WARM_AFTER_S)        # after the sessions re-attach and the first polls
+            host = self.session
+            for profile in list(getattr(host, "profiles", []) or []):
+                started = time.perf_counter()
+                try:
+                    await asyncio.to_thread(host.past, profile.name, 25, False)
+                except Exception as exc:  # noqa: BLE001 - warming is a courtesy; the page reads the list itself
+                    log.debug("conversation list for %s not warmed: %s", profile.name, exc)
+                    continue
+                log.debug("conversation list for %s warmed in %.0f ms", profile.name, (time.perf_counter() - started) * 1000)
+                await asyncio.sleep(0.5)                  # one profile at a time, leaving room for requests
+        except asyncio.CancelledError:
+            pass
 
     # ---- updates (2026-10-16) ---------------------------------------------------------------------
 
@@ -1833,6 +1858,9 @@ class Proxy:
         if self._auto_update is not None:
             self._auto_update.cancel()
             self._auto_update = None
+        if self._warm_lists is not None:
+            self._warm_lists.cancel()
+            self._warm_lists = None
         if self.codetab is not None:
             await self.codetab.stop()
             self.codetab = None

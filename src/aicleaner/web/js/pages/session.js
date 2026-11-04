@@ -18,7 +18,7 @@ import { isSealed } from '../sealed.js';
 import { renderMarkdown } from '../markdown.js';
 import { paintWorktree } from '../worktree.js';
 import { openMoveConversation } from '../convmovedialog.js';
-import { begin } from '../timing.js';
+import { begin, note as noteTiming } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { openSuggestTitles } from '../titlesdialog.js';
 import { attachImageReading, imageButton, isReadable, readInto, readingImages } from '../imagetext.js';
@@ -109,17 +109,19 @@ function atBottom(log) {
   return log.scrollHeight - log.scrollTop - log.clientHeight <= NEAR_BOTTOM_PX;
 }
 
-// Feature 156 (Brad, 2026-11-04): View previous prompt / View previous response. A prompt is a "you" turn; a response
-// starts at the first "claude" turn after a prompt (its later parts, between tool calls, belong to the same reply).
+// Feature 156 (Brad, 2026-11-04): View previous prompt / View previous response. A prompt is a "you" turn, or an answer
+// to Claude's question (Brad, 2026-11-04: what he chose is something he sent); a response starts at the first "claude"
+// turn after one (its later parts, between tool calls, belong to the same reply).
 // Whatever the log holds counts - the earlier lines Show earlier adds (up to 1000) too; above those, the buttons are
 // greyed out and Show earlier is the way further back.
 function turnStarts(log, kind) {
   const turns = [...log.querySelectorAll(':scope > .turn')];
-  if (kind === 'prompt') return turns.filter((t) => t.classList.contains('you'));
+  const sent = (t) => t.classList.contains('you') || t.classList.contains('you-answer');
+  if (kind === 'prompt') return turns.filter(sent);
   const starts = [];
   let sincePrompt = true;
   for (const t of turns) {
-    if (t.classList.contains('you')) sincePrompt = true;
+    if (sent(t)) sincePrompt = true;
     else if (t.classList.contains('claude') && sincePrompt) { starts.push(t); sincePrompt = false; }
   }
   return starts;
@@ -131,9 +133,17 @@ function previousStart(log, kind) {
   let found = null;
   for (const t of turnStarts(log, kind)) {
     const at = t.getBoundingClientRect().top - top + log.scrollTop;
-    if (at < log.scrollTop - 4) found = at;
+    if (at < log.scrollTop - 4) found = { at, turn: t };
   }
   return found;
+}
+
+// The turn a View previous button landed on pulses with a framed highlight, so the eye finds it (Brad, 2026-11-04).
+function pulseTurn(turn) {
+  turn.classList.remove('turn-pulse');
+  void turn.offsetWidth;                 // restart the animation when the same turn is landed on again
+  turn.classList.add('turn-pulse');
+  turn.addEventListener('animationend', () => turn.classList.remove('turn-pulse'), { once: true });
 }
 
 // Held by the line being read, not by a scroll offset (D116, the user, 2026-10-06). Once the history
@@ -465,7 +475,8 @@ function answeredLine(event) {
       h('span', { class: 'muted' }, ...withRestoredNames(question)), ' ', h('strong', {}, ...withRestoredNames(answer))))
     : [event.allow ? 'allowed' : 'denied'];
   if (event.late) body.push(h('div', { class: 'hint warn' }, 'after the question closed - Claude did not receive this'));
-  return h('div', { class: 'turn tool' }, h('span', { class: 'who' }, 'you'), h('div', {}, ...body));
+  return h('div', { class: answers.length ? 'turn tool you-answer' : 'turn tool' }, h('span', { class: 'who' }, 'you'),
+    h('div', {}, ...body));
 }
 
 // `after` is the event just before these, when drawing only the new tail of a log (D56): the
@@ -1502,6 +1513,14 @@ function sharedTitles(groups) {
 // `fromSelected` is how many chats were chosen in "Start a new chat from existing chats": the list
 // then says so under the plain new conversation (the user, 2026-10-24). Its value is '' as well -
 // it IS a new conversation, so Start, Switch and the title box treat it as one with no extra case.
+// The conversation a stopped session last ran, when it is one Start can continue (a Claude Code conversation id);
+// '' otherwise (D224).
+const CONVERSATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function lastConversation(session) {
+  const id = String((session && session.session_id) || '');
+  return session && !session.running && CONVERSATION_ID.test(id) ? id : '';
+}
+
 function pastOptions(past, project, fromSelected = 0) {
   const groups = (past || []).filter((entry) => (entry.sessions || []).length);
   const total = groups.reduce((n, entry) => n + entry.sessions.length, 0);
@@ -1650,7 +1669,8 @@ function questionCard(name, request) {
   return card;
 }
 
-// One question: every option on its own line with its description under it, then Other - a choice
+// One question: every option on its own line with its description under it - and its preview, when Claude gave one
+// (a mockup or a code snippet, as written; Brad 2026-11-04: it was seen only by opening the tool call) - then Other - a choice
 // like the rest, with a text area that grows (2026-09-30: Other had no button, so it could not be
 // chosen, and its box showed about 20 characters). Typing in it chooses it.
 const OTHER = '__other__';
@@ -1670,7 +1690,8 @@ function questionSet(q, group) {
     ...(q.options || []).map((o) => h('label', { class: 'option' },
       h('input', { type, name: group, value: o.label }),
       h('span', { class: 'option-text' }, h('strong', {}, o.label),
-        o.description ? h('span', { class: 'hint option-description' }, o.description) : null))),
+        o.description ? h('span', { class: 'hint option-description' }, o.description) : null,
+        o.preview ? h('pre', { class: 'option-preview' }, String(o.preview)) : null))),
     h('label', { class: 'option other' }, otherPick,
       h('span', { class: 'option-text' }, h('strong', {}, 'Other'), other)));
 }
@@ -2507,6 +2528,7 @@ function setLink(state) {
 }
 
 export async function render(main, context = {}) {
+  view.readyClock = { initial: true, at: 0 };         // the page's first session: from the page starting to load (D224)
   loadMonaco();                        // feature 139: the file editor's module, ready before the first tab
   // Read again on each visit (D216): a setting saved from another device, or before this module loaded, is not missed.
   getJSON('/api/config').then((config) => noteSettings(config.settings || {})).catch(() => {});
@@ -2650,9 +2672,10 @@ export async function render(main, context = {}) {
   };
   for (const [button, kind] of [[toPrompt, 'prompt'], [toReply, 'reply']]) {
     button.addEventListener('click', () => {
-      const at = previousStart(log, kind);
-      if (at === null) return;
-      log.scrollTop = Math.max(0, at - 6);
+      const found = previousStart(log, kind);
+      if (found === null) return;
+      log.scrollTop = Math.max(0, found.at - 6);
+      pulseTurn(found.turn);
       previousButtons();
     });
   }
@@ -2822,7 +2845,21 @@ export async function render(main, context = {}) {
       // person meant rather than whatever was chosen before the list arrived. Stop never waits.
       // Only its own lock is lifted: a start or stop in flight disables the button too, and the poll must
       // not hand it back mid-way.
-      const waiting = !session.running && Boolean(view.pastLoading);
+      // D224 (Brad, 2026-11-04): the wait was the whole delay before Start on a profile with many conversations. With
+      // the conversation this session last ran known, Start continues that one at once - said in the list - and the
+      // list arrives behind it. Only a session with nothing run before still waits.
+      const waiting = !session.running && Boolean(view.pastLoading) && !lastConversation(session);
+      // D224 telemetry (Brad, 2026-11-05), recorded only with Diagnostics on: from choosing a session (or opening the
+      // page) to Start usable, and from pressing Start to the session running.
+      const blockedNow = !session.running ? (state_.start_blocked || '') : '';
+      if (view.readyClock && (view.readyClock.initial || view.readyClock.name === view.name) && (session.running || (!waiting && !blockedNow))) {
+        noteTiming('session.ready-to-start', performance.now() - view.readyClock.at, { session: view.name, running: Boolean(session.running) });
+        view.readyClock = null;
+      }
+      if (view.startClock && view.startClock.name === view.name && session.running) {
+        noteTiming('session.started', performance.now() - view.startClock.at, { session: view.name });
+        view.startClock = null;
+      }
       // D197: a session whose client is still a placeholder (no names to filter) is saved but not started.
       const blocked = !session.running ? (state_.start_blocked || '') : '';
       if (waiting || blocked) {
@@ -2891,8 +2928,11 @@ export async function render(main, context = {}) {
     // Chats chosen in the dialog stay on offer until another choice is made or the session starts.
     const fromSelected = !session.running && view.startFrom ? view.startFrom.get(view.name) : null;
     // Said while it loads (D86): a cold list took seconds, and an empty select read as "nothing".
+    // While it loads, a stopped session offers the conversation it last ran (D224), so Start need not wait.
+    const lastRun = lastConversation(session);
     repaint(resume, view.pastLoading
-      ? [h('option', { value: '' }, 'Loading conversations...')]
+      ? [lastRun ? h('option', { value: lastRun, dataset: { provisional: '1' } }, 'Continue the last conversation (loading the others...)')
+        : h('option', { value: '' }, 'Loading conversations...')]
       : pastOptions(view.past, homeFolder, fromSelected ? fromSelected.ids.length : 0));
     const fromOption = resume.querySelector('option[data-from-selected]');
     if (fromOption) fromOption.selected = true;      // by index: its value is the plain new conversation's
@@ -2979,7 +3019,7 @@ export async function render(main, context = {}) {
   const RELOADS = new Set(['exited', 'stopped', 'permission', 'permission_timeout',
                            'permission_answered']);
   const DRAWN = new Set(['prompt', 'assistant', 'brief', 'interrupted', 'interrupt_pending', 'interrupt_refused',
-    'picture_note']);
+    'picture_note', 'permission_answered']);
 
   // What Claude is doing, from the fragments that were being thrown away.
   //
@@ -3036,7 +3076,13 @@ export async function render(main, context = {}) {
     if (event.type === 'result') { forgetListings(); showTree(); }
     if (event.type === 'interrupted' && event.late) say('The interrupt landed: this turn was stopped.', 'ok');
     if (event.type === 'interrupt_refused') say(`The session refused the interrupt: ${event.error || 'no reason given'}`, 'warn');
-    if (RELOADS.has(event.type)) { sayDoing(''); refresh(); return; }
+    if (RELOADS.has(event.type)) {
+      sayDoing('');
+      refresh();
+      // An answer is drawn now as well (Brad, 2026-11-04): the reply after it could arrive before the refresh and be
+      // appended first, and the refresh only adds what follows the last line drawn - the answer was lost.
+      if (event.type !== 'permission_answered') return;
+    }
     const compacted = event.type === 'system' && event.subtype === 'compact_boundary';   // drawn too (E5.1)
     if (!DRAWN.has(event.type) && !compacted) return;    // a streaming fragment: nothing drawn depends on it
     if (!view.name || view.state.selected !== view.name) return;
@@ -3345,7 +3391,16 @@ export async function render(main, context = {}) {
     if (!quiet) { view.pastLoading = true; paint(); }
     let past = [];
     try {
-      past = (await getJSON(`/api/session/past?name=${encodeURIComponent(asked)}${all ? '&all=1' : ''}`)).projects || [];
+      // One request for a list already on its way (D224: a switch and the poll asked together, and through the
+      // tunnel the second waited behind the first - 5.8 s and 3.1 s for the same list).
+      const url = `/api/session/past?name=${encodeURIComponent(asked)}${all ? '&all=1' : ''}`;
+      if (!view.pastInFlight || view.pastInFlight.url !== url) {
+        const request = getJSON(url);
+        view.pastInFlight = { url, request };
+        request.finally(() => { if (view.pastInFlight && view.pastInFlight.request === request) view.pastInFlight = null; })
+          .catch(() => {});
+      }
+      past = (await view.pastInFlight.request).projects || [];
     } catch (error) { /* an empty list, never an error: a new conversation can still start */ }
     if (asked !== view.name) return;   // a switch overtook it, and loads its own
     view.past = past;
@@ -3477,6 +3532,7 @@ export async function render(main, context = {}) {
   const selectSession = async (name) => {
     // Each step of a switch, timed while Diagnostics records (feature 91).
     const switching = begin('switch', { to: name });
+    view.readyClock = { name, at: performance.now() };   // until Start can be pressed (D224)
     saveDraft();                        // what was typed here stays with this session
     view.name = name;
     view.noneChosen = !name;
@@ -4259,6 +4315,7 @@ export async function render(main, context = {}) {
         await refresh();
       } else {
         const request = { name: view.name, resume: resume.value, title: resume.value ? '' : newName.value.trim() };
+        view.startClock = { name: view.name, at: performance.now() };
         try {
           await postJSON('/api/session/start', request);
         } catch (error) {

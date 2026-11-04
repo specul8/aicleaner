@@ -14,14 +14,16 @@ import * as session from './pages/session.js';
 import * as logPage from './pages/log.js';
 import * as wiki from './pages/wiki.js';
 import * as setup from './pages/setup.js';
-import { activityItems, noticeActivity, seen } from './activity.js';
+import * as alerts from './pages/alerts.js';
+import { activityItems, alertItems, noticeActivity, noticeAlerts, seen } from './activity.js';
 import { begin, setTiming } from './timing.js';
 import { confirmLeave, dirty } from './unsaved.js';
 import { isSealed, openTunnel } from './sealed.js';
 import { openFeedback } from './feedback.js';
 import { chatNow } from './chatnow.js';
+import { setupRemoteDesktops } from './remotedesktop.js';
 
-const PAGES = { overview, review, clients, global: clients, secrets, settings, session, log: logPage, wiki, setup };
+const PAGES = { overview, review, clients, global: clients, secrets, settings, session, log: logPage, wiki, setup, alerts };
 
 // Arriving on a page never scrolls it (DECISIONS 35): whoever came to stop a session would be
 // chasing the Stop button. A reload used to put the browser's remembered position back - the
@@ -243,7 +245,9 @@ export function statusItems(status) {
   // on top). Marked as notices, drawn without a frame, so a finished session's tick cannot be taken
   // for "Filtering on" when the menu is collapsed to its icons. Added after the check above, so a
   // notice never stands in for "Filtering on".
-  return [...items, ...activityItems().map((notice) => ({ ...notice, notice: true }))];
+  // Alerts a job raised (feature 161) under the filter's state and above the notices: each stays until dismissed, and
+  // never stands in for "Filtering on" either.
+  return [...items, ...alertItems(), ...activityItems().map((notice) => ({ ...notice, notice: true }))];
 }
 
 const LEVEL_ICON = { green: 'check', amber: 'alert', red: 'cross' };
@@ -536,6 +540,7 @@ export async function refreshStatus() {
   window.aicleanerHost = (app.status && app.status.host) || '';
   const shown = app.page && typeof app.page.currentSession === 'function' ? app.page.currentSession() : '';
   noticeActivity(app.status.activity, app.route, shown);
+  noticeAlerts(app.status.activity);
   seen(app.route, shown);
   renderStatusStack(app.status);
   renderTunnelState(app.status);
@@ -656,6 +661,8 @@ async function start() {
   // Through the encrypted tunnel, nothing reaches the API until the key is right (feature 21).
   // A download fetched through the tunnel that failed (sealed.js has no message stack of its own).
   window.addEventListener('aicleaner:error', (event) => sayError(event.detail));
+  // An alert dismissed on the Alerts page leaves the status stack now, not at the next poll (feature 161).
+  window.addEventListener('aicleaner:alerts-changed', () => { refreshStatus(); });
   await openTunnel();
   setupClipTitles();
   setupConfirmEscape();
@@ -664,6 +671,7 @@ async function start() {
   setupNavToggle();
   setupClientsToggle();
   setupAddSession();
+  setupRemoteDesktops();
   setupSessionsToggle();
   setupTopFlyouts();
   watchTables(document.getElementById('page'));

@@ -15,7 +15,7 @@ shows its cards. On a phone the groups are a drop-down at the top instead.
 | Sessions | Session page, File editor, Prompt autocorrect, Real names in green, Notifications |
 | Filtering | New names found, Near-misses, Shared identifiers, Names kept in tool calls, Pictures, Text in pictures and scans, Generated-output folders |
 | AI apps | Sign-ins, Where your AI apps point, Claude Code: PowerShell, Claude Desktop: Code tab, Claude Desktop: chat, GitHub Copilot |
-| Remote access | Encrypted tunnel, Folders the pages can open |
+| Remote access | Encrypted tunnel, Folders the pages can open, Remote desktops |
 | Logs | Logging, Diagnostics, Advanced |
 | Danger zone | Bypass filtering, Send what the canary refuses, Unchecked endpoints |
 
@@ -53,6 +53,7 @@ shows its cards. On a phone the groups are a drop-down at the top instead.
 | [Where your AI apps point](Settings.md#card-routing) | read-only | Each AI client's settings file and whether it goes through AI Cleaner or direct; project settings that route around AI Cleaner are flagged in red; requests seen since start. | |
 | [Restart](Settings.md#card-restart) | button | Runs Stop-AiCleaner.ps1 then Start-AiCleaner.ps1 -Detach. Sessions stop and requests in flight are cut off. Shows when the proxy started. | |
 | [Folders the pages can open](Settings.md#card-folders) | One full path per line (`folders.roots`) | The only folders a folder picker can show - for a scan, a session's folders, a client's share, joining a shared client. Empty means none. System folders (Program Files, ProgramData, Windows) are refused. Folders already used by a profile or share are listed as also reachable. | Empty |
+| [Remote desktops](Settings.md#card-remote-desktop) | One per line, `Name = https://address` (`remote_desktop.hosts`) | A menu entry for each machine running aicleaner-rdp, opening its remote desktop page in a new tab. https only, no user name in an address, at most 20. Changed on the AI Cleaner machine only. | Empty |
 | [Generated-output folders](Settings.md#card-scan-markers) | One folder name or path fragment per line (`scan.generated_markers`) | Repositories collect output nobody wrote by hand - logs, diagnostics captures, portal exports, backups - full of version numbers, correlation ids and allow-listed domains that look like identifiers but name nobody. Scanned like hand-written files, they fill a client with junk tokens (one real scan: 962 of 1,442 finds were of that sort). In folders matching the names in this list, a scan only creates real-to-token mappings that carry a name the filter already knows. An empty list uses the built-in list: `scripts/output`, `scripts/diagnostics`, `intune-portal-export`, `state-backups`, `app-packages`, `diaglogs-`, `oobe-capture`, `/temp/`, `/out/`. | Built-in |
 | [Unchecked endpoints](Settings.md#card-uninspected) | read-only (`allow_non_json_paths` in the file) | Endpoints exempt from all filtering. Red while any is listed. Change it in the config file and restart. | Empty |
 | [Import and export](Settings.md#card-importexport) | see below | | |

@@ -193,6 +193,47 @@ and an entry in the status stack that stays until you visit it.
 **Open** on a notice goes straight to that session's chat. Visiting the session clears both the
 entry and its toast.
 
+## Alerts and scheduled runs
+
+An **alert** is raised by a script or a session on the AI Cleaner machine - for example "Daily close needs
+you", with a summary of what a job found. It shows in the status stack on every page and every device
+(remote access included), with a toast when it arrives, and it stays until someone presses **Dismiss** on
+the **Alerts** page. Dismissing it on one device clears it everywhere. Alerts are kept across restarts.
+An alert names the session to talk it over in: **Open** goes straight to that session's chat.
+
+Alerts are raised only from the AI Cleaner machine; through remote access they can be read and
+dismissed, never raised.
+
+`installer\Invoke-AiCleanerSession.ps1` (in the AI Cleaner install folder) does three things:
+
+| Use | Command |
+|---|---|
+| Send a prompt to a session | `.\Invoke-AiCleanerSession.ps1 -Session "Contoso" -Prompt "run the due jobs" -Title "Scheduled - {date}" -NewConversation` |
+| Raise an alert | `.\Invoke-AiCleanerSession.ps1 -Alert -AlertTitle "Daily close needs you" -SummaryFile .\summary.txt -Session "Contoso" -Key daily-close-2026-11-04` |
+| Dismiss an alert | `.\Invoke-AiCleanerSession.ps1 -Dismiss -Key daily-close-2026-11-04` |
+| Run a prompt every day | `.\Invoke-AiCleanerSession.ps1 -RegisterTask -Session "Contoso" -Prompt "run the due jobs" -Title "Scheduled - {date}" -NewConversation -At 18:00` |
+
+When it sends a prompt:
+
+- **A stopped session** is started on a new conversation (titled `-Title`; `{date}` becomes the date) and
+  sent the prompt. It runs with the profile's own client, filtering and permission mode, as if you had
+  pressed Start.
+- **A session in use** - a turn running, a question waiting, prompts queued, or anything in the last 30
+  minutes (`-IdleMinutes`) - gets the prompt queued in the conversation that is open. A conversation you
+  are in is never switched away.
+- **An idle session** gets a new conversation first with `-NewConversation`; without it, the prompt goes
+  into the open conversation.
+- **A run that cannot start the session** (the cap on sessions running at once, memory nearly full)
+  raises an amber alert saying why.
+
+A session started this way can still ask you things: its questions wait on the Session page, with the
+"waiting on you" notice, until you answer - there is no time limit. While a question waits, the rest of
+that turn waits too.
+
+`-RegisterTask` creates one Windows Task Scheduler task for your user (no administrator rights), daily at
+`-At`, run when you are signed in; a run missed while the machine was off or asleep happens when it is
+next up. Running it again with the same settings changes nothing; `-UnregisterTask` removes it.
+
 ## Worktree sessions
 
 Two Claude Codes in one working tree commit over each other, so a project has one session at a

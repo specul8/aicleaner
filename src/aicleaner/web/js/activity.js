@@ -154,6 +154,28 @@ export function seen(route, shown) {
   });
 }
 
+// Alerts (feature 161): raised on the AI Cleaner machine, kept by AI Cleaner until dismissed - so the stack shows what
+// the poll carries, not what this page remembers. A toast for each one this page has not seen before (not on its first
+// poll: a page opened later lists them without a burst of toasts).
+let openAlerts = [];
+let knownAlerts = null;
+export function noticeAlerts(activity) {
+  openAlerts = ((activity || {}).alerts || []).slice().reverse();          // newest first
+  const ids = new Set(openAlerts.map((a) => a.id));
+  if (knownAlerts) {
+    for (const alert of openAlerts) {
+      if (knownAlerts.has(alert.id)) continue;
+      say(`Alert: ${alert.title}`, alert.level === 'green' ? 'ok' : 'warn',
+        { action: { label: 'Open', run: () => { location.hash = '/alerts'; } } });
+    }
+  }
+  knownAlerts = ids;
+}
+
+export function alertItems() {
+  return openAlerts.map((a) => ({ level: a.level, text: a.title, href: '#/alerts', alert: true }));
+}
+
 // The status-stack entries still waiting to be looked at, newest first.
 export function activityItems() {
   return [...notices.values()].reverse();

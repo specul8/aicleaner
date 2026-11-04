@@ -74,7 +74,8 @@ FILE_CSP = web.RequestKey("file_csp", str)
 # opposite: a person clicks it once and gets a file they wanted.
 REMOTE_REFUSED_PREFIXES: tuple[str, ...] = (
     "/api/secrets", "/api/tokenise", "/api/rehydrate",
-    "/api/setup")      # the setup wizard runs this machine's scripts (feature 106)
+    "/api/setup",      # the setup wizard runs this machine's scripts (feature 106)
+    "/api/alerts/raise")   # alerts are raised by this machine's scripts and sessions (feature 161); read and dismiss reach
 
 
 # The reads the setup wizard draws itself with (E4, Brad 2026-10-19: "the setup wizard ... should be
