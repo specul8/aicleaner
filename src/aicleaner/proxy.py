@@ -375,6 +375,9 @@ class Proxy:
         # Diagnostics' timing log (feature 91), written only while timings are being recorded.
         from .timing import TimingLog
         self.timing_log = TimingLog(Path(cfg.log_dir))
+        # Monitoring between AI Cleaner and the AI service (Brad, 2026-11-09): every model request's phases, timed.
+        from .upstreamwatch import UpstreamLog
+        self.upstream_log = UpstreamLog(Path(cfg.log_dir))
         # Beside Global, for the same reason Global is there: a profile names folders on this
         # machine, and the clients folder is shared.
         self.profile_store = ProfileStore(Path(cfg.mapping).parent / PROFILES_FILE)
@@ -1629,7 +1632,8 @@ class Proxy:
 
     async def _start(self, app: web.Application) -> None:
         timeout = aiohttp.ClientTimeout(total=None, sock_read=self.cfg.upstream_timeout_s)
-        self._session = aiohttp.ClientSession(timeout=timeout, auto_decompress=True)
+        from .upstreamwatch import trace_config
+        self._session = aiohttp.ClientSession(timeout=timeout, auto_decompress=True, trace_configs=[trace_config()])
         await self.audit_mcp()
         # Claude Code's own settings are kept in step at a start only by a proxy that is an install - started
         # from its config file - or one under a test home (AICLEANER_CLIENT_HOME). A proxy built in code
@@ -2327,11 +2331,19 @@ class Proxy:
         headers = {k: v for k, v in request.headers.items() if _forwardable(k)}
         auth_mode = self._apply_credential(dialect, headers)
         assert self._session is not None
+        from .upstreamwatch import Watch
+        watch = Watch((request.get(_REQ) or {}).get("id", ""), dialect, "/" + tail, started, body or b"",
+                      ((request.get(_REQ) or {}).get("who") or {}).get("app")
+                      or request.headers.get("User-Agent", "").split(" ")[0])
+        watch.mark("filtered")                    # the request is ready to go: what came before was AI Cleaner
         try:
             upstream_resp = await self._session.request(
-                request.method, url, headers=headers, data=body if body else None, allow_redirects=False
+                request.method, url, headers=headers, data=body if body else None, allow_redirects=False,
+                trace_request_ctx=watch,
             )
         except aiohttp.ClientError as exc:
+            watch.end("upstream_error", f"{type(exc).__name__}: {exc}")
+            await asyncio.to_thread(self.upstream_log.write, watch)
             log.warning("upstream error for %s: %s", url, exc)
             # Every request leaves an evidence line, including the ones the provider never saw.
             self._record(
@@ -2347,6 +2359,7 @@ class Proxy:
                 status=502,
             )
 
+        watch.headers(upstream_resp.status, upstream_resp.headers)
         async with upstream_resp:
             resp_headers = {
                 k: v for k, v in upstream_resp.headers.items() if k.lower() not in _STRIP_RESPONSE
@@ -2357,9 +2370,11 @@ class Proxy:
             if upstream_resp.content_type == "text/event-stream":
                 return await self._stream(request, upstream_resp, resp_headers, dialect, tail,
                                           mapper, outbound, inbound, started, auth_mode, secrets, auto_added,
-                                          held_back, attach, near_miss)
+                                          held_back, attach, near_miss, watch=watch)
 
             raw = await upstream_resp.read()
+            watch.end("complete" if upstream_resp.status < 400 else "error_status")
+            await asyncio.to_thread(self.upstream_log.write, watch)
             kept = 0
             if _is_json(upstream_resp.content_type) and raw:
                 try:
@@ -2390,7 +2405,7 @@ class Proxy:
         outbound: Counter[str], inbound: Counter[str], started: float, auth_mode: str,
         secrets: Counter[str] | None = None, auto_added: list[dict[str, str]] | None = None,
         held_back: dict[str, int] | None = None, attach: dict[str, int] | None = None,
-        near_miss: int = 0,
+        near_miss: int = 0, watch: Any = None,
     ) -> web.StreamResponse:
         session_name, session_client = self._session_of(request)
         response = web.StreamResponse(status=upstream_resp.status, headers=resp_headers)
@@ -2437,6 +2452,8 @@ class Proxy:
             opened = self._open.get((request.get(_REQ) or {}).get("id", ""))
             async for chunk in upstream_resp.content.iter_any():
                 for ev in parser.feed(chunk):
+                    if watch is not None:
+                        watch.event(ev.event or "", ev.data or "")
                     # Only the reply itself counts; a stream of pings (after message_start) is stuck.
                     if opened is not None and ev.event in _REPLY_EVENTS:
                         opened["content_at"] = time.time()
@@ -2469,7 +2486,19 @@ class Proxy:
                 await response.write(held.pop(0).serialise())
         except (aiohttp.ClientPayloadError, aiohttp.ClientConnectionError) as exc:
             cut = exc                    # the upstream ended the reply part-way (S7): said below, once
+            if watch is not None:
+                # A write to a client that has gone raises here too: Claude Code gave up (its own timeout), not
+                # the service. Told apart by the client's side of the connection.
+                gone = request.transport is None or request.transport.is_closing()
+                watch.end("client_gone" if gone else "upstream_cut", f"{type(exc).__name__}: {exc}")
+        except asyncio.CancelledError:
+            if watch is not None:
+                watch.end("cancelled", "the client went away while waiting")
+            raise
         finally:
+            if watch is not None:
+                watch.end("complete" if upstream_resp.status < 400 else "error_status")
+                await asyncio.to_thread(self.upstream_log.write, watch)
             if rewriter.fragments:
                 # The safety net under D87: a token written in a form swap-back does not know went
                 # to a tool as it was. Logged with what it was; the toast is rate-limited.

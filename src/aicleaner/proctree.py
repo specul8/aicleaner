@@ -73,6 +73,17 @@ if WINDOWS:
     _INVALID = wintypes.HANDLE(-1).value
     _EPOCH_AS_FILETIME = 116444736000000000
 
+    # A process's command line (D233): ProcessCommandLineInformation, Windows 8.1 and later, which needs only the
+    # limited query right - no reading of the other process's memory.
+    _ntdll = ctypes.WinDLL("ntdll")
+    _ntdll.NtQueryInformationProcess.restype = ctypes.c_long
+    _ntdll.NtQueryInformationProcess.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
+                                                 ctypes.POINTER(wintypes.ULONG)]
+    _COMMAND_LINE_INFO = 60
+
+    class _UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", ctypes.c_void_p)]
+
 
 @dataclass
 class Proc:
@@ -89,6 +100,46 @@ class Snapshot:
     taken: float = field(default_factory=time.time)
     procs: dict[int, Proc] = field(default_factory=dict)
     memory: dict[str, Any] = field(default_factory=dict)
+
+
+def command_line(pid: int) -> str:
+    """The command line process `pid` was started with, or "" when it cannot be read (gone, another user's, not
+    Windows). Read for D233's Send now, to tell the foreground tool's shell from the background ones."""
+    if not WINDOWS or not pid:
+        return ""
+    handle = _k32.OpenProcess(_QUERY_LIMITED, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        needed = wintypes.ULONG(0)
+        _ntdll.NtQueryInformationProcess(handle, _COMMAND_LINE_INFO, None, 0, ctypes.byref(needed))
+        size = max(int(needed.value), ctypes.sizeof(_UnicodeString))
+        for _ in range(2):                     # once more if it grew between the two calls (it should not)
+            buffer = ctypes.create_string_buffer(size)
+            status = _ntdll.NtQueryInformationProcess(handle, _COMMAND_LINE_INFO, buffer, size, ctypes.byref(needed))
+            if status == 0:
+                text = _UnicodeString.from_buffer(buffer)
+                return ctypes.wstring_at(text.Buffer, text.Length // 2) if text.Buffer and text.Length else ""
+            size = max(int(needed.value), size * 2)
+        return ""
+    except OSError:
+        return ""
+    finally:
+        _k32.CloseHandle(handle)
+
+
+def kill_tree(pid: int) -> bool:
+    """Process `pid` and everything under it ended (taskkill /T /F); True when Windows says it was done."""
+    import subprocess
+
+    if not WINDOWS or not pid:
+        return False
+    try:
+        done = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True, timeout=30,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 def _details(proc: Proc) -> None:

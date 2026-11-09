@@ -2078,7 +2078,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         return web.json_response({"ok": True, "outcome": outcome})
 
     async def session_queue_send(request: web.Request) -> web.Response:
-        """A waiting prompt sent now: first in line, and the running turn interrupted (D176)."""
+        """A waiting prompt sent now: first in line (D176), then what Session.send_queued_now decides - the turn
+        interrupted, only the foreground command stopped, or the next slot - never background work (D233)."""
         from .session import SessionError
 
         body = await request.json()

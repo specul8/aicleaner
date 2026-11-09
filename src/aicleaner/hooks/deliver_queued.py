@@ -48,7 +48,10 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 - whatever goes wrong, the tool call carries on untouched
         return 0
     if text:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": text}}))
+        # Also run after a tool call that failed (D233): Send now ends a foreground command's process, and the call
+        # that fails with it opens the slot through PostToolUseFailure, which takes additionalContext the same way.
+        event = "PostToolUseFailure" if payload.get("hook_event_name") == "PostToolUseFailure" else "PostToolUse"
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}))
     return 0
 
 

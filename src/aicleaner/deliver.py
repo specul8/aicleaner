@@ -28,6 +28,7 @@ log = logging.getLogger("aicleaner.deliver")
 
 HOOK_SCRIPT = Path(__file__).resolve().parent / "hooks" / "deliver_queued.py"
 MARKER = "deliver_queued.py"
+FAILURE_EVENT = "PostToolUseFailure"      # D233: the deliver hook runs after a failed tool call as well
 # The rename-collapse guard (bug report 2026-10-14): a PreToolUse hook, written with the same care.
 COLLAPSE_SCRIPT = Path(__file__).resolve().parent / "hooks" / "check_collapse.py"
 COLLAPSE_MARKER = "check_collapse.py"
@@ -103,6 +104,10 @@ def apply(on: bool, port: int, home: Path | None = None, python: str | Path | No
     if not isinstance(doc, dict):
         raise DeliverError(f"{target} is not a settings object; it was left as it is")
     new = updated(doc, on, port, python, event, marker, script)
+    if marker == MARKER and event == "PostToolUse":
+        # D233 (Brad, 2026-11-09): after a failed tool call too. Send now ends a foreground command's process; that
+        # call fails, and Claude Code runs PostToolUseFailure for it, not PostToolUse - the slot is there.
+        new = updated(new, on, port, python, FAILURE_EVENT, marker, script)
     if new == doc:
         return ""
     if target.exists():

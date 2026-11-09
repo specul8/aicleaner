@@ -779,13 +779,13 @@ function snippetBlock(snippet) {
       h('pre', { class: 'snippet-code' }, snippet.code)));
 }
 
-// Prompts waiting for the running turn to end (D176): above the prompt box, not in the transcript,
-// until the session takes them. Held ones came back from before a restart and go only when sent.
+// Prompts waiting while a turn runs (D176): above the prompt box, not in the transcript, until the session takes them -
+// together, at the next slot between tool calls (D233). Held ones came back from before a restart and go only when sent.
 function queueChips(queued) {
   const items = queued || [];
   if (!items.length) return [];
-  const head = h('div', { class: 'hint queue-head' },
-    `${items.length} waiting - sent when the current turn ends, one at a time`);
+  // Its words are painted by showQueueNote (D233), which knows what Send now would do this moment.
+  const head = h('div', { class: 'hint queue-head' }, queueNote(items.length, ''));
   const chips = items.map((item) => h('div', { class: `queue-chip${item.held ? ' held' : ''}`, 'data-id': item.id },
     // Its pictures by name (D216); the bytes stay on the server.
     (item.images || []).length ? h('span', { class: 'queue-pictures', title: item.images.map((p) => p.name).join(', ') },
@@ -854,9 +854,12 @@ function backgroundTasks(events) {
 // Feature 173 (Brad, 2026-11-09: "it would be amazing if it actually showed a short description of what it's doing ...
 // That way the user will not think the AI Service or session is 'stuck'"). What runs now, from the completed
 // `assistant` events - which carry each call's input, rehydrated as the background panel's are - not from the stream's
-// fragments, whose input is empty at content_block_start and never restored: the calls of the open turn that no result
-// names yet, plus the background work backgroundTasks() counts until its completion notice.
+// fragments, whose input is empty at content_block_start and never restored.
+// Reworked in 1.1.2 (Brad, 2026-11-09 18:47 and 19:08): the foreground steps only - the main agent's calls with no
+// result yet; background tasks and agents have their own panel ("no need to tell me twice"), and an agent's own calls
+// are not the step Claude is waiting on - in plain words, on the line under the transcript where "thinking..." shows.
 const WORK_LABEL_MAX = 80;
+const SHELL_TOOLS = new Set(['Bash', 'PowerShell']);
 
 function workLabel(tool) {
   const input = tool.input || {};
@@ -883,56 +886,113 @@ function turnOpen(events, running) {
   return lastWork > lastEnd;
 }
 
-// [{ id, name, label, at, background }], oldest first.
-function runningWork(events, running) {
+// The main agent's foreground calls still running: [{ id, name, words, at }], oldest first. A call made by an agent
+// (parent_tool_use_id) is left out - its results need not reach this page as the main agent's do, which is how a Read
+// and a SendMessage stayed listed for minutes after both had finished (Brad, 2026-11-09) - and so is one run in the
+// background. Each clears the moment its own tool_result arrives, parallel calls included.
+function foregroundSteps(events, running) {
   if (!running) return [];
   const states = toolStates(events, running);
   const items = [];
   for (const event of events || []) {
-    if (event.type !== 'assistant') continue;
+    if (event.type !== 'assistant' || event.parent_tool_use_id) continue;
     for (const block of ((event.message || {}).content || [])) {
       if (block.type !== 'tool_use' || !block.id || states.get(block.id) !== 'running') continue;
       const input = block.input || {};
-      if (input.run_in_background === true || BACKGROUND_TOOLS.has(block.name)) continue;   // counted below
-      items.push({ id: block.id, name: block.name || 'tool', label: workLabel(block), at: Number(event.at) || 0, background: false });
+      if (input.run_in_background === true || BACKGROUND_TOOLS.has(block.name)) continue;
+      items.push({ id: block.id, name: block.name || 'tool', words: stepWords(block), at: Number(event.at) || 0 });
     }
-  }
-  const labelled = new Map();
-  for (const event of events || []) {
-    if (event.type !== 'assistant') continue;
-    for (const block of ((event.message || {}).content || [])) if (block.type === 'tool_use' && block.id) labelled.set(block.id, block);
-  }
-  for (const task of backgroundTasks(events)) {
-    const block = labelled.get(task.id);
-    items.push({ id: task.id, name: task.name, label: block ? workLabel(block) : task.label, at: task.at, background: true });
   }
   return items.sort((a, b) => (a.at || 0) - (b.at || 0));
 }
 
+// One step in plain words, a verb phrase per tool (Brad, 2026-11-09): "Reading session.js", "Running: <its
+// description>" - never a raw tool name with a time.
+function stepWords(tool) {
+  const name = String(tool.name || '');
+  const input = tool.input || {};
+  const label = workLabel(tool);
+  const file = String(input.file_path || input.notebook_path || '').split(/[\\/]/).filter(Boolean).pop() || '';
+  const named = (verb, what) => (what ? `${verb} ${what}` : verb);
+  if (name === 'Read') return named('Reading', file || 'a file');
+  if (name === 'Edit' || name === 'MultiEdit' || name === 'NotebookEdit') return named('Editing', file || 'a file');
+  if (name === 'Write') return named('Writing', file || 'a file');
+  if (SHELL_TOOLS.has(name)) return label ? `Running: ${label}` : 'Running a command';
+  if (name === 'Grep' || name === 'Glob') return 'Searching files';
+  if (name === 'SendMessage') return 'Messaging another session';
+  if (name === 'AskUserQuestion') return 'Asking you a question';
+  if (name === 'WebSearch') return 'Searching the web';
+  if (name === 'WebFetch') return named('Fetching', String(input.url || '').replace(/^https?:\/\//, '').split('/')[0]);
+  if (name === 'TodoWrite' || name === 'TaskCreate' || name === 'TaskUpdate') return 'Updating the task list';
+  if (name === 'Skill') return 'Using a skill';
+  if (name === 'ExitPlanMode') return 'Presenting a plan';
+  if (isAgent(name)) return label ? `Running an agent: ${label}` : 'Running an agent';
+  if (name.startsWith('mcp__')) return `Using ${name.split('__')[1] || 'a connected tool'}`;
+  return name ? `Using ${name}` : 'Using a tool';
+}
+
+// How long a step has run, said only past half a minute: a quick step needs no clock.
+const STEP_TIME_AFTER_S = 30;
+
 function elapsedText(at) {
   if (!at) return '';
   const seconds = Math.max(0, Math.round(Date.now() / 1000 - at));
+  if (seconds <= STEP_TIME_AFTER_S) return '';
   if (seconds < 60) return `${seconds}s`;
   const mins = Math.floor(seconds / 60);
   return mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
 }
 
-// "Scan the share folders for duplicates - 2 min; 3 agents working": up to two calls by name, the agents counted
-// once there are two or more; the title lists every one.
+// One step by name ("Reading session.js"); more than one as a count ("2 active foreground steps") with each named in
+// the title (Brad, 2026-11-09 19:08).
 function workSummary(items) {
   const one = (item) => {
     const since = elapsedText(item.at);
-    const label = item.label || item.name;
-    return since ? `${label} - ${since}` : label;
+    return since ? `${item.words} - ${since}` : item.words;
   };
-  const agents = items.filter((item) => isAgent(item.name));
-  const others = items.filter((item) => !isAgent(item.name)).reverse();      // the newest first
-  const parts = others.slice(0, 2).map(one);
-  if (others.length > 2) parts.push(`${others.length - 2} more`);
-  if (agents.length === 1) parts.push(one(agents[0]));
-  else if (agents.length > 1) parts.push(`${agents.length} agents working`);
-  const all = items.map((item) => `${item.name}${item.background ? ' (background)' : ''}: ${one(item)}`).join('\n');
-  return { text: parts.join('; '), all };
+  const all = items.map(one).join(', ');
+  if (items.length === 1) return { text: one(items[0]), all };
+  return { text: `${items.length} active foreground steps`, all };
+}
+
+// What Send now would do this moment (D233), as the server decides it (Session.send_now_plan): "question" while a card
+// is open, "interrupt" with no agents running, then by the foreground step - "stop_command" for a Bash or PowerShell
+// command, "tool" for another, "generating" with none; "" when no turn is open.
+function sendNowHint(session) {
+  const events = session.events || [];
+  const running = Boolean(session.running);
+  if (!turnOpen(events, running)) return '';
+  if ((session.pending || []).length) return 'question';
+  const { live } = liveTasks(events);
+  const agents = (live || []).filter((task) => task.task_type !== 'local_bash').length;
+  if (!agents) return 'interrupt';
+  const steps = foregroundSteps(events, running);
+  if (steps.some((step) => SHELL_TOOLS.has(step.name))) return 'stop_command';
+  return steps.length ? 'tool' : 'generating';
+}
+
+// The line over the waiting prompts (D233; Brad, 2026-11-09 18:57: it replaces "N waiting - sent when the current turn
+// ends, one at a time", which the queue no longer does): how many, when Claude receives them, and what Send now does.
+function queueNote(count, hint) {
+  const it = count === 1 ? 'it' : 'them';
+  const lead = `${count} waiting - `;
+  const usual = `Claude will receive ${it} when the current foreground actions complete; `;
+  if (hint === 'question') {
+    return `${lead}Claude will receive ${it} after the question above is answered; Send now waits for the question to be answered.`;
+  }
+  if (hint === 'stop_command') {
+    return `${lead}${usual}Send now stops the running command - not the agents - and sends ${it} immediately.`;
+  }
+  if (hint === 'tool') {
+    return `${lead}Claude will receive ${it} when the current foreground step completes; agents are running, so Send now `
+      + `stops nothing and sends ${it} at that step.`;
+  }
+  if (hint === 'generating') {
+    return `${lead}Claude is writing an answer and agents are running - Send now will deliver ${it} as soon as the answer `
+      + 'ends, without stopping the agents.';
+  }
+  if (hint === 'interrupt') return `${lead}${usual}Send now stops the active foreground actions and sends ${it} immediately.`;
+  return `${lead}Send now sends ${it} at once.`;
 }
 
 // ---- what the page already holds (D140) --------------------------------------------------------
@@ -2612,11 +2672,10 @@ function showModelRequest(request) {
   if (!box) return;
   const text = box.querySelector('.model-state-text');
   const stop = box.querySelector('.model-state-stop');
-  // The line also says what runs now (feature 173): shown while either has something to say.
   if (!request) {
     text.hidden = true;
     stop.hidden = true;
-    syncModelBox(box);
+    box.hidden = true;
     return;
   }
   const waited = request.waiting_s || 0;
@@ -2634,36 +2693,40 @@ function showModelRequest(request) {
   stop.hidden = waited < MODEL_STUCK_S;
 }
 
-function syncModelBox(box) {
-  const work = box.querySelector('.model-state-work');
-  box.hidden = box.querySelector('.model-state-text').hidden && (!work || work.hidden);
+// Feature 173, reworked in 1.1.2 (Brad, 2026-11-09 19:08): what the session is doing now, on the line under the
+// transcript where "thinking..." shows. While foreground steps run, they take the spot - one by name, more as a count
+// with each named in the title - since that is what a waiting prompt waits on; otherwise what the stream last said
+// ("thinking...", "writing...", compacting), and "thinking..." for as long as a turn is open with nothing else to say -
+// the AI service working on the prompt or on its answer. Painted on each event and poll, and every second by the page's
+// tick so a long step's time moves. The note over the waiting prompts (D233) is painted with it.
+const STREAM_WORDS = /^(thinking|writing|compacting)/;
+
+function showWork(events, running) {
+  const doing = document.getElementById('session-doing');
+  if (!doing) return;
+  const steps = foregroundSteps(events, running);
+  const said = String(view.streamDoing || '');
+  let text = '';
+  let all = '';
+  if (said.startsWith('compacting')) text = said;
+  else if (steps.length) ({ text, all } = workSummary(steps));
+  else if (said) text = STREAM_WORDS.test(said) ? said : 'thinking...';
+  else if (turnOpen(events, running)) text = 'thinking...';
+  doing.replaceChildren(...withRestoredNames(text));
+  doing.title = all;
+  doing.hidden = !text;
+  doing.dataset.steps = String(steps.length);
+  showQueueNote(events, running);
 }
 
-// Feature 173: what the session is doing now, on the model-state line, and - while a turn is open - that a message
-// sent now is read when the current step ends (feature 119 hands waiting messages over between tool calls). Painted on
-// each event and poll, and every second by the page's tick so the times move.
-function showWork(events, running) {
-  const box = document.getElementById('session-model');
-  const work = box && box.querySelector('.model-state-work');
-  if (!work) return;
-  const items = runningWork(events, running);
-  const open = turnOpen(events, running);
-  const doing = work.querySelector('.model-state-doing');
-  const note = work.querySelector('.model-state-note');
-  if (items.length) {
-    const { text, all } = workSummary(items);
-    doing.replaceChildren(...withRestoredNames(text));
-    doing.title = all;
-    doing.hidden = false;
-  } else {
-    doing.replaceChildren();
-    doing.title = '';
-    doing.hidden = true;
-  }
-  note.hidden = !open;
-  work.hidden = doing.hidden && note.hidden;
-  work.dataset.count = String(items.length);
-  syncModelBox(box);
+function showQueueNote(events, running) {
+  const head = document.querySelector('#session-queue .queue-head');
+  if (!head) return;
+  const session = (view.state && view.state.sessions && view.state.sessions[view.name]) || {};
+  const count = (session.queued || []).length;
+  const hint = sendNowHint({ events, running, pending: session.pending });
+  head.textContent = queueNote(count, hint);
+  head.dataset.hint = hint;
 }
 
 // Feature 173: a streamed event that ends a tool call or a turn, kept on the page as the server keeps it (slim, D111),
@@ -2931,6 +2994,33 @@ export async function render(main, context = {}) {
   const paintQueue = (queued) => {
     repaint(queueBox, queueChips(queued));
     queueBox.hidden = !(queued || []).length;
+    const session = current();
+    showQueueNote(session.events, Boolean(session.running));
+  };
+  // What each Send now outcome means, said plainly (D233). Background agents are never stopped.
+  const SEND_NOW_SAID = {
+    interrupting: 'Stopping the current turn, then sending this.',
+    stopping_command: 'Background agents are running, so only the running command was stopped (not the agents): '
+      + 'this reaches Claude as that step ends.',
+    after_answers: 'Your answers go to Claude first; this follows at the next step.',
+    already_sent: 'That prompt had already gone to Claude.',
+    next_tool_call: 'Waiting so the agents are not stopped: background agents are running, so nothing was stopped. '
+      + 'This goes first and reaches Claude at its next step.',
+    command_not_found: 'Waiting so the agents are not stopped: the running command could not be told apart from the '
+      + 'others, so nothing was stopped. This goes first and reaches Claude when that step ends.',
+  };
+  // D233: an open question card is never lost to Send now. Answered in full, its answers go first; partly answered,
+  // or a permission still waiting for Allow or Deny, Send now waits for it.
+  const cardFirst = async () => {
+    const card = main.querySelector('.question-card[data-permission], .card[data-permission]');
+    if (!card) return true;
+    const answers = card.classList.contains('question-card') ? answersIn(card) : null;
+    if (!answers) {
+      say('Answer or decline the question first: Send now would lose it. This prompt stays waiting.', 'warn');
+      return false;
+    }
+    await answerOnce(card.dataset.permission, card, { allow: true, answers });
+    return !main.querySelector(`[data-permission="${CSS.escape(card.dataset.permission)}"]`);
   };
   queueBox.addEventListener('click', async (event) => {
     const button = event.target.closest('button[data-action]');
@@ -2938,14 +3028,21 @@ export async function render(main, context = {}) {
     button.disabled = true;
     const cancelling = button.dataset.action !== 'send';
     const item = (current().queued || []).find((entry) => entry.id === button.dataset.id);
+    let answeredFirst = false;
     try {
+      if (!cancelling) {
+        const card = main.querySelector('[data-permission]');
+        if (!(await cardFirst())) {
+          button.disabled = false;
+          return;
+        }
+        answeredFirst = Boolean(card);
+      }
       const path = cancelling ? '/api/session/queue/cancel' : '/api/session/queue/send';
       const answer = await postJSON(path, { name: view.name, id: button.dataset.id });
-      if (answer.outcome === 'interrupting') say('Stopping the current turn, then sending this.', 'ok');
-      // D205: with background agents running nothing is interrupted - stopping the turn would stop them too.
-      if (answer.outcome === 'next_tool_call') {
-        say('Background agents are running, so the turn was not stopped: this goes first and reaches Claude at its next step.', 'ok');
-      }
+      // The answers ended the turn and the prompt went straight after them, before Send now arrived (D233).
+      if (answer.outcome === 'already_sent' && answeredFirst) answer.outcome = 'after_answers';
+      if (SEND_NOW_SAID[answer.outcome]) say(SEND_NOW_SAID[answer.outcome], 'ok');
       // Cancel gives the words back to edit (the user, 2026-10-12), ahead of anything typed since.
       if (cancelling && item && item.text) {
         const typed = promptValue();
@@ -3021,15 +3118,12 @@ export async function render(main, context = {}) {
     const drawing = begin('paint.transcript', { events: (session.events || []).length });
     paintLog(log, session.events, view.name);
     markTools(log, session.events, Boolean(session.running));
+    // Through the tunnel there is no stream to say "thinking..." as it happens: the poll's state
+    // carries what the session last saw instead (the user, 2026-10-12).
+    if (isSealed()) view.streamDoing = session.doing || '';
     showWork(session.events, Boolean(session.running));        // feature 173
     drawing.end();
     paintQueue(session.queued);
-    // Through the tunnel there is no stream to say "thinking..." as it happens: the poll's state
-    // carries what the session last saw instead (the user, 2026-10-12).
-    if (isSealed()) {
-      doing.textContent = session.doing || '';
-      doing.hidden = !session.doing;
-    }
     showEarlierWhen();
     paintBackground(background, session.events, () => box);
     // Not rebuilt while unchanged or in use: a half-answered question must survive the poll (D58, D69).
@@ -3233,9 +3327,11 @@ export async function render(main, context = {}) {
   // The tool's NAME only, never its input: an input is a command line or a path, which is exactly
   // the sort of string that carries a client name, and it would reach the screen without going
   // through the restore that transcript text does.
+  // What the stream said is kept, and the line painted from it and the foreground steps together (feature 173).
   const sayDoing = (what) => {
-    doing.textContent = what || '';
-    doing.hidden = !what;
+    view.streamDoing = what || '';
+    const session = current();
+    showWork(session.events, Boolean(session.running));
   };
 
   const noteActivity = (event) => {
@@ -3244,7 +3340,7 @@ export async function render(main, context = {}) {
     // Compacting (E5.1): from its start to its end nothing else arrives, often for a minute or two.
     if (event.type === 'system' && event.subtype === 'status') {
       if (event.status === 'compacting') return sayDoing('compacting the conversation... (this can take a minute or two)');
-      if (doing.textContent.startsWith('compacting')) return sayDoing('');
+      if (String(view.streamDoing || '').startsWith('compacting')) return sayDoing('');
       return;
     }
     if (event.type === 'system' && event.subtype === 'compact_boundary') return sayDoing('');
@@ -3924,12 +4020,9 @@ export async function render(main, context = {}) {
       h('span', { id: 'session-link', class: 'link-state', hidden: true })),
     // The model request itself (DECISIONS 47): "Connected" only ever meant the page could reach
     // AI Cleaner, and stayed green through an 82-minute stall.
+    // What runs now (feature 173) moved to the line under the transcript in 1.1.2 (Brad, 2026-11-09).
     h('div', { id: 'session-model', class: 'model-state', hidden: true },
       h('span', { class: 'model-state-text', hidden: true }),
-      // What runs now, and when a message sent now is read (feature 173, Brad 2026-11-09).
-      h('span', { id: 'session-work', class: 'model-state-work', hidden: true },
-        h('span', { class: 'model-state-doing', hidden: true }),
-        h('span', { class: 'model-state-note', hidden: true }, 'A message sent now is read when the current step ends.')),
       h('button', { type: 'button', class: 'model-state-stop', hidden: true }, 'Interrupt')));
   const filesBar = h('div', { id: 'files-resize', class: 'drag-bar x', role: 'separator',
     'aria-orientation': 'vertical', title: 'Drag to change the width of the files' }, dragGrip());

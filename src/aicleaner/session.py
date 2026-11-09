@@ -23,6 +23,8 @@ session driven this way can read and plan but cannot quietly edit.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import functools
 import copy
 import json
@@ -42,9 +44,48 @@ from typing import Any, Awaitable, Callable
 
 from . import lifecycle
 from .fileio import network_path
-from .promptpictures import PictureError, blocks, checked, image_blocks_in, names
+from .promptpictures import MAX_COUNT, MAX_TOTAL, PictureError, blocks, checked, image_blocks_in, names
 
 log = logging.getLogger("aicleaner.session")
+
+# ---- D233 (Brad, 2026-11-09; spec 2026-11-09-d233-send-now.md): waiting prompts and Send now ----------------------
+#
+# Send now never cancels background tasks, agents or background tools. The tools whose foreground step Send now may end
+# by stopping its process; the CLI's task types that are a shell (any other kind running counts as an agent); how long
+# a plain permission answer is given to reach Claude Code before the step it allowed counts as the foreground step.
+SHELL_TOOLS = frozenset({"Bash", "PowerShell"})
+SHELL_TASK_TYPES = frozenset({"local_bash"})
+ANSWER_SETTLE_S = 3.0
+# A picture with a prompt that has to wait is saved at once under the session's state folder, for Claude to Read when
+# the prompt is handed over between tool calls; kept a day.
+ATTACHED_KEEP_S = 24 * 60 * 60
+PICTURE_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp"}
+# The line the hook text carries for each picture. "The user", as deliver_lead (ui.py) words the rest of it.
+PICTURE_LINE = "The user attached a picture: {path}"
+_UNSAFE_IN_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def folder_name(name: str) -> str:
+    """A profile's name as a folder name: the whole name, only the characters Windows refuses replaced."""
+    return _UNSAFE_IN_NAME.sub("_", str(name or "")).strip(" .") or "session"
+
+
+def sweep_attached(folder: Path, keep_s: float = ATTACHED_KEEP_S, now: float | None = None) -> int:
+    """Pictures saved for waiting prompts (D233) older than `keep_s`, removed. Returns how many went."""
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        entries = list(folder.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
+            if entry.is_file() and now - entry.stat().st_mtime > keep_s:
+                entry.unlink()
+                removed += 1
+        except OSError as exc:
+            log.debug("could not remove the old picture %s: %s", entry, exc)
+    return removed
 
 # How long one line of Claude Code's output may be before the pipe's buffer gives up (DECISIONS 47).
 # asyncio's default is 64 KiB, and after an Edit Claude Code prints the whole original file on one
@@ -792,6 +833,19 @@ class Session(_FindsClaude):
         # and are sent only when someone says so.
         self.queued: list[dict[str, Any]] = []
         self._flushing: asyncio.Task | None = None
+        # D233 (Brad, 2026-11-09): what Send now decides on. The kinds of the CLI's live background tasks (a shell, or
+        # an agent); the main agent's tool calls still waiting for their result; the command text of each shell tool
+        # call, and of those running in the background; when a question card or permission was last answered, and
+        # whether it was a question - its answers go before any waiting prompt; and whether the prompts waiting after
+        # the one sent now go with it when the interrupted turn ends.
+        self.background_types: list[str] = []
+        self._open_tools: dict[str, dict[str, Any]] = {}
+        self._shell_commands: dict[str, str] = {}
+        self._background_commands: dict[str, str] = {}
+        self._answered_at = 0.0
+        self._answered_question = False
+        self._together = False
+        self._recently_sent: deque[str] = deque(maxlen=50)     # waiting prompts' ids, once handed over
         # True while a re-attached broker replays what it kept (D179): a turn ending in the replay is
         # history, so it sends nothing; the end of the replay decides.
         self._replaying = False
@@ -1009,6 +1063,7 @@ class Session(_FindsClaude):
         environment = self._child_environment()
         self.events.clear()
         self._new_epoch()
+        self._forget_steps()
         # Continuing a conversation hands the model its history; the page had none of it, because
         # the buffer starts empty and the earlier turns live in the CLI's own transcript. Seed
         # them, so resuming looks like picking something up rather than starting over. Off the
@@ -1128,6 +1183,7 @@ class Session(_FindsClaude):
         self.seen_waiting = 0
         self.last_error = ""
         self._briefed = True           # the brief went with the first prompt, before the restart
+        self._forget_steps()           # the replay that follows says again what is open (D233)
         self._load_queue()
         self._replaying = True
         resume = str(launch.get("resume") or "")
@@ -1426,6 +1482,11 @@ class Session(_FindsClaude):
             item: dict[str, Any] = {"id": uuid.uuid4().hex[:12], "text": text, "at": time.time(), "held": False}
             if images:
                 item["images"] = images          # kept with it in queued.json, across a proxy restart
+                # D233: saved at once, so the prompt need not wait for the turn's end - at the next slot Claude is
+                # told where each picture is. Not saved (no state folder, a full disk): it waits for the end as before.
+                paths = self._save_pictures(item["id"], images)
+                if paths:
+                    item["paths"] = paths
             self.queued.append(item)
             self._queue_changed()
             return "queued"
@@ -1433,8 +1494,66 @@ class Session(_FindsClaude):
         return "sent"
 
     def queued_view(self) -> list[dict[str, Any]]:
-        """The waiting prompts as the page sees them: a picture by its name, never its bytes (D216)."""
-        return [{**item, "images": names(item["images"])} if item.get("images") else dict(item) for item in self.queued]
+        """The waiting prompts as the page sees them: a picture by its name, never its bytes (D216), nor where it was
+        saved (D233)."""
+        view = []
+        for item in self.queued:
+            shown = {key: value for key, value in item.items() if key != "paths"}
+            if item.get("images"):
+                shown["images"] = names(item["images"])
+            view.append(shown)
+        return view
+
+    # ---- D233: pictures saved for a waiting prompt ----------------------------------------------
+
+    def _attached_folder(self) -> Path | None:
+        """<state>/sessions/<profile name>/attached, or None when this session keeps no state folder."""
+        if self.sessions_dir is None:
+            return None
+        return self.sessions_dir / folder_name(self.profile.name if self.profile else "") / "attached"
+
+    def _save_pictures(self, item_id: str, images: list[dict[str, str]]) -> list[str]:
+        """Each picture written as <id>-<n>.<ext>; the absolute paths, or [] when they could not all be written."""
+        folder = self._attached_folder()
+        if folder is None or not images:
+            return []
+        sweep_attached(folder)                  # on access: what is over a day old goes now
+        written: list[Path] = []
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            for number, picture in enumerate(images, 1):
+                extension = PICTURE_EXTENSIONS.get(str(picture.get("media_type", "")), "png")
+                path = folder / f"{item_id}-{number}.{extension}"
+                path.write_bytes(base64.b64decode(str(picture.get("data") or ""), validate=True))
+                written.append(path)
+        except (OSError, ValueError, binascii.Error) as exc:
+            log.warning("a waiting prompt's pictures could not be saved in %s (it waits for the turn's end): %s",
+                        folder, exc)
+            self._remove_pictures([str(path) for path in written])
+            return []
+        return [str(path.resolve()) for path in written]
+
+    @staticmethod
+    def _remove_pictures(paths: list[str]) -> None:
+        for path in paths:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError as exc:
+                log.debug("could not remove %s: %s", path, exc)
+
+    @staticmethod
+    def _pictures_ready(item: dict[str, Any]) -> bool:
+        """A waiting prompt can go between tool calls: it has no pictures, or every one is saved and still there."""
+        images, paths = item.get("images") or [], item.get("paths") or []
+        if not images:
+            return True
+        return len(paths) == len(images) and all(Path(path).is_file() for path in paths)
+
+    @staticmethod
+    def _handed_over(item: dict[str, Any]) -> str:
+        """What the hook hands Claude for one waiting prompt: its words, then a line per picture."""
+        lines = [PICTURE_LINE.format(path=path) for path in item.get("paths") or []] if item.get("images") else []
+        return "\n".join([item["text"], *lines]) if item["text"].strip() else "\n".join(lines)
 
     def _queue_changed(self) -> None:
         """Keep the waiting prompts on disk beside the broker, and tell watchers the list changed."""
@@ -1476,6 +1595,9 @@ class Session(_FindsClaude):
                         kept["images"] = checked(item["images"])
                     except PictureError as exc:
                         log.warning("a waiting prompt's pictures in %s were dropped: %s", path, exc)
+                    # Where they were saved (D233), if they still are; otherwise the prompt waits for the turn's end.
+                    if kept.get("images") and isinstance(item.get("paths"), list):
+                        kept["paths"] = [str(p) for p in item["paths"] if isinstance(p, str)]
                 if kept["text"].strip() or kept.get("images"):
                     self.queued.append(kept)
 
@@ -1487,14 +1609,33 @@ class Session(_FindsClaude):
             raise SessionError("that prompt is no longer waiting")
         self.queued = [item for item in self.queued if item["id"] != item_id]
         self._queue_changed()
+        self._remove_pictures(list(found[0].get("paths") or []))       # D233: nobody will read them now
         return list(found[0].get("images") or [])
 
     async def send_queued_now(self, item_id: str) -> str:
-        """Send one waiting prompt now: to the front, and the running turn interrupted so it goes
-        as soon as the CLI ends it. Not busy: it is sent at once. Returns "sent" or "interrupting"."""
+        """Send one waiting prompt now (D233, Brad 2026-11-09 - the spec's "Decided rules"). It goes first in the
+        queue, the rest after it in order, and then:
+
+        - no turn running: sent at once ("sent");
+        - a question card or permission still open: refused - answer or decline it first (SessionError);
+        - a question just answered: its answers go first, the prompt at the slot right after ("after_answers");
+        - no background agents: Claude Code's interrupt, and the prompt starts the next turn ("interrupting");
+        - agents running, the foreground step a Bash or PowerShell command: only that command's process tree is
+          ended; the step fails, the slot opens and the prompt is handed over there ("stopping_command"), or, when
+          its process cannot be told apart, it waits for the step to end ("command_not_found");
+        - agents running, a quicker tool or Claude writing: the next slot or the turn's end ("next_tool_call").
+
+        Send now never cancels background tasks, agents or background tools."""
         found = [item for item in self.queued if item["id"] == item_id]
+        if not found and item_id in self._recently_sent:
+            # Gone a moment before Send now arrived - after the answers it waited on, say: done, not an error.
+            return "already_sent"
         if not found:
             raise SessionError("that prompt is no longer waiting")
+        if self.busy and self.pending:
+            # Interrupting now would reject the open question, and with it whatever has been chosen so far.
+            raise SessionError("a question is waiting for an answer - answer or decline it first, then Send now; "
+                               "sending now would lose it")
         item = {**found[0], "held": False}
         self.queued = [item] + [other for other in self.queued if other["id"] != item_id]
         if not self.busy:
@@ -1503,31 +1644,87 @@ class Session(_FindsClaude):
             await self._send(item["text"], item.get("images"))
             return "sent"
         self._queue_changed()
-        if self.background:
-            # D205 (Brad, 2026-10-23): the CLI's interrupt ends the whole turn, background agents with it - a
-            # force-push cancelled a client's long-running subagents. With background work running, the prompt goes
-            # first in line and reaches Claude at its next tool call (feature 119's between-tools delivery, or the
-            # turn's end); nothing is interrupted.
-            self._emit({"type": "send_now_waits", "background": self.background})
-            return "next_tool_call"
-        await self.interrupt(cancel_queued=True)
-        return "interrupting"
+        plan, detail = self.send_now_plan()
+        log.info("Send now in %s: %s (%s)", self.profile.name if self.profile else "a session", plan,
+                 detail if isinstance(detail, str) else len(detail or []))
+        if plan == "after_answers":
+            self._emit({"type": "send_now_waits", "why": "answers"})
+            return "after_answers"
+        if plan == "interrupt":
+            self._together = True               # the rest go with it when the interrupted turn ends
+            await self.interrupt(cancel_queued=True)
+            return "interrupting"
+        if plan == "stop_command":
+            return await self._stop_foreground(detail)
+        self._emit({"type": "send_now_waits", "why": detail, "background": self.background})
+        return "next_tool_call"
+
+    def agents_running(self) -> int:
+        """Background work other than shells (D233): agents, workflows, remote tasks - anything the CLI's interrupt
+        would end. A count not matched by known kinds counts as agents too: never assumed safe to interrupt."""
+        known = [kind for kind in self.background_types if kind not in SHELL_TASK_TYPES]
+        return len(known) + max(0, self.background - len(self.background_types))
+
+    def foreground_steps(self) -> list[dict[str, Any]]:
+        """The main agent's tool calls still running in the foreground: no result yet, not run_in_background."""
+        return [step for step in self._open_tools.values() if not step["background"]]
+
+    def send_now_plan(self) -> tuple[str, Any]:
+        """What Send now does mid-turn (D233): ("after_answers", None), ("interrupt", None), ("stop_command", the
+        shell steps) or ("next_slot", "tool" | "generating")."""
+        if self._answer_goes_first():
+            return "after_answers", None
+        if not self.agents_running():
+            return "interrupt", None
+        steps = self.foreground_steps()
+        shells = [step for step in steps if step["name"] in SHELL_TOOLS and step["command"]]
+        if shells:
+            return "stop_command", shells
+        return "next_slot", "tool" if steps else "generating"
+
+    def _answer_goes_first(self) -> bool:
+        """A question card answered and its result not yet back, or a permission answered moments ago: what was
+        answered must reach Claude Code before anything is stopped (D233)."""
+        if not self._answered_at:
+            return False
+        return self._answered_question or time.time() - self._answered_at < ANSWER_SETTLE_S
+
+    async def _stop_foreground(self, steps: list[dict[str, Any]]) -> str:
+        """End the foreground shell steps' processes - only theirs (stopstep.py) - so the slot opens now."""
+        from . import stopstep
+
+        cli = int(getattr(self._process, "pid", 0) or 0)
+        background = list(self._background_commands.values())
+        stopped, reasons = [], []
+        for step in steps:
+            pid, why = await asyncio.to_thread(stopstep.stop, cli, step["command"], background)
+            (stopped if pid else reasons).append(step["id"] if pid else why)
+        if stopped:
+            self._emit({"type": "send_now_stopping", "tools": stopped})
+            return "stopping_command"
+        self._emit({"type": "send_now_waits", "why": "not_found", "detail": "; ".join(reasons)})
+        return "command_not_found"
 
     def take_waiting(self) -> list[str]:
         """The waiting prompts, handed to Claude between tool calls (feature 119): every one not
         held, in order, off the queue and shown as sent. Asked for by the PostToolUse hook, so only
         mid-turn; a held prompt and everything after it stay, as they would at the turn's end.
-        So does one with pictures (D216): the hook hands Claude text, so it waits for the turn's end."""
+        One with pictures goes too when they were saved (D233): Claude is told where each one is, a line per
+        picture, and reads it; one whose pictures could not be saved still waits for the turn's end."""
         if not self.busy or not self.running:
             return []
-        taken: list[str] = []
-        while self.queued and not self.queued[0].get("held") and not self.queued[0].get("images"):
-            taken.append(self.queued.pop(0)["text"])
+        self._answered_at = 0.0                 # a slot: whatever was answered has reached Claude (D233)
+        taken: list[dict[str, Any]] = []
+        while self.queued and not self.queued[0].get("held") and self._pictures_ready(self.queued[0]):
+            taken.append(self.queued.pop(0))
         if taken:
+            self._together = False
+            self._recently_sent.extend(item["id"] for item in taken)
             self._queue_changed()
-            for text in taken:
-                self._emit({"type": "prompt", "text": text, "between_tools": True})
-        return taken
+            for item in taken:
+                self._emit({"type": "prompt", "text": item["text"], "between_tools": True,
+                            **({"images": names(item["images"])} if item.get("images") else {})})
+        return [self._handed_over(item) for item in taken]
 
     def _flush_soon(self) -> None:
         """A turn ended: send the next waiting prompt, unless it is held or something else is."""
@@ -1544,15 +1741,32 @@ class Session(_FindsClaude):
     async def _send_next(self) -> None:
         if self.busy or not self.queued or self.queued[0].get("held") or not self.running:
             return
-        item = self.queued.pop(0)
+        items = [self.queued.pop(0)]
+        if self._together:
+            # D233: after a Send now's interrupt, the prompts waiting behind the chosen one go with it, in order -
+            # a slash command still alone, and no more pictures than one prompt takes.
+            self._together = False
+            while self.queued and self._joins(items, self.queued[0]):
+                items.append(self.queued.pop(0))
         self._queue_changed()
+        text = "\n\n".join(item["text"] for item in items if item["text"].strip())
+        images = [picture for item in items for picture in item.get("images") or []]
+        self._recently_sent.extend(item["id"] for item in items)
         try:
-            await self._send(item["text"], item.get("images"))
+            await self._send(text, images or None)
         except (SessionError, OSError) as exc:
             # Put back rather than lost: it is still on screen, and Send now can try again.
-            self.queued.insert(0, {**item, "held": True})
+            self.queued[0:0] = [{**item, "held": True} for item in items]
             self.last_error = f"a waiting prompt could not be sent: {exc}"
             self._queue_changed()
+
+    @staticmethod
+    def _joins(items: list[dict[str, Any]], nxt: dict[str, Any]) -> bool:
+        """Whether `nxt` can go in one message with `items` (D233)."""
+        if nxt.get("held") or any(item["text"].lstrip().startswith("/") for item in [*items, nxt]):
+            return False
+        pictures = [p for item in [*items, nxt] for p in item.get("images") or []]
+        return len(pictures) <= MAX_COUNT and sum(len(p.get("data", "")) for p in pictures) <= MAX_TOTAL
 
     async def _send(self, text: str, images: list[dict[str, str]] | None = None) -> None:
         if not self.running or self._process is None or self._process.stdin is None:
@@ -1942,6 +2156,12 @@ class Session(_FindsClaude):
         if event.get("type") == "system" and event.get("subtype") == "background_tasks_changed" \
                 and isinstance(event.get("tasks"), list) and not self._replaying:
             self.background = len(event["tasks"])
+            # Which kind each is (D233): a shell survives Claude Code's interrupt, an agent does not.
+            self.background_types = [str(task.get("task_type") or "") if isinstance(task, dict) else ""
+                                     for task in event["tasks"]]
+            if not event["tasks"]:
+                self._background_commands.clear()
+        self._note_steps(event)
         # The CLI's `result` closes a turn; an exit ends one without finishing it.
         if event.get("type") == "result":
             self.turns += 1
@@ -1968,6 +2188,60 @@ class Session(_FindsClaude):
                 queue.put_nowait(event)
             except asyncio.QueueFull:
                 pass
+
+    # ---- D233: the steps Send now decides on ---------------------------------------------------
+
+    SHELL_COMMANDS_KEPT = 200
+
+    def _forget_steps(self) -> None:
+        self.background_types = []
+        self._open_tools.clear()
+        self._shell_commands.clear()
+        self._background_commands.clear()
+        self._answered_at = 0.0
+        self._together = False
+
+    def _note_steps(self, event: dict[str, Any]) -> None:
+        """The main agent's tool calls from the stream: open from its tool_use until its tool_result, with the command
+        text of a shell call. A subagent's (parent_tool_use_id set) are not the foreground step and are left out; a
+        shell started in the background, or moved there (task_started names its call), is remembered as background."""
+        kind = event.get("type")
+        if kind == "result":
+            self._open_tools.clear()
+            self._answered_at = 0.0
+            return
+        if kind in ("exited", "stopped"):
+            self._forget_steps()
+            return
+        if kind == "system" and event.get("subtype") == "task_started":
+            call = str(event.get("tool_use_id") or "")
+            if call in self._shell_commands:
+                self._background_commands[call] = self._shell_commands[call]
+            return
+        if kind not in ("assistant", "user") or event.get("parent_tool_use_id"):
+            return
+        content = (event.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            return
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if kind == "assistant" and block.get("type") == "tool_use":
+                call, name = str(block.get("id") or ""), str(block.get("name") or "")
+                given = block.get("input") if isinstance(block.get("input"), dict) else {}
+                command = str(given.get("command") or "") if name in SHELL_TOOLS else ""
+                background = bool(given.get("run_in_background"))
+                self._open_tools[call] = {"id": call, "name": name, "command": command, "background": background}
+                if command:
+                    self._shell_commands[call] = command
+                    while len(self._shell_commands) > self.SHELL_COMMANDS_KEPT:
+                        self._shell_commands.pop(next(iter(self._shell_commands)))
+                    if background:
+                        self._background_commands[call] = command
+            elif kind == "user" and block.get("type") == "tool_result":
+                step = self._open_tools.pop(str(block.get("tool_use_id") or ""), None)
+                if step is not None and step["name"] == "AskUserQuestion":
+                    self._answered_at = 0.0     # its answers are in the conversation now
 
     # ---- watching ---------------------------------------------------------------------
 
@@ -2022,6 +2296,9 @@ class Session(_FindsClaude):
             waiting.answer.set_result({"allow": bool(allow), "answers": dict(answers)})
         else:
             waiting.answer.set_result(bool(allow))
+        # D233: what was answered goes before any waiting prompt - Send now holds off until it has reached Claude.
+        self._answered_at = time.time()
+        self._answered_question = answers is not None
         answered: dict[str, Any] = {"type": "permission_answered", "id": request_id, "allow": bool(allow)}
         if answers is not None:
             # Kept so the transcript can show what was chosen, not only that it was (D80).

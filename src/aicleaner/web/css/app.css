@@ -767,7 +767,8 @@ form.rename { margin: 0; }
    following (43). Below it rather than over it, so neither covers the last line of the reply. */
 .session-stream { display: flex; flex-direction: column; min-width: 0; }
 .session-underlog { display: flex; align-items: center; gap: 8px; min-height: 1.6rem; margin-top: .25rem; }
-#session-doing { font-style: italic; }
+/* What runs now (feature 173; moved here from beside Send in 1.1.2): wraps rather than pushing the buttons away. */
+#session-doing { font-style: italic; min-width: 0; overflow-wrap: anywhere; }
 /* What was started in the background (49). Under the transcript rather than beside it: it is a
    short list that grows by a row at a time, and the transcript is the pane that wants width.
    Hidden entirely when empty - it should not take space to say nothing. */
@@ -1433,12 +1434,7 @@ dialog.picker-dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .model-state[data-level="green"] .model-state-text { color: var(--ok-text); }
 .model-state[data-level="amber"] .model-state-text { color: var(--warn-text); }
 .model-state[data-level="red"] .model-state-text { color: var(--bad-text); }
-/* What runs now (feature 173, Brad 2026-11-09): beside the request state, wrapping under it on a phone. */
 .model-state { flex-wrap: wrap; }
-.model-state-work { display: inline-flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; font-weight: 500; color: var(--text); }
-.model-state-work[hidden], .model-state-doing[hidden], .model-state-note[hidden] { display: none; }
-.model-state-doing { overflow-wrap: anywhere; }
-.model-state-note { color: var(--muted); font-style: italic; }
 
 /* A question from Claude: one option per line, its description under it, Other a real choice with a
    text area the width of the card (2026-09-30). */

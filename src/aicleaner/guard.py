@@ -230,8 +230,13 @@ def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None, api
             if (api_key and not remote and path.startswith("/api/") and path not in KEYLESS
                     and not matches(request.headers.get(HEADER, ""), api_key)):
                 log.warning("refused %s %s from this machine: no or wrong API key", request.method, path)
-                return web.json_response({"error": "AI Cleaner's API key is missing or wrong: open AI Cleaner's own "
-                                                   "page, or use its scripts, to change things"}, status=401)
+                # Says how to fix it (a peer session's suggestion, 2026-11-09): an outside script on this machine
+                # had only "missing or wrong" to go on. The location, never the key.
+                return web.json_response({"error": "AI Cleaner's API key is missing or wrong: a script on this "
+                                                   "machine sends it in the X-AI-Cleaner-Key header, read from "
+                                                   "%USERPROFILE%\\.aicleaner\\secrets\\api-key.dpapi (DPAPI, this "
+                                                   "Windows user) or the AICLEANER_API_KEY environment variable; "
+                                                   "or change things on AI Cleaner's own page"}, status=401)
         response = await handler(request)
         if ui:
             response.headers["Content-Security-Policy"] = request.get(FILE_CSP) or csp_for(request)
