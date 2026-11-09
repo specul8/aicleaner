@@ -106,7 +106,8 @@ function suggestBar(tab, hooks, box) {
 // Feature 139: Monaco, the editor VS Code is built on - its colouring, completion, keys and line numbers.
 function monacoFrame(tab, hooks, text) {
   const host = h('div', { class: 'file-editor', 'aria-label': `Edit ${tab.name}` });
-  const box = new MonacoBox(host, text, tab.name);
+  // Plain text for a file of an unknown type opened as text (feature 172): no language from its name.
+  const box = new MonacoBox(host, text, tab.name, tab.view === 'plain' ? { language: 'plaintext' } : {});
   wire(tab, hooks, box);
   box.bindSave(() => saveNow(tab, hooks));
   tab.editor = box;
@@ -127,7 +128,8 @@ export function editorFor(tab, hooks) {
   box.addEventListener('scroll', () => { gutter.scrollTop = box.scrollTop; });
   // A language the editor knows (feature 80): colouring behind the box, suggestions, editing keys.
   // Any other file stays the plain textarea it always was.
-  const language = languageOf(tab.name);
+  // A file of an unknown type opened as text (feature 172) gets no language, whatever its name suggests.
+  const language = tab.view === 'plain' ? null : languageOf(tab.name);
   let body = box;
   if (language) {
     const { stack } = layerFor(box, language);

@@ -2,7 +2,7 @@
 
 **Use AI on client work without sending your clients' names to the AI service.**
 
-A topic is anything whose names you keep out of AI services: a client, a product, a person.
+A topic is anything whose uniquely identifiable information (terms) you want to keep out of AI services: a client, a product or a person could all be topics you might want to protect.
 
 AI Cleaner runs on your own PC, between your AI tools (Claude Code, Claude Desktop, GitHub Copilot) and the AI
 service. Before anything leaves, it swaps each topic's names, people, domains, tenants, addresses and resource names

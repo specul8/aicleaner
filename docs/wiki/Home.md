@@ -4,7 +4,7 @@ AI Cleaner lets you work with AI coding assistants on client work without sendin
 to the AI service. It sits on your machine between the assistant and the service, replaces every
 term of a topic with a token on the way out, and puts the real terms back on the way in.
 
-A topic is anything whose names you keep out of AI services: a client, a product, a person.
+A topic is anything whose uniquely identifiable information (terms) you want to keep out of AI services: a client, a product or a person could all be topics you might want to protect.
 
 This wiki describes what AI Cleaner does today (v0.9.165). The registers in the repository root
 (`DEFECTS.md`, `FUTURE-FEATURES.md`, `DECISIONS.md`) hold the history and the reasoning.

@@ -10,7 +10,7 @@ import { deviceName } from '../device.js';
 import { busyButton, h, iconButton, setChildren } from '../dom.js';
 import { folderPicker } from '../picker.js';
 import { pane } from '../panes.js';
-import { downloadLink, fileTabs } from '../filetabs.js';
+import { downloadLink, fileTabs, viewAsTextItem } from '../filetabs.js';
 import { caretRect, onFirstRow, onLastRow } from '../caretrow.js';
 import { confirmLeave, forget, rebase, track } from '../unsaved.js';
 import { fillShare, shareSlot } from '../sharecard.js';
@@ -851,6 +851,90 @@ function backgroundTasks(events) {
   return [...kept, ...listed];
 }
 
+// Feature 173 (Brad, 2026-11-09: "it would be amazing if it actually showed a short description of what it's doing ...
+// That way the user will not think the AI Service or session is 'stuck'"). What runs now, from the completed
+// `assistant` events - which carry each call's input, rehydrated as the background panel's are - not from the stream's
+// fragments, whose input is empty at content_block_start and never restored: the calls of the open turn that no result
+// names yet, plus the background work backgroundTasks() counts until its completion notice.
+const WORK_LABEL_MAX = 80;
+
+function workLabel(tool) {
+  const input = tool.input || {};
+  const first = (value) => String(value || '').split(/\r?\n/).find((l) => l.trim()) || '';
+  const file = input.file_path || input.notebook_path || input.path || '';
+  // A Read, Edit or Write by its file's name: the folder is long and says little on a phone.
+  const said = String(input.description || '').trim() || (file ? String(file).split(/[\\/]/).filter(Boolean).pop() || file : '')
+    || input.pattern || input.url || first(input.command) || first(input.prompt) || '';
+  const text = String(said).trim();
+  return text.length > WORK_LABEL_MAX ? `${text.slice(0, WORK_LABEL_MAX)}...` : text;
+}
+
+const isAgent = (name) => AGENT_TOOLS.has(name) || /agent/i.test(String(name || ''));
+
+// Whether a turn is open: something was said or done since the last turn ended.
+function turnOpen(events, running) {
+  if (!running) return false;
+  let lastEnd = -1;
+  let lastWork = -1;
+  (events || []).forEach((event, at) => {
+    if (TURN_ENDS.has(event.type)) lastEnd = at;
+    else if (event.type === 'prompt' || event.type === 'assistant' || event.type === 'user') lastWork = at;
+  });
+  return lastWork > lastEnd;
+}
+
+// [{ id, name, label, at, background }], oldest first.
+function runningWork(events, running) {
+  if (!running) return [];
+  const states = toolStates(events, running);
+  const items = [];
+  for (const event of events || []) {
+    if (event.type !== 'assistant') continue;
+    for (const block of ((event.message || {}).content || [])) {
+      if (block.type !== 'tool_use' || !block.id || states.get(block.id) !== 'running') continue;
+      const input = block.input || {};
+      if (input.run_in_background === true || BACKGROUND_TOOLS.has(block.name)) continue;   // counted below
+      items.push({ id: block.id, name: block.name || 'tool', label: workLabel(block), at: Number(event.at) || 0, background: false });
+    }
+  }
+  const labelled = new Map();
+  for (const event of events || []) {
+    if (event.type !== 'assistant') continue;
+    for (const block of ((event.message || {}).content || [])) if (block.type === 'tool_use' && block.id) labelled.set(block.id, block);
+  }
+  for (const task of backgroundTasks(events)) {
+    const block = labelled.get(task.id);
+    items.push({ id: task.id, name: task.name, label: block ? workLabel(block) : task.label, at: task.at, background: true });
+  }
+  return items.sort((a, b) => (a.at || 0) - (b.at || 0));
+}
+
+function elapsedText(at) {
+  if (!at) return '';
+  const seconds = Math.max(0, Math.round(Date.now() / 1000 - at));
+  if (seconds < 60) return `${seconds}s`;
+  const mins = Math.floor(seconds / 60);
+  return mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)} h ${mins % 60} min`;
+}
+
+// "Scan the share folders for duplicates - 2 min; 3 agents working": up to two calls by name, the agents counted
+// once there are two or more; the title lists every one.
+function workSummary(items) {
+  const one = (item) => {
+    const since = elapsedText(item.at);
+    const label = item.label || item.name;
+    return since ? `${label} - ${since}` : label;
+  };
+  const agents = items.filter((item) => isAgent(item.name));
+  const others = items.filter((item) => !isAgent(item.name)).reverse();      // the newest first
+  const parts = others.slice(0, 2).map(one);
+  if (others.length > 2) parts.push(`${others.length - 2} more`);
+  if (agents.length === 1) parts.push(one(agents[0]));
+  else if (agents.length > 1) parts.push(`${agents.length} agents working`);
+  const all = items.map((item) => `${item.name}${item.background ? ' (background)' : ''}: ${one(item)}`).join('\n');
+  return { text: parts.join('; '), all };
+}
+
 // ---- what the page already holds (D140) --------------------------------------------------------
 
 // As many events as the server keeps for a session: a merged list is trimmed to the same.
@@ -1026,7 +1110,10 @@ function treeMenu(name, full, file, about = null) {
       : 'Read the text in this file on this machine and put it in the prompt to check',
     dataset: { root: file.root, path: file.path, name } },
   h('span', { 'aria-hidden': 'true' }, attaching ? '+' : 'T'), attaching ? (both ? ' Attach + text' : ' Attach') : ' Read text') : null;
-  if (file.view === 'download') return placed(h('div', { class: 'tree-menu', role: 'menu' }, prompt, read, download));
+  // Feature 172: a type nothing here knows gets "View as text", shown once the server finds its start is text.
+  if (file.view === 'download') {
+    return placed(h('div', { class: 'tree-menu', role: 'menu' }, prompt, read, viewAsTextItem(view.name, file.root, file.path, name), download));
+  }
   const open = h('button', { type: 'button', class: 'tree-view', role: 'menuitem', 'aria-label': `Open ${name} in a tab`,
     title: 'Open this file in a tab', dataset: { root: file.root, path: file.path, name, view: file.view } },
   h('span', { 'aria-hidden': 'true' }, '\ud83d\udc41'), ' View');
@@ -1289,7 +1376,9 @@ async function renderTree(panel, name, roots, current, share) {
     h('div', { class: 'form-row tree-head' }, viewSwitch(panel, name), again),
     // Listings are remembered until this says otherwise, so a file written while the session runs
     // is not noticed on its own (D33). Refresh is how you ask.
-    h('p', { class: 'hint' }, 'Click (or right-click) a file or folder to view / download / put the path in the prompt. Shift+click selects a range in a folder; Ctrl+click adds or removes one.'),
+    h('p', { class: 'hint' }, 'Click (or right-click) a file or folder to view / download / put the path in the prompt. Shift+click selects a range in a folder; Ctrl+click adds or removes one.'
+      // Feature 169: said where it works, so a drag that does nothing remotely is not a surprise.
+      + (isSealed() ? '' : ' Drag one out of the page (Edge, Chrome) to save it on this device.')),
   ];
   const sections = [];
   // One entry per folder (DECISIONS 64): the share was also listed again when it was one of the
@@ -2523,8 +2612,15 @@ function showModelRequest(request) {
   if (!box) return;
   const text = box.querySelector('.model-state-text');
   const stop = box.querySelector('.model-state-stop');
-  if (!request) { box.hidden = true; return; }
+  // The line also says what runs now (feature 173): shown while either has something to say.
+  if (!request) {
+    text.hidden = true;
+    stop.hidden = true;
+    syncModelBox(box);
+    return;
+  }
   const waited = request.waiting_s || 0;
+  text.hidden = false;
   box.hidden = false;
   if (waited < MODEL_QUIET_S) {
     box.dataset.level = 'green';
@@ -2536,6 +2632,62 @@ function showModelRequest(request) {
       : `Waiting on the AI service for ${minutes(waited)}`;
   }
   stop.hidden = waited < MODEL_STUCK_S;
+}
+
+function syncModelBox(box) {
+  const work = box.querySelector('.model-state-work');
+  box.hidden = box.querySelector('.model-state-text').hidden && (!work || work.hidden);
+}
+
+// Feature 173: what the session is doing now, on the model-state line, and - while a turn is open - that a message
+// sent now is read when the current step ends (feature 119 hands waiting messages over between tool calls). Painted on
+// each event and poll, and every second by the page's tick so the times move.
+function showWork(events, running) {
+  const box = document.getElementById('session-model');
+  const work = box && box.querySelector('.model-state-work');
+  if (!work) return;
+  const items = runningWork(events, running);
+  const open = turnOpen(events, running);
+  const doing = work.querySelector('.model-state-doing');
+  const note = work.querySelector('.model-state-note');
+  if (items.length) {
+    const { text, all } = workSummary(items);
+    doing.replaceChildren(...withRestoredNames(text));
+    doing.title = all;
+    doing.hidden = false;
+  } else {
+    doing.replaceChildren();
+    doing.title = '';
+    doing.hidden = true;
+  }
+  note.hidden = !open;
+  work.hidden = doing.hidden && note.hidden;
+  work.dataset.count = String(items.length);
+  syncModelBox(box);
+}
+
+// Feature 173: a streamed event that ends a tool call or a turn, kept on the page as the server keeps it (slim, D111),
+// so the line clears when the result arrives rather than at the next poll. Null for anything else.
+const WORK_SYSTEM = new Set(['task_started', 'task_notification', 'task_updated', 'background_tasks_changed']);
+
+function workEvent(event) {
+  if (event.type === 'result') return event;
+  if (event.type === 'system') return WORK_SYSTEM.has(event.subtype) ? event : null;
+  if (event.type !== 'user') return null;
+  const message = event.message && typeof event.message === 'object' ? event.message : {};
+  const blocks = [];
+  for (const block of message.content || []) {
+    if (!block || typeof block !== 'object') continue;
+    if (block.type === 'tool_result') {
+      const content = typeof block.content === 'string' && /toolu_/.test(block.content) ? block.content : '';
+      blocks.push({ type: 'tool_result', tool_use_id: block.tool_use_id || '', content });
+    } else if (block.type === 'text') {
+      blocks.push(block);
+    }
+  }
+  const rest = { ...event, message: { ...message, content: blocks } };
+  delete rest.tool_use_result;          // a second full copy of the result (D111)
+  return rest;
 }
 
 // Feature 65. Three states, because "connected" and "not connected" cannot tell a reader the
@@ -2869,6 +3021,7 @@ export async function render(main, context = {}) {
     const drawing = begin('paint.transcript', { events: (session.events || []).length });
     paintLog(log, session.events, view.name);
     markTools(log, session.events, Boolean(session.running));
+    showWork(session.events, Boolean(session.running));        // feature 173
     drawing.end();
     paintQueue(session.queued);
     // Through the tunnel there is no stream to say "thinking..." as it happens: the poll's state
@@ -3133,6 +3286,20 @@ export async function render(main, context = {}) {
       if (event.type !== 'permission_answered') return;
     }
     const compacted = event.type === 'system' && event.subtype === 'compact_boundary';   // drawn too (E5.1)
+    // Feature 173: a tool result, a completion notice or a turn's end is kept as the server keeps it, so the line
+    // that says what runs now clears when it arrives - and the dots and the background panel follow at once.
+    const ending = !DRAWN.has(event.type) && !compacted ? workEvent(event) : null;
+    if (ending && view.name && view.state.selected === view.name) {
+      const held = view.state.events || [];
+      const lastHeld = held.length ? held[held.length - 1].seq : 0;
+      if (event.seq === undefined || lastHeld === undefined || event.seq > lastHeld) {
+        view.state.events = [...held, ending];
+        markTools(log, view.state.events, Boolean(current().running));
+        paintBackground(background, view.state.events, () => box);
+        showWork(view.state.events, Boolean(current().running));
+      }
+      return;
+    }
     if (!DRAWN.has(event.type) && !compacted) return;    // a streaming fragment: nothing drawn depends on it
     if (!view.name || view.state.selected !== view.name) return;
     const events = view.state.events || [];
@@ -3145,6 +3312,7 @@ export async function render(main, context = {}) {
     paintLog(log, view.state.events, view.name);
     markTools(log, view.state.events, Boolean(current().running));
     paintBackground(background, view.state.events, () => box);
+    showWork(view.state.events, Boolean(current().running));     // feature 173
   };
 
   // A profile with no history, or a machine with no transcripts, is an empty list and not an
@@ -3757,7 +3925,11 @@ export async function render(main, context = {}) {
     // The model request itself (DECISIONS 47): "Connected" only ever meant the page could reach
     // AI Cleaner, and stayed green through an 82-minute stall.
     h('div', { id: 'session-model', class: 'model-state', hidden: true },
-      h('span', { class: 'model-state-text' }),
+      h('span', { class: 'model-state-text', hidden: true }),
+      // What runs now, and when a message sent now is read (feature 173, Brad 2026-11-09).
+      h('span', { id: 'session-work', class: 'model-state-work', hidden: true },
+        h('span', { class: 'model-state-doing', hidden: true }),
+        h('span', { class: 'model-state-note', hidden: true }, 'A message sent now is read when the current step ends.')),
       h('button', { type: 'button', class: 'model-state-stop', hidden: true }, 'Interrupt')));
   const filesBar = h('div', { id: 'files-resize', class: 'drag-bar x', role: 'separator',
     'aria-orientation': 'vertical', title: 'Drag to change the width of the files' }, dragGrip());
@@ -4224,6 +4396,13 @@ export async function render(main, context = {}) {
     view.pollTicks += 1;
     if (view.pollTicks % 6 === 0 && view.name && !current().running) loadPast({ quiet: true }).catch(() => {});
   }, isSealed() ? 2000 : 5000);         // sealed: polling is the stream (feature 21)
+  // The times on the model-state line move once a second (feature 173); nothing is fetched for it.
+  if (view.workTick) clearInterval(view.workTick);
+  view.workTick = setInterval(() => {
+    if (document.hidden || !view.name) return;
+    const session = current();
+    showWork(session.events, Boolean(session.running));
+  }, 1000);
 
   list.addEventListener('change', async (event) => {
     if (!event.target.closest('#session-pick')) return;
@@ -4518,6 +4697,7 @@ export async function render(main, context = {}) {
     conversation: (target) => target.closest && target.closest('#session-log, #file-tabs, #file-pane'),
     prompt: (target) => target.closest && target.closest('#prompt-pane textarea'),
     open: (items) => viewMany(items),
+    session: () => view.name,          // feature 169: dragged out of the page, saved on this device
   });
   // A few files one by one; more, or any folder, as one zip that keeps each file under its folders.
   const downloadMany = async (items) => {
@@ -4671,6 +4851,8 @@ export function leave() {
   view.stream = null;
   if (view.poll) clearInterval(view.poll);
   view.poll = null;
+  if (view.workTick) clearInterval(view.workTick);
+  view.workTick = null;
   if (view.presets) view.presets.stop();
   view.presets = null;
   if (view.offConnection) view.offConnection();

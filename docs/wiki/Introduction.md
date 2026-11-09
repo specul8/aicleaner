@@ -23,7 +23,7 @@ Desktop) is pointed at it instead of at the AI service. On every request it:
 On the way back it does the reverse: tokens in the reply become the real terms again, so what you
 read, and what the assistant writes to disk or runs, uses the real terms.
 
-A topic is anything whose names you keep out of AI services: a client, a product, a person.
+A topic is anything whose uniquely identifiable information (terms) you want to keep out of AI services: a client, a product or a person could all be topics you might want to protect.
 
 ```
  your files, terminal, repos          AI Cleaner (your machine)             AI service

@@ -162,7 +162,7 @@ function intro(wiz, { go, paint }) {
   }).catch(() => {});
   return [
     h('h2', {}, 'Add a topic'),
-    h('p', {}, 'A topic is anything whose names you keep out of AI services: a client, a product, a person. Over the next few pages you tell AI Cleaner the names, domains and other '
+    h('p', {}, 'A topic is anything whose uniquely identifiable information (terms) you want to keep out of AI services: a client, a product or a person could all be topics you might want to protect. Over the next few pages you tell AI Cleaner the names, domains and other '
       + 'identifiers that would show who or what it is; from then on they are replaced with tokens before anything '
       + 'reaches the AI service. What you type is kept as a draft as you go, and nothing becomes a topic until you '
       + 'Save on the last page.'),

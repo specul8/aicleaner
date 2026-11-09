@@ -61,7 +61,7 @@ const BUILTIN_WORDS = {
   highlight: ['colour', 'color', 'terminal', 'green text', 'rehydrated'],
   notifications: ['alerts', 'toast', 'footer', 'popups', 'messages'],
   kinds: ['detection', 'auto-add', 'new names', 'identifiers', 'placeholders', 'quiet'],
-  'near-miss': ['typos', 'near misses', 'near-misses', 'misspellings', 'fuzzy', 'similar names', 'ocr errors'],
+  'near-miss': ['typos', 'misreadings', 'misread terms', 'misspellings', 'fuzzy', 'similar names', 'ocr errors'],
   'public-list': ['shared identifiers', 'global list', 'common names', 'public names'],
   tools: ['tool calls', 'MCP', 'tool arguments', 'tokens in tools'],
   images: ['pictures', 'screenshots', 'vision', 'photos', 'attachments', 'redact images',
@@ -710,7 +710,7 @@ function sessionPicturesField(s, pictures) {
 function nearMissCard(s) {
   const on = checkbox('near_miss', 'Correct misreadings in text read from images and documents',
     s['detect.near_miss']);
-  return card('near-miss', 'Misreadings',
+  return card('near-miss', 'Near-misses',
     'An OCR engine turns rn into m and l into I, and a misread real would walk straight past the filter. With this on, a word one letter away from a term is corrected back to it - but only in text read from an image, a scan or a document, which is the only place a misreading is expected. Typed text is never touched: there, almost every match would be an ordinary long word being replaced by a token.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'detect.near_miss': on.querySelector('input').checked }));

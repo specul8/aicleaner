@@ -37,7 +37,7 @@ export function askForNewClient(onCreated) {
   const form = h('form', { method: 'dialog' },
     h('h2', {}, 'Add a new topic'),
     h('p', { class: 'hint' },
-      'A topic is anything whose names you keep out of AI services: a client, a product, a person. '
+      'A topic is anything whose uniquely identifiable information (terms) you want to keep out of AI services: a client, a product or a person could all be topics you might want to protect. '
       + 'Its names and identifiers are replaced in every session, not '
       + 'only the ones you label as theirs. Add its other names, domains and identifiers on its page next.'),
     ...FIELDS.map(field),

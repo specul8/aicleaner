@@ -120,7 +120,8 @@ _NOT_UI_ACTIONS = ("/api/tokenise", "/api/rehydrate", "/api/session/tree-state",
                    "/api/session/file/stat")
 # Reads that are logged although they change nothing: a project file's content leaving the machine
 # for a browser (DECISIONS 50). Who read or downloaded what is exactly what the log is for.
-_LOGGED_READS = ("/api/session/file", "/api/session/file/raw", "/api/session/file/download")
+_LOGGED_READS = ("/api/session/file", "/api/session/file/raw", "/api/session/file/download",
+                 "/api/session/files/zip")      # a folder dragged out as a zip (feature 169)
 _FILE_WRITE = "/api/session/file/write"
 _READ_IMAGE = "/api/session/read-image"
 _PROMPT = "/api/session/prompt"

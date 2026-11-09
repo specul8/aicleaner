@@ -19,6 +19,9 @@ import { attachPreviewJump } from './previewjump.js';
 import { isSealed, objectUrlThrough } from './sealed.js';
 
 const CHECK_EVERY_MS = 15000;
+// Feature 171: the closed tabs offered again, as the server keeps them (tabstate.py).
+const MAX_CLOSED = 20;
+const CLOSED_FOR_S = 24 * 60 * 60;
 
 function fileQuery(name, tab) {
   return new URLSearchParams({ name, root: tab.root, path: tab.path }).toString();
@@ -33,6 +36,38 @@ export function downloadLink(name, root, path, label = 'Download', attrs = {}) {
   return h('a', { class: 'btn file-download', href, download: '', ...attrs }, label);
 }
 
+// Feature 172 (Brad, 2026-11-09): "For file types that are unrecognised by the application when they are clicked or
+// selected in the files panel ... check the start of the file to see if they only contain text, and offer the option
+// to 'view it' if they do." The Files menu's "View as text" for a download-only file: hidden until the server has
+// looked at the file's first 8 KB as bytes (textsniff.py) and found text. A yes is kept for a short while, so the
+// menu drawn again does not ask again; the server checks once more when the tab reads the file.
+const TEXT_CHECK_MS = 30000;
+const textChecks = new Map();       // `${root}|${path}` -> { at, answer: Promise<boolean> }
+
+function looksLikeText(name, root, path) {
+  const key = `${root}|${path}`;
+  const kept = textChecks.get(key);
+  if (kept && Date.now() - kept.at < TEXT_CHECK_MS) return kept.answer;
+  const answer = getJSON(`/api/session/file/sniff?${new URLSearchParams({ name, root, path })}`)
+    .then((found) => Boolean(found && found.text)).catch(() => false);
+  textChecks.set(key, { at: Date.now(), answer });
+  return answer;
+}
+
+// An empty place in the menu, swapped for the item when the answer is yes - so a menu without it is exactly as before.
+export function viewAsTextItem(name, root, path, fileName) {
+  const slot = h('span', { class: 'tree-view-text-slot', hidden: true });
+  looksLikeText(name, root, path).then((text) => {
+    if (!text || !slot.isConnected) return;
+    slot.replaceWith(h('button', { type: 'button', class: 'tree-view tree-view-text', role: 'menuitem',
+      'aria-label': `Open ${fileName} in a tab as plain text`,
+      title: 'This file\'s type is not one AI Cleaner knows, but its start is plain text: open it in a tab as text',
+      dataset: { root, path, name: fileName, view: 'plain' } },
+    h('span', { 'aria-hidden': 'true' }, 'Aa'), ' View as text'));
+  });
+  return slot;
+}
+
 function bytes(size) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -43,15 +78,16 @@ function when(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString() : '';
 }
 
-// The text with its line numbers, one scroll for both, so they never drift apart.
-function textView(text, name) {
+// The text with its line numbers, one scroll for both, so they never drift apart. `plain`: a file of an
+// unknown type opened as text (feature 172) - never coloured, whatever its name suggests.
+function textView(text, name, plain = false) {
   const lines = text.split(/\r?\n/);
   if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
   const gutter = h('pre', { class: 'file-gutter', 'aria-hidden': 'true' },
     lines.map((_, i) => String(i + 1)).join('\n'));
   const body = h('pre', { class: 'file-text' }, lines.join('\n'));
   // Coloured like the editor (feature 80, decided 2026-10-07), for the languages it knows.
-  const language = languageOf(name);
+  const language = plain ? null : languageOf(name);
   if (colourable(language, text)) colourInto(body, language, lines.join('\n'));
   return h('div', { class: 'file-scroll', tabindex: '0' }, gutter, body);
 }
@@ -148,7 +184,9 @@ export function fileTabs(ctx) {
     if (!name) return;
     const s = bySession.get(name) || state();
     postJSON('/api/session/tabs-state', { name, active: s.active || '',
-      tabs: s.tabs.map((t) => ({ root: t.root, path: t.path, name: t.name, view: t.view, mode: t.mode })) })
+      tabs: s.tabs.map((t) => ({ root: t.root, path: t.path, name: t.name, view: t.view, mode: t.mode })),
+      closed: (s.closed || []).map((t) => ({ root: t.root, path: t.path, name: t.name, view: t.view, mode: t.mode,
+        index: t.index, closed_at: t.closed_at })) })
       .catch(() => { /* forgotten on refresh; the tabs themselves are fine */ });
   }
   async function restore(name) {
@@ -164,6 +202,11 @@ export function fileTabs(ctx) {
       }
     }
     if (!s.active && saved.active) s.active = saved.active;
+    // Feature 171: the tabs closed in the last day, as kept on the server, behind any closed on this page since.
+    const closedHere = s.closed || [];
+    const keyOf = (t) => `${t.root}|${t.path}`;
+    s.closed = [...closedHere, ...(saved.closed || []).filter((t) => !closedHere.some((c) => c.key === keyOf(t)))
+      .map((t) => ({ ...t, key: keyOf(t) }))].filter((t) => !s.tabs.some((x) => x.key === t.key));
     if (ctx.name() !== name) return;
     const active = s.tabs.find((t) => t.key === s.active);
     if (active && !active.data) load(active);
@@ -184,7 +227,9 @@ export function fileTabs(ctx) {
     h('button', { type: 'button', class: 'file-tab-close', dataset: { close: tab.key },
       'aria-label': `Close ${tab.name}` }, '×')));
     ctx.strip.replaceChildren(conversation, ...tabs);
-    ctx.strip.hidden = !s.tabs.length;
+    // The Conversation tab is always there (Brad, 2026-11-09: "having the 'conversation' tab always visible is a good
+    // design choice"), so the strip - and its "Reopen closed tab" menu (feature 171) - is there with no file open.
+    ctx.strip.hidden = false;
   }
 
   function paintPane() {
@@ -208,6 +253,7 @@ export function fileTabs(ctx) {
     let body;
     if (tab.error) body = h('p', { class: 'error-text' }, tab.error);
     else if (!tab.data) body = h('p', { class: 'muted' }, 'Reading...');
+    else if (d.download_only && d.text_ok) body = viewAsTextOffer(tab);
     else if (d.download_only) body = h('p', { class: 'muted' }, `${tab.name} cannot be shown here. Download it to open it.`);
     else if (d.too_big) body = h('p', { class: 'muted' }, `${tab.name} is ${bytes(d.size)}, too big to show here. Download it to open it.`);
     else if (d.binary) body = h('p', { class: 'muted' }, `${tab.name} is not text. Download it to open it.`);
@@ -242,7 +288,7 @@ export function fileTabs(ctx) {
       });
     } else if (d.editable) body = editorFor(tab, hooks);
     else {
-      body = textView(d.text || '', tab.name);
+      body = textView(d.text || '', tab.name, d.view === 'plain');
       // Say why it cannot be edited (the user, 2026-10-12, read an unexplained read-only view as a bug).
       if (d.editable === false) {
         head.append(h('span', { class: 'chip warn', title: 'Saving it here could change characters it holds. Convert it to UTF-8 to edit it here.' },
@@ -334,7 +380,8 @@ export function fileTabs(ctx) {
     dropEditor(tab);                    // a fresh read starts a fresh editor
     tab.saveState = 'saved';
     try {
-      tab.data = await getJSON(`/api/session/file?${fileQuery(ctx.name(), tab)}`);
+      // A file of an unknown type the person chose to see as text (feature 172): the server checks it again.
+      tab.data = await getJSON(`/api/session/file?${fileQuery(ctx.name(), tab)}${tab.view === 'plain' ? '&as=text' : ''}`);
       tab.modified = tab.data.modified;
       tab.stale = false;
       tab.gone = false;
@@ -349,11 +396,16 @@ export function fileTabs(ctx) {
     const s = state();
     const key = `${root}|${path}`;
     let tab = s.tabs.find((t) => t.key === key);
+    if (tab && view === 'plain' && tab.view !== 'plain') {
+      tab.view = 'plain';                 // "View as text" for a file already open as download-only
+      load(tab);
+    }
     if (!tab) {
       tab = { key, root, path, name, view, modified: 0, stale: false, gone: false, data: null, mode: 'source' };
       s.tabs.push(tab);
       load(tab);
     }
+    s.closed = (s.closed || []).filter((t) => t.key !== key);
     s.active = key;
     paint();
     persist();
@@ -424,10 +476,96 @@ export function fileTabs(ctx) {
         return;
       }
     }
+    const index = s.tabs.findIndex((t) => t.key === key);
     s.tabs = s.tabs.filter((t) => t.key !== key);
+    if (tab) remember(s, tab, index);
     if (s.active === key) s.active = null;
     paint();
     persist();
+  }
+
+  // Feature 171 (Brad, 2026-11-09): "Right-clicking in the empty space beside tabs or on tabs themselves above the
+  // conversation panel should present an option to reopen closed tabs, based on a 24h history of tabs that have been
+  // closed for this active session." File tabs only: the Conversation tab is never closed. Newest first, at most
+  // MAX_CLOSED, each with where it stood; the server keeps the list with the open tabs and stamps the times.
+  function remember(s, tab, index) {
+    const entry = { key: tab.key, root: tab.root, path: tab.path, name: tab.name, view: tab.view, mode: tab.mode,
+      index: Math.max(0, index), closed_at: Date.now() / 1000 };
+    s.closed = [entry, ...(s.closed || []).filter((t) => t.key !== tab.key)].slice(0, MAX_CLOSED);
+  }
+
+  function recentlyClosed(s) {
+    const since = Date.now() / 1000 - CLOSED_FOR_S;
+    return (s.closed || []).filter((t) => !t.closed_at || t.closed_at > since);
+  }
+
+  function reopen(key) {
+    const s = state();
+    const entry = (s.closed || []).find((t) => t.key === key);
+    if (!entry) return;
+    s.closed = s.closed.filter((t) => t.key !== key);
+    let tab = s.tabs.find((t) => t.key === key);
+    if (!tab) {
+      tab = { key, root: entry.root, path: entry.path, name: entry.name, view: entry.view, modified: 0, stale: false,
+        gone: false, data: null, mode: entry.mode || 'source' };
+      s.tabs.splice(Math.min(Number(entry.index) || 0, s.tabs.length), 0, tab);    // back at its place
+      load(tab);
+    }
+    s.active = key;
+    paint();
+    persist();
+    startChecking();
+    shown(ctx.name(), tab);
+  }
+
+  function closeReopenMenu() {
+    for (const menu of document.querySelectorAll('.file-reopen-menu')) menu.remove();
+  }
+
+  function reopenItem(t) {
+    const where = `${t.root}${t.root.includes('\\') ? '\\' : '/'}${t.path}`;
+    const when = t.closed_at ? ` - closed ${new Date(t.closed_at * 1000).toLocaleString()}` : '';
+    const item = h('button', { type: 'button', class: 'file-discuss-item file-reopen-item', role: 'menuitem',
+      dataset: { reopen: t.key }, title: `${where}${when}` }, t.name);
+    item.addEventListener('click', () => { closeReopenMenu(); reopen(t.key); });
+    return item;
+  }
+
+  function showReopenMenu(x, y) {
+    closeReopenMenu();
+    closeDiscussMenu();
+    const items = recentlyClosed(state()).map(reopenItem);
+    const head = h('div', { class: 'file-reopen-head', role: 'presentation' }, 'Reopen closed tab');
+    const none = h('div', { class: 'file-reopen-none', role: 'presentation' }, 'No tabs closed in the last 24 hours');
+    const menu = h('div', { class: 'file-discuss-menu file-reopen-menu', role: 'menu', 'aria-label': 'Reopen closed tab' },
+      head, ...(items.length ? items : [none]));
+    menu.style.left = `${Math.round(x)}px`;
+    menu.style.top = `${Math.round(y)}px`;
+    document.body.append(menu);
+    // Kept inside the window: a strip right-clicked near the right edge would open it half off the page.
+    const box = menu.getBoundingClientRect();
+    if (box.right > window.innerWidth) menu.style.left = `${Math.max(0, Math.round(window.innerWidth - box.width - 4))}px`;
+    if (box.bottom > window.innerHeight) menu.style.top = `${Math.max(0, Math.round(window.innerHeight - box.height - 4))}px`;
+    if (items.length) items[0].focus();
+  }
+
+  ctx.strip.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    showReopenMenu(event.clientX, event.clientY);
+  });
+  document.addEventListener('mousedown', (event) => {
+    if (!event.target.closest('.file-reopen-menu')) closeReopenMenu();
+  });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeReopenMenu(); });
+
+  // Feature 172 (Brad, 2026-11-09): a file of a type nothing here knows, whose start the server found to be text,
+  // offered as text - never opened as it automatically. Plain text: no language, no preview.
+  function viewAsTextOffer(tab) {
+    const button = h('button', { type: 'button', class: 'btn file-view-text',
+      title: 'Its start is plain text: open it here as text (nothing in it is run or rendered)' }, 'View as text');
+    button.addEventListener('click', () => { tab.view = 'plain'; load(tab); persist(); });
+    return h('p', { class: 'muted' }, `${tab.name} is a type AI Cleaner does not know, but it looks like text. `,
+      button, ' Or download it to open it.');
   }
 
   // The 15-second changed-on-disk check: one request for every tab this session has open.

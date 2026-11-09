@@ -1354,7 +1354,23 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
 
         name, root, path = _file_args(request)
         try:
-            answer = await asyncio.to_thread(session_host().read_file, name, root, path)
+            if request.query.get("as") == "text":     # feature 172: an unknown type, as plain text
+                answer = await asyncio.to_thread(session_host().read_file, name, root, path, True)
+            else:
+                answer = await asyncio.to_thread(session_host().read_file, name, root, path)
+        except (SessionError, OSError) as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        return web.json_response(answer)
+
+    async def session_file_sniff(request: web.Request) -> web.Response:
+        """Feature 172 (Brad, 2026-11-09): whether a file of an unknown type is text, for the Files
+        pane's "View as text". The first 8 KB as bytes, through the tree's own allow-list; only a yes
+        or no comes back, never the bytes."""
+        from .session import SessionError
+
+        name, root, path = _file_args(request)
+        try:
+            answer = await asyncio.to_thread(session_host().sniff_file, name, root, path)
         except (SessionError, OSError) as problem:
             return web.json_response({"error": str(problem)}, status=403)
         return web.json_response(answer)
@@ -1476,12 +1492,19 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         from .filezip import ZipTooBig, plan_zip, write_zip
         from .session import SessionError
 
-        body = await request.json()
-        items = [i for i in (body.get("items") or []) if isinstance(i, dict)][:1000]
+        if request.method == "GET":
+            # Feature 169 (Brad, 2026-11-09): one folder by its address, so a folder dragged out of the
+            # Files pane can be a zip the browser fetches itself (DownloadURL). Same allow-list and limits.
+            name, root, path = _file_args(request)
+            items = [{"root": root, "path": path}] if path else []
+        else:
+            body = await request.json()
+            name = str(body.get("name", ""))
+            items = [i for i in (body.get("items") or []) if isinstance(i, dict)][:1000]
         if not items:
             return web.json_response({"error": "nothing chosen to download"}, status=400)
         try:
-            located = await asyncio.to_thread(session_host().locate_items, str(body.get("name", "")), items)
+            located = await asyncio.to_thread(session_host().locate_items, name, items)
             plan = await asyncio.to_thread(plan_zip, located)
         except SessionError as problem:
             return web.json_response({"error": str(problem)}, status=403)
@@ -1666,7 +1689,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     async def session_tabs_state_save(request: web.Request) -> web.Response:
         body = await request.json()
         try:
-            kept = tabs_state().save(str(body.get("name", "")).strip(), body.get("tabs"), body.get("active"))
+            # `closed`: the tabs closed in the last day, for "Reopen closed tab" (feature 171).
+            kept = tabs_state().save(str(body.get("name", "")).strip(), body.get("tabs"), body.get("active"),
+                                     body.get("closed"))
         except ValueError as exc:
             return err(exc)
         return web.json_response({"ok": True, **kept})
@@ -4176,6 +4201,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get("/api/session/file/download", session_file_download)
         app.router.add_post("/api/session/file/stat", session_file_stat)
         app.router.add_post("/api/session/files/zip", session_files_zip)
+        app.router.add_get("/api/session/files/zip", session_files_zip)        # feature 169: a folder dragged out
+        app.router.add_get("/api/session/file/sniff", session_file_sniff)      # feature 172: is it text?
         app.router.add_get("/api/session/tree-state", session_tree_state)
         app.router.add_post("/api/session/workspace-cwd", session_workspace_cwd)
         app.router.add_post("/api/session/workspace-create", session_workspace_create)

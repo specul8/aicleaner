@@ -2,7 +2,7 @@
 
 [Home](Home.md) > Topics
 
-A topic is anything whose names you keep out of AI services: a client, a product, a person.
+A topic is anything whose uniquely identifiable information (terms) you want to keep out of AI services: a client, a product or a person could all be topics you might want to protect.
 
 The Topics page is where the mapping lives: every topic, the real terms that belong to
 it, the token each one becomes, and the strings it ignores. It is about tokenising only - where a

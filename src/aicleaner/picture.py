@@ -27,6 +27,7 @@ from .convert import ConversionError, _run, reader_script, windows_powershell
 from .redact import PATTERNS
 
 PAD = 0.15                 # of the line's height, added round each box
+_WORD = re.compile(r"[A-Za-z0-9]+")   # a word as Near-misses sees one (Mapper.near_miss wants letters and digits)
 TIMEOUT_S = 60
 
 # (image bytes) -> [{"text", "x", "y", "w", "h"}]; and (image bytes, boxes) -> redacted PNG bytes.
@@ -54,6 +55,15 @@ def spans(text: str, mapper: Any, candidates: Callable[[str], list[str]] | None 
     for value in (candidates(text) if candidates else []):
         for match in re.finditer(re.escape(value), text, re.IGNORECASE):
             found.append(match.span())
+    # D232 (Brad, 2026-11-09): a term the local OCR misread ("Fabnkam" for "Fabrikam") is still the term in the
+    # picture's pixels, and the AI service reads pictures better than the local engine does. The Near-misses
+    # matching the text path uses decides here too, whatever the Near-misses setting says: what is hidden in a
+    # picture is not a correction that could go wrong, only more black.
+    near = getattr(mapper, "near_miss", None)
+    if near is not None:
+        for match in _WORD.finditer(text):
+            if near(match.group(0)) is not None:
+                found.append(match.span())
     return sorted(set(found))
 
 

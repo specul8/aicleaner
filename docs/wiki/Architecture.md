@@ -11,7 +11,7 @@ repository).
 ## Purpose
 
 AI Cleaner keeps the real terms of your topics on your machine while you use AI coding assistants.
-A topic is anything whose names you keep out of AI services: a client, a product, a person. AI
+A topic is anything whose uniquely identifiable information (terms) you want to keep out of AI services: a client, a product or a person could all be topics you might want to protect. AI
 Cleaner is a local proxy: AI tools are pointed at it instead of at the AI service, and every request
 passes through it. On the way out it replaces each known name, domain, address and ID with a stable
 token, holds back identifiers it does not know yet, redacts secrets and refuses to send anything

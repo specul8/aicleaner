@@ -1224,22 +1224,46 @@ class Session(_FindsClaude):
             raise SessionError(f"{target} is not a file")
         return target
 
-    def read_file(self, root: str, path: str) -> dict[str, Any]:
+    def sniff_file(self, root: str, path: str) -> dict[str, Any]:
+        """Feature 172 (Brad, 2026-11-09): whether a file of a type nothing here knows is text, so the
+        page can offer "View as text". Only a kind of "other" is looked at - an Office file, an image
+        or a PDF is known and never sniffed - and only its first 8 KB, as bytes (textsniff.py)."""
+        from .textsniff import sniff_file
+
+        target = self.locate_file(root, path)
+        kind, view = file_kind(target.name)
+        if kind != "other" or view != "download":
+            return {"text": False, "known": True}
+        return {"text": sniff_file(target) is not None, "known": False}
+
+    def read_file(self, root: str, path: str, as_text: bool = False) -> dict[str, Any]:
         """What a file tab shows (DECISIONS 50): its text when it is text and small enough, and
-        otherwise why not - never the bytes of something a tab cannot show."""
+        otherwise why not - never the bytes of something a tab cannot show.
+
+        `as_text` (feature 172): a file of a type nothing here knows, read as plain text - view
+        "plain" - when its first 8 KB pass textsniff's test, checked again here whatever the page
+        said. A known type is read as it always was."""
+        from .textsniff import sniff_file
+
         target = self.locate_file(root, path)
         stat = target.stat()
         kind, view = file_kind(target.name)
         answer: dict[str, Any] = {"name": target.name, "path": path, "root": root, "size": stat.st_size,
                                   "modified": stat.st_mtime, "read_at": time.time(), "kind": kind, "view": view}
+        encoding = sniff_file(target) if kind == "other" and view == "download" else None
+        if view == "download" and not (as_text and encoding):
+            return {**answer, "download_only": True, **({"text_ok": bool(encoding)} if kind == "other" else {})}
         if view == "download":
-            return {**answer, "download_only": True}
-        if view != "text":
+            answer["view"] = "plain"            # no language, no preview: the page shows it as it is
+        elif view != "text":
             return answer                       # an image or a PDF: the page asks /file/raw for it
         if stat.st_size > MAX_TAB_TEXT:
             return {**answer, "too_big": True}
         with target.open("rb") as fh:
             data = fh.read(MAX_TAB_TEXT + 1)
+        if encoding == "utf-16":
+            # Shown, never saved: saving writes UTF-8, which would change every byte of the file.
+            return {**answer, "text": data.decode("utf-16", errors="replace"), "editable": False}
         if b"\x00" in data[:8192]:
             return {**answer, "binary": True}
         # Editable only when it reads as UTF-8 exactly (DECISIONS 53): saving text that was decoded
@@ -1257,8 +1281,10 @@ class Session(_FindsClaude):
         target = self.locate_file(root, path)
         if not target.is_file():
             raise SessionError(f"{path} is not an existing file; files are created from the tree, not saved new")
-        current = self.read_file(root, path)
-        if current.get("view") != "text" or not current.get("editable"):
+        # A file of an unknown type shown as plain text (feature 172) saves as a .txt would: only when
+        # it is still text and reads as UTF-8 exactly.
+        current = self.read_file(root, path, as_text=True)
+        if current.get("view") not in ("text", "plain") or not current.get("editable"):
             raise SessionError(f"{path} is not a text file that can be edited here")
         if len(text.encode("utf-8")) > MAX_TAB_TEXT:
             raise SessionError("that is more text than a file tab saves")
@@ -2976,8 +3002,11 @@ class SessionHost(_FindsClaude):
             folders += [p for p in session.projects if all(str(p) != str(f) for f in folders)]
         return Session(claude=self.claude, projects=folders, profile=profile)
 
-    def read_file(self, name: str, root: str, path: str) -> dict[str, Any]:
-        return self._browser(name).read_file(root, path)
+    def read_file(self, name: str, root: str, path: str, as_text: bool = False) -> dict[str, Any]:
+        return self._browser(name).read_file(root, path, as_text=as_text)
+
+    def sniff_file(self, name: str, root: str, path: str) -> dict[str, Any]:
+        return self._browser(name).sniff_file(root, path)
 
     def search(self, name: str, query: str, limit: int = SEARCH_LIMIT, more: bool = False,
                budget_s: float = SEARCH_BUDGET_S) -> dict[str, Any]:

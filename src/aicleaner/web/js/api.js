@@ -200,6 +200,24 @@ function trim(host) {
   while (host.children.length > STACK_MAX) host.firstElementChild.remove();
 }
 
+// The message part of a card (feature 170): `.toast-text` inside `.toast-body`, which CSS holds to two lines. Its whole
+// text is the title, for a pointer; a click on it shows the card in full, for a finger, and a second click folds it.
+function toastBody(toast, text, why = '') {
+  const body = document.createElement('div');
+  body.className = 'toast-body';
+  const words = document.createElement('span');
+  words.className = 'toast-text';
+  words.textContent = text;
+  body.append(words);
+  body.title = why ? `${text}\n${why}` : text;
+  body.addEventListener('click', (event) => {
+    if (event.target.closest('button')) return;
+    toast.classList.toggle('toast-open');
+  });
+  toast.append(body);
+  return body;
+}
+
 // `extra` is the feature-41 shape: { why: string, action: { label, run } }. `why` is a second
 // line explaining the rule; `action` becomes a button that does something about it. A toast
 // carrying an action always lingers, whatever the level - a question that scrolls past
@@ -235,16 +253,15 @@ export function say(text, level = 'info', extra = {}) {
   toast.setAttribute('role', lingers ? 'alert' : 'status');
   toast.setAttribute('aria-live', lingers ? 'assertive' : 'polite');
 
-  const body = document.createElement('span');
-  body.className = 'toast-text';
-  body.textContent = text;
+  // A card (feature 170, Brad 2026-11-09): the message in two lines at most, its action at the right of the second.
+  const body = toastBody(toast, text, why);
   const count = document.createElement('span');
   count.className = 'toast-count';
   count.hidden = true;
-  toast.append(body, count);
+  body.append(count);
 
   if (why) {
-    const reason = document.createElement('span');
+    const reason = document.createElement('div');
     reason.className = 'toast-why';
     reason.textContent = why;
     toast.append(reason);
@@ -265,7 +282,8 @@ export function say(text, level = 'info', extra = {}) {
         sayError(e);
       }
     });
-    toast.append(go);
+    // First in the message, floated: it sits at the right of the second line and the words wrap around it.
+    body.prepend(go);
   }
 
   // Every toast can be closed, whatever its level and whether or not it carries an action (the
@@ -306,21 +324,21 @@ export function stickyToast(id) {
     toast.dataset.level = 'info';
     toast.setAttribute('role', 'status');
     toast.setAttribute('aria-live', 'polite');
-    const body = document.createElement('span');
-    body.className = 'toast-text';
+    toastBody(toast, '');                 // a card like the rest (feature 170)
     const close = document.createElement('button');
     close.type = 'button';
     close.className = 'toast-close';
     close.setAttribute('aria-label', 'Dismiss');
     close.textContent = '×';
     close.addEventListener('click', () => { dismissed = true; toast.remove(); });
-    toast.append(body, close);
+    toast.append(close);
     toastHost().append(toast);
   };
   const show = (text) => {
     if (dismissed) return;
     if (!toast || !toast.isConnected) make();
     toast.querySelector('.toast-text').textContent = text;
+    toast.querySelector('.toast-body').title = text;
   };
   return {
     update: show,
