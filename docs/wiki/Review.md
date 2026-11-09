@@ -3,7 +3,8 @@
 [Home](Home.md) > Review
 
 Review is the inbox for identifiers AI Cleaner saw in outgoing traffic that the mapping does not
-know yet. You decide what each one is: a client's, nobody's, or not worth keeping.
+know yet. Each one is a **suggestion**, and you decide what it is: a topic's, nobody's, or not
+worth keeping.
 
 ## What lands here
 
@@ -12,70 +13,72 @@ tokenising. Anything still identifier-shaped is, by definition, not in the mappi
 
 | Found | What happens to it in the request | In Review |
 |---|---|---|
-| A type set to **Tokenise & Review** (by default email, tenant, SharePoint, domain, DevOps organisation and project, and resource names carrying a client's name) | Held back as a **placeholder** (a stable stand-in of the same shape, on a reserved `.invalid` domain or a documentation IP range) and swapped back in replies | Listed as "held back as `<placeholder>`" |
+| A type set to **Tokenise & Review** (by default email, tenant, SharePoint, domain, DevOps organisation and project, and resource names carrying a topic's name) | Held back behind a temporary **token** (stable, of the same shape, on a reserved `.invalid` domain or a documentation IP range) and swapped back in replies | Listed as "held back as `<token>`" |
 | A low-confidence find, such as a recurring capitalised phrase | Sent as written | Listed as "sent as-is" |
-| A find that should have been held back but no placeholder could be made | Sent as written | Flagged in red: "sent WITHOUT being replaced" |
+| A find that should have been held back but no token could be made | Sent as written | Flagged in red: "sent WITHOUT being replaced" |
 
 Types set to **Auto-tokenise** or **Ignore** never reach Review, and nor does anything on the
 shipped list of identifiers that are the same in every tenant. A value that proves its own owner
-(an address at a client's mapped domain) may be added to that client straight away instead - see
+(an address at a topic's mapped domain) may be added to that topic straight away instead - see
 Settings, [New names found](Settings.md#card-kinds).
 
-You hear about new items through a footer on the model's reply and a Windows toast (both switchable
-in [Notifications](Settings.md#card-notifications)), and through the amber "<n> to Review" status.
+You hear about new suggestions through a footer on the model's reply and a Windows notification
+(both switchable in [Notifications](Settings.md#card-notifications)), and through the amber "<n> to
+Review" status.
 
-## Reading a row
+## Reading a suggestion
 
 | Column | Shows |
 |---|---|
-| Identifier | The value, whether it was held back or sent, and why it looks like a client's ("carries the name of Contoso", or "one letter from ... in the names of ...") |
+| Identifier | The value, whether it was held back or sent, and why it looks like a topic's ("carries the name of Contoso", or "one letter from ... in the names of ...") |
 | Kind | The type and its confidence |
 | Seen | How many times, and from which source |
-| Seen with | The clients whose names were in the same requests, with counts, and the project or session |
-| Map to | The client to map it to, pre-selected when the owner is clear |
+| Seen with | The topics whose terms were in the same requests, with counts, and the project or AI session |
+| Map to | The topic to map it to, pre-selected when the owner is clear |
 
 Columns sort by clicking their heading (natural order: vm2 before vm10). The **Filter** box matches
-every word you type against the value, kind, clients, projects and sessions, and survives a reload.
+every word you type against the value, kind, topics, projects and sessions, and survives a reload.
 
-## Mapping to a client
+## Mapping to a topic
 
-Choose a client (or Global) in **Map to** and press **Map**. The value is added to that client with
-a token derived from its shape, and the next request carries the token wherever the placeholder was.
+Choose a topic (or Global) in **Map to** and press **Map**. The value is added to that topic as a
+term with a token derived from its shape, and the next request carries that token wherever the
+held-back token was.
 
-If another client already holds the value, the refusal suggests it may be the same in every tenant
-and offers **Treat as public**: the value is ignored everywhere and removed from the clients that
+If another topic already holds the value, the refusal suggests it may be the same in every tenant
+and offers **Treat as public**: the value is ignored everywhere and removed from the topics that
 held it.
 
-## A new client from the page
+## A new topic from the page
 
-Choose **+ New client...** in Map to (or in the bulk bar), fill in id, display name and index, and
-**Create and map** creates the client and maps the selected values to it. The **+ New client**
+Choose **+ New topic...** in Map to (or in the bulk bar), fill in id, display name and index, and
+**Create and map** creates the topic and maps the selected values to it. The **+ New topic**
 button above the table opens the same dialog without mapping anything, and **Add mapping** beside
-it adds one real value and token to any client directly.
+it adds one real term and token to any topic directly.
 
 ## Ignoring
 
 **Ignore** offers two scopes:
 
-- **For <client>** - never proposed again for that client; other clients still see it.
+- **For <topic>** - never suggested again for that topic; other topics still see it.
 - **Everywhere** - added to Global's ignore list.
 
-The bin icon is different: **Remove from Review** takes the row off the list without ignoring it, so
-it comes back if it is seen again.
+The bin icon is different: **Remove from Review** takes the suggestion off the list without ignoring
+it, so it comes back if it is seen again.
 
 ## Bulk actions and undo
 
-Tick rows (Select all ticks only the rows the filter shows) and use the bar:
+Tick suggestions (Select all ticks only the ones the filter shows) and use the bar:
 
 | Group | Buttons |
 |---|---|
-| Who they should belong to | client picker, **Make them theirs** |
-| Stop watching for them | **In <client>** (the client chosen in the picker), **Everywhere** |
+| Who they should belong to | topic picker, **Make them theirs** |
+| Stop watching for them | **In <topic>** (the topic chosen in the picker), **Everywhere** |
 | Remove | **From Review** |
 
 Every action, single or bulk, reports what was refused and offers **Undo** on its message. Undo puts
-the items back in Review exactly as they were listed - count, sources and placeholder - after taking
-back what was done (un-mapping or un-ignoring them).
+the suggestions back in Review exactly as they were listed - count, sources and held-back token -
+after taking back what was done (un-mapping or un-ignoring them).
 
 ## Quiet kinds and "Not now"
 
@@ -95,26 +98,26 @@ started. **Treat as public** in Review is how you add your own: it goes on Globa
 
 ## Added by someone else
 
-When a client is shared (see [Sharing](Sharing.md)), every entry records who added it - the
-signed-in work account (UPN), or `DOMAIN\user`. Review shows a card listing entries a colleague
-added to a client you share that you have not yet accepted:
+When a topic is shared (see [Sharing](Sharing.md)), every term records who added it - the
+signed-in work account (UPN), or `DOMAIN\user`. Review shows a card listing terms a colleague
+added to a topic you share that you have not yet accepted:
 
 | Column | Shows |
 |---|---|
-| Client, Value, Token | The entry |
+| Topic, Real, Token | The term |
 | Added by | The colleague's account |
 
-- **Keep** - your answer that the entry is right. Remembered on this machine only
+- **Keep** - your answer that the term is right. Remembered on this machine only
   (`kept-additions.json`); the shared file is unchanged, so each teammate decides for themselves.
-- **Remove** - deletes the entry from the shared file, **for everyone**.
+- **Remove** - deletes the term from the shared file, **for everyone**.
 
-Entries with no recorded author (added before authors were recorded) and Global's entries are never
+Terms with no recorded author (added before authors were recorded) and Global's terms are never
 listed. The reason for the card: a shared file is only as trustworthy as its least careful editor,
-and an ordinary word mapped as a client rewrites everyone's traffic.
+and an ordinary word mapped into a topic rewrites everyone's traffic.
 
 ## When the list is empty
 
-The page still shows the kind offers, the "Added by someone else" card, and the **+ New client** and
+The page still shows the kind offers, the "Added by someone else" card, and the **+ New topic** and
 **Add mapping** controls, with "Nothing to review."
 
 ---

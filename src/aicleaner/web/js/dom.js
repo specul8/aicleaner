@@ -299,7 +299,7 @@ export function iconButton(name, label, attrs) {
 // Detector kind names as shown to people ("slug" meant nothing to anyone).
 const KIND_LABELS = {
   slug: 'Resource identifier',
-  'client-resource': 'Resource name (carries a client name)',
+  'client-resource': 'Resource name (carries a real name)',
   resource: 'Resource name',
   email: 'Email',
   tenant: 'Tenant',

@@ -51,7 +51,7 @@ export async function openMoveConversation(name, chosenId, onMoved) {
     h('label', { class: 'field' }, `Conversation in ${name}`, conversation),
     h('div', { class: 'field' }, h('span', {}, 'Move it to'), destinations),
     h('p', { class: 'hint' }, 'It is filed under the chosen session\'s home folder and continues there, with that session\'s '
-      + 'folders, client filter and brief. Its title goes with it.'),
+      + 'folders, topic and brief. Its title goes with it.'),
     h('label', { class: 'check' }, files, ' Also move the files it made (moved, not copied)'),
     fileList,
     h('p', { class: 'hint' }, 'Each goes to the same place under the new home folder; one whose name is already taken there '

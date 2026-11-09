@@ -29,4 +29,9 @@
   /* The rail is the side menu's (the user, 2026-10-16): across the top the menu is always full, and
      the saved choice applies again when the menu goes back to the side. */
   root.setAttribute('data-nav', !top && nav === 'rail' ? 'rail' : 'full');
+  /* Animations even with the device's animation effects off (feature 163; motion.js keeps this copy in step with the
+     setting). On unless the setting was last seen off. */
+  var motion = '1';
+  try { motion = localStorage.getItem('aicleaner.motion') || '1'; } catch (e) { /* default */ }
+  if (motion !== '0') root.classList.add('motion-always');
 })();

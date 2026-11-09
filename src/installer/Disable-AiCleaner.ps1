@@ -56,6 +56,30 @@ param(
 $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
 
 Set-StrictMode -Version Latest
+
+function Get-AiCleanerApiHeader {
+    <#
+    .SYNOPSIS
+        The header that carries this install's API key (H2, AI Cleaner 1.1): a change through the API from this machine
+        is refused without it. Read from the DPAPI-protected file AI Cleaner makes at its first start; none yet (an
+        older AI Cleaner) gives no header, as before.
+    #>
+    [OutputType([hashtable])]
+    param([string]$StateFolder = (Join-Path $env:USERPROFILE '.aicleaner'))
+    # Given outright (a test, or a script started by AI Cleaner itself): whoever sets this already has the key.
+    if ($env:AICLEANER_API_KEY) { return @{ 'X-AI-Cleaner-Key' = [string]$env:AICLEANER_API_KEY } }
+    $file = Join-Path $StateFolder 'secrets\api-key.dpapi'
+    if (-not (Test-Path -LiteralPath $file)) { return @{} }
+    try {
+        Add-Type -AssemblyName System.Security
+        $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($file), $null, 'CurrentUser')
+        try { return @{ 'X-AI-Cleaner-Key' = [Text.Encoding]::UTF8.GetString($bytes).Trim() } }
+        finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+    } catch {
+        Write-Verbose "The API key could not be read: $($_.Exception.Message)"
+        return @{}
+    }
+}
 $ErrorActionPreference = 'Stop'
 
 $PUBLIC_ANTHROPIC = 'https://api.anthropic.com'
@@ -175,7 +199,7 @@ function Set-CodeTabOff {
     $port = if ($config.PSObject.Properties['port']) { [int]$config.port } else { 8787 }
     try {
         Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 3 -ErrorAction Stop | Out-Null
-        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
+        $answer = Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
             -Body '{"settings":{"codetab.enabled":false}}' -TimeoutSec 30 -ErrorAction Stop
         Write-Status "Code tab: $([string]$answer.rules)" -Level Detail
         return $true
@@ -218,7 +242,7 @@ function Set-CopilotOff {
     $port = if ($config.PSObject.Properties['port']) { [int]$config.port } else { 8787 }
     try {
         Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 3 -ErrorAction Stop | Out-Null
-        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
+        $answer = Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
             -Body '{"settings":{"copilot.enabled":false}}' -TimeoutSec 30 -ErrorAction Stop
         Write-Status "Copilot: $([string]$answer.rules)" -Level Detail
         return $true
@@ -261,7 +285,7 @@ function Set-ClaudeAiOff {
     $port = if ($config.PSObject.Properties['port']) { [int]$config.port } else { 8787 }
     try {
         Invoke-RestMethod -Uri "http://127.0.0.1:$port/healthz" -TimeoutSec 3 -ErrorAction Stop | Out-Null
-        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
+        $answer = Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' `
             -Body '{"settings":{"claudeai.enabled":false}}' -TimeoutSec 30 -ErrorAction Stop
         Write-Status "Claude Desktop's chat: $([string]$answer.rules)" -Level Detail
         return $true

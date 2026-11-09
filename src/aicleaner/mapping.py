@@ -84,7 +84,7 @@ def client_index(client_id: str, explicit: int | None = None) -> int:
     if m:
         return int(m.group(1))
     if not client_id.strip():
-        raise MappingError("client id is empty")
+        raise MappingError("topic id is empty")
     return 1000 + int(hashlib.sha1(client_id.strip().lower().encode()).hexdigest()[:4], 16) % 9000
 
 
@@ -366,6 +366,9 @@ def client_tokens(client: dict) -> dict[str, str]:
 
 # A letter or digit in any script; underscores, hyphens, dots, spaces and brackets are breaks.
 _WORD_CHAR = r"[^\W_]"
+# D231 (2026-11-08): a %XX that stands for a break is a break too - `%5CName` (an encoded backslash before the name in a
+# URL) is the name at a word's start. One that stands for a letter or digit (%41 is A) is not: `%41cme` is "Aacme".
+_ENCODED_BREAK = r"(?<=%(?:2[0-9A-Fa-f]|3[A-Fa-f]|40|5[B-Fb-f]|60|7[B-Eb-e]))"
 # Marks "a key ends at this node" in the prefix tree. Not a character, so it can never collide
 # with one: every other node key is a single character from a form.
 _END = None
@@ -434,7 +437,8 @@ def _whole(key: str) -> str:
 #             a digit edge may not touch another digit, so Client07 is never found inside Client0712.
 #             Whole-word restore left Get-<token>ApprovedSoftware.ps1 on disk with the token in it.
 # The case tests use (?-i:...) because the patterns are IGNORECASE.
-_CASE_START = r"(?:(?<![^\W_])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z]))|(?<=(?-i:[A-Z]))(?=(?-i:[A-Z][a-z])))"
+_CASE_START = (r"(?:(?<![^\W_])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z]))|(?<=(?-i:[A-Z]))(?=(?-i:[A-Z][a-z]))|"
+               + _ENCODED_BREAK + ")")
 _CASE_END = r"(?:(?![^\W_])|(?<=(?-i:[a-z0-9]))(?=(?-i:[A-Z]))|(?=(?-i:[A-Z][a-z])))"
 
 # A token the model wrote as a case-insensitive pattern: its first letter as a class, `[Cc]lient04`
@@ -475,7 +479,7 @@ def _head(first: str, mode: str) -> str:
         return ""
     if mode == "token":
         return "(?<![0-9])" if first.isdigit() else ""
-    return _CASE_START if mode == "real" else f"(?<!{_WORD_CHAR})"
+    return _CASE_START if mode == "real" else f"(?:(?<!{_WORD_CHAR})|{_ENCODED_BREAK})"
 
 
 def _tail(key: str, mode: str = "word") -> str:
@@ -569,6 +573,7 @@ def _trie_regex(node: dict) -> str:
 # would quietly weaken matching on files nobody has touched.
 ORIGIN_SCAN = "scan"      # a repository scan collected it
 ORIGIN_AUTO = "auto"      # the proxy auto-added it mid-request
+ORIGIN_ENCODED = "encoded"  # D231: a spaced form's %20 / + spelling, made when the mapping is built, never stored
 FOUND_ORIGINS = frozenset({ORIGIN_SCAN, ORIGIN_AUTO})
 
 # How an entry came to be here, in the words a person reads (feature 30). This is NOT `origin`
@@ -667,7 +672,7 @@ def parse_match(value: Any) -> "MatchRule | None":
         if value != "cased":
             raise MappingError(
                 f"{value!r} is not a matching rule (the only one with a short name is 'cased')",
-                why="A rule that is not understood would be ignored, and the form would go on "
+                why="A rule that is not understood would be ignored, and the term would go on "
                     "replacing the ordinary word you were trying to protect.")
         return MatchRule(cased=True)
     if not isinstance(value, dict):
@@ -860,6 +865,32 @@ def _expand_case(forms: Iterable[Form]) -> list[Form]:
             # form that gained an upper-case variant still wants the corroborating word.
             out.append(Form(variant, tok, f.client, f.origin, f.match))
             seen_real.add(variant)
+    return out
+
+
+def _expand_encoded(forms: Iterable[Form], declared: set[str]) -> list[Form]:
+    """D231: each form with a space also as written in a URL - the space as %20, and as + (a query string) - each with
+    a token of its own, so `Name%20Two` in a file link is replaced and comes back exactly as it was written. Without
+    them the tokeniser passed it and the canary's decoded read refused the request.
+
+    The token takes the same spelling when it has a space itself (the model then sees an encoded link that still
+    reads as one); otherwise a variant token. `declared` is every real in the mapping, lower case: a spelling some
+    client declared is that client's, never made here."""
+    out: list[Form] = list(forms)
+    taken = {f.token for f in out}
+    for f in list(out):
+        if " " not in f.real.strip():
+            continue
+        for sep in ("%20", "+"):
+            variant = f.real.replace(" ", sep)
+            if variant.lower() in declared:
+                continue
+            token = f.token.replace(" ", sep) if " " in f.token else variant_token(variant, f.real, f.token, taken)
+            if token in taken:
+                continue
+            out.append(Form(variant, token, f.client, ORIGIN_ENCODED, f.match))
+            taken.add(token)
+            declared.add(variant.lower())
     return out
 
 
@@ -1068,22 +1099,24 @@ class Mapper:
         first_real: dict[str, str] = {}  # token -> first real declared for it
         for f in self.forms:
             if not f.real or not f.token or not f.client:
-                raise MappingError(f"empty real/token/client in form {f!r}")
+                raise MappingError(f"empty real/token/topic in term {f!r}")
             if f.real == f.token:
                 raise MappingError(f"real and token identical: {f.token!r}")
             if any(ord(c) < 32 for c in f.real + f.token):
-                raise MappingError(f"form for client {f.client} contains a control character")
+                raise MappingError(f"a term for topic {f.client} contains a control character")
             # A colon is not shell/HCL/URL safe in general, but an IPv6 token is an address and has
             # to look like one (DECISIONS 41) - so only a token that parses as IPv6 may carry one.
-            if not SAFE_TOKEN_RE.match(f.token) and not is_ipv6(f.token):
+            # D231's spellings carry %20 or + where their token had a space; checked as the token they stand for.
+            plain_token = f.token.replace("%20", " ").replace("+", " ") if f.origin == ORIGIN_ENCODED else f.token
+            if not SAFE_TOKEN_RE.match(plain_token) and not is_ipv6(f.token):
                 raise MappingError(
                     f"token {f.token!r} is not shell/HCL/URL safe "
                     "(allowed: letters, digits, space . _ @ -)"
                 )
             if f.real in reals:
-                raise MappingError(f"duplicate real form for client {f.client}")
+                raise MappingError(f"duplicate real term for topic {f.client}")
             if tokens.get(f.token, f.client) != f.client:
-                raise MappingError(f"token {f.token!r} is used by more than one client")
+                raise MappingError(f"token {f.token!r} is used by more than one topic")
             # A token shared inside one client is only safe for case variants of one string;
             # anything else would rehydrate two different identifiers to the first one.
             if f.token in first_real and first_real[f.token].lower() != f.real.lower():
@@ -1115,10 +1148,10 @@ class Mapper:
                 found = re.compile(_head(r[:1], "real") + re.escape(r) + _tail(r, "real"), re.IGNORECASE)
                 bad = next((t for t in tokens if r.lower() in t.lower() and found.search(t)), None)
                 if bad is not None:
-                    raise MappingError(f"token {bad!r} contains real form; unsafe")
+                    raise MappingError(f"token {bad!r} contains a real term; unsafe")
         for t in tokens:
             if t in joined_reals:
-                raise MappingError(f"real form contains token {t!r}; unsafe")
+                raise MappingError(f"a real term contains token {t!r}; unsafe")
 
     def _check_roundtrip(self) -> None:
         for f in self.forms:
@@ -1647,6 +1680,7 @@ class Mapper:
                     shadowed.add((cid, real))
                 elif owner.setdefault(low, cid) != cid:
                     raise MappingError(f"{real!r} is in both {owner[low]} and {cid}")
+        declared = set(owner) | global_reals       # every real in the mapping, lower case (D231's spellings avoid them)
         for client in clients:
             cid = client.get("id", "")
             tokens = client_tokens(client)
@@ -1654,6 +1688,7 @@ class Mapper:
                                  str(f.get("origin") or ""), parse_match(f.get("match")))
                             for f in client.get("forms", [])
                             if (cid, str(f["real"])) not in shadowed]
+            client_forms = _expand_encoded(client_forms, declared)
             if client.get("expand_case"):
                 client_forms = _expand_case(client_forms)
             forms.extend(client_forms)

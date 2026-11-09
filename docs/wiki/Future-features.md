@@ -21,13 +21,13 @@ Status words:
 | 1 | security | Self-hosted remote control for agents other than Claude Code (Copilot CLI, Codex) - done for Claude Code via [Project Sessions](Project-Sessions.md) | Open |
 | 5 | proxy | Copilot Chat through the proxy (bring-your-own-key); the OpenAI Chat dialect is built and dormant | v1.1 |
 | 6 | proxy | The OpenAI Responses API dialect, for Codex CLI in API-key mode | Open |
-| 8 | proxy | Claude hosted in Microsoft Foundry (Azure) as an upstream | Open |
+| 8 | proxy | Claude hosted in Microsoft Foundry (Azure) as an AI service | Open |
 
 ## Detection and scanning
 
 | # | Area | What | Status |
 |---|---|---|---|
-| 2 | scan | A blocking mode that refuses a request carrying an unmapped high-confidence identifier (mostly superseded by placeholders) | Open |
+| 2 | scan | A blocking mode that refuses a request carrying an unmapped high-confidence identifier (mostly superseded by held-back tokens) | Open |
 | 3 | proxy | A Claude Code hook layer: deny reading PDFs and images, tokenise tool output, check prompts before they are sent | Open |
 | 7 | scan | A local Presidio pre-pass for person names, phone numbers and other personal data in documents | Open |
 | 26 | proxy | Parse multipart requests instead of exempting them - the refusal is now loud; the parser waits for a need | Part built |
@@ -45,7 +45,7 @@ Status words:
 | # | Area | What | Status |
 |---|---|---|---|
 | 11 | install | Organisation-wide deployment: a shared, versioned mapping store, central evidence logs, an Intune package | Open |
-| 14 | install | A versioned data-migration template, built when the client file's structure next changes | Parked |
+| 14 | install | A versioned data-migration template, built when the topic file's structure next changes | Parked |
 | 19 | install | Claude Desktop set up without an elevated PowerShell | Parked (with Claude Desktop) |
 
 ## Platforms
@@ -60,7 +60,7 @@ Status words:
 | # | Area | What | Status |
 |---|---|---|---|
 | 25 | perf | Pipeline optimisation, points 2 and 3 (point 1 delivered); to be measured end to end first | Open |
-| 59 | perf | A local index in front of the client files - the files stay the source of truth | Open |
+| 59 | perf | A local index in front of the topic files - the files stay the source of truth | Open |
 
 ## Interface
 

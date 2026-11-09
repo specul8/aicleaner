@@ -13,8 +13,8 @@ import { arrangeSheet, onBackdropClick } from '../sheet.js';
 // The short form (feature 111): the id and display name, with the wizard's help. The index is not
 // asked for: it is worked out from the id, every time.
 const FIELDS = [
-  ['id', 'Client ID', 'e.g. acme',
-   'Names the client\'s file (acme.json) and keys the mapping. Letters, digits, hyphens and underscores.'],
+  ['id', 'Topic ID', 'e.g. acme',
+   'Names the topic file (acme.json) and keys the mapping. Letters, digits, hyphens and underscores.'],
   ['label', 'Display name', 'e.g. ACME Pty Ltd',
    'What you read, everywhere in here.'],
 ];
@@ -35,9 +35,10 @@ export function askForNewClient(onCreated) {
   if (!wizardSkipped()) return openClientWizard(onCreated);
   document.getElementById('new-client-dialog')?.remove();
   const form = h('form', { method: 'dialog' },
-    h('h2', {}, 'Add a new client'),
+    h('h2', {}, 'Add a new topic'),
     h('p', { class: 'hint' },
-      'A client is one engagement. Its names and identifiers are replaced in every session, not '
+      'A topic is anything whose names you keep out of AI services: a client, a product, a person. '
+      + 'Its names and identifiers are replaced in every session, not '
       + 'only the ones you label as theirs. Add its other names, domains and identifiers on its page next.'),
     ...FIELDS.map(field),
     h('p', { class: 'hint' }, h('button', { type: 'button', class: 'link use-wizard' }, 'Use the step-by-step wizard instead')),

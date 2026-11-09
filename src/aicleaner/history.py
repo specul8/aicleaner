@@ -171,12 +171,12 @@ def _project_index(root: Path) -> dict[str, list[Path]]:
 
 def _text_of(message: Any) -> str:
     """The words of a user turn, whatever shape the record holds them in."""
+    from .origin import is_note, strip
     content = (message or {}).get("content")
     if isinstance(content, str):
-        return content
+        return strip(content) if "<aicleaner-origin>" in content else content     # a note after the words (D227)
     if not isinstance(content, list):
         return ""
-    from .origin import is_note
     # aicleaner's note on where a prompt was typed (origin.py) is not part of what was typed.
     return " ".join(block.get("text", "") for block in content
                     if isinstance(block, dict) and block.get("type") == "text" and not is_note(block.get("text", "")))

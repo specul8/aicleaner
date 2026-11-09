@@ -39,7 +39,7 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
   const next = h('button', { type: 'button', class: 'primary ci-next' }, 'Next');
   const cancel = h('button', { type: 'button', class: 'ci-cancel' }, 'Cancel');
   const dialog = h('dialog', { id: 'claude-import', class: 'sheet ci-dialog', 'aria-label': 'Import from claude.ai' },
-    h('h2', {}, name ? `Import from claude.ai into ${name}` : 'Import from claude.ai as a new client'),
+    h('h2', {}, name ? `Import from claude.ai into ${name}` : 'Import from claude.ai as a new topic'),
     steps, body, h('div', { class: 'fb-footer' }, cancel, h('span', {}, back, ' ', next)));
 
   const stopPolling = () => { if (timer) { clearInterval(timer); timer = 0; } };
@@ -284,14 +284,14 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
   const whereStep = () => {
     const parts = [];
     if (name) {
-      parts.push(h('p', {}, 'Into ', h('strong', {}, name), ': its home folder, its client and its share.'));
+      parts.push(h('p', {}, 'Into ', h('strong', {}, name), ': its home folder, its topic and its project assets folder.'));
     } else {
       const client = h('input', { type: 'text', class: 'ci-client', value: state.client, maxlength: '64' });
       const place = h('input', { type: 'text', class: 'ci-place', value: state.place, placeholder: `C:\\Repos\\${state.client || 'Name'}` });
       const shareChoice = h('select', { class: 'ci-share' },
         h('option', { value: 'create', selected: state.share === 'create' ? true : null }, 'Create one in OneDrive'),
         h('option', { value: 'folder', selected: state.share === 'folder' ? true : null }, 'Use a folder'),
-        h('option', { value: 'none', selected: state.share === 'none' ? true : null }, 'No share'));
+        h('option', { value: 'none', selected: state.share === 'none' ? true : null }, 'No project assets folder'));
       const sharePath = h('input', { type: 'text', class: 'ci-share-path', value: state.sharePath, hidden: state.share === 'folder' ? null : true });
       client.addEventListener('input', () => {
         state.client = client.value;
@@ -302,9 +302,9 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
       shareChoice.addEventListener('change', () => { state.share = shareChoice.value; sharePath.hidden = state.share !== 'folder'; });
       sharePath.addEventListener('input', () => { state.sharePath = sharePath.value; });
       parts.push(
-        h('label', { class: 'field' }, 'The client\'s name (used exactly as typed)', client),
+        h('label', { class: 'field' }, 'The topic\'s name (used exactly as typed)', client),
         h('label', { class: 'field' }, 'The project folder: it gets a local-only _<name>-tooling repository as the session\'s home', place),
-        h('label', { class: 'field' }, 'The OneDrive share', shareChoice, sharePath));
+        h('label', { class: 'field' }, 'The project assets folder (OneDrive)', shareChoice, sharePath));
     }
     const pairRows = state.pairs.map((pair, index) => {
       const old = h('input', { type: 'text', class: 'ci-pair-old', value: pair[0], placeholder: 'C:\\Users\\me\\OneDrive\\Old folder' });
@@ -340,7 +340,7 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
           r.zips_kept ? h('li', {}, `The export is kept in ${r.zips_kept}`) : h('li', {}, 'The downloaded export was deleted')),
         open);
     }
-    const where = name ? name : `a new client, ${state.client.trim()}`;
+    const where = name ? name : `a new topic, ${state.client.trim()}`;
     return h('div', {},
       h('p', {}, 'Ready to import ', h('strong', {}, state.project.name), ` into ${where}:`),
       h('ul', { class: 'ci-review' },
@@ -349,7 +349,7 @@ export function openClaudeImport({ name = '', opened = () => {} } = {}) {
         state.memories ? h('li', {}, 'claude-project\\memories.md - claude.ai\'s memory of it') : null,
         h('li', {}, 'CLAUDE.md - a section pointing at them (added, never replacing what is there)'),
         h('li', {}, `${state.ticked.size} chat${state.ticked.size === 1 ? '' : 's'}, as conversations Continue lists`)),
-      name ? null : h('p', { class: 'hint' }, 'The client, its project profile, the tooling repository and the share are created first.'));
+      name ? null : h('p', { class: 'hint' }, 'The topic, its project session, the tooling repository and the project assets folder are created first.'));
   };
 
   // ---- moving between them ---------------------------------------------------------------------

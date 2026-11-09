@@ -7,13 +7,13 @@ import { h } from '../dom.js';
 
 const ACTIONS = [
   ['', 'Every action'], ['replaced', 'Replaced'], ['restored', 'Restored'], ['auto-added', 'Auto-added'],
-  ['held-back', 'Held back'], ['stand-in', 'Stand-in (GUID)'], ['sent-unprotected', 'Sent unprotected'],
-  ['canary-refused', 'Refused by the canary'], ['canary-fail-open', 'Sent anyway (fail-open)'],
+  ['held-back', 'Held back'], ['stand-in', 'Token (GUID)'], ['sent-unprotected', 'Sent unprotected'],
+  ['canary-refused', 'Refused by the canary'], ['canary-fail-open', 'Sent anyway'],
   ['rule-declined', 'Let through by a match rule'],
   ['ui', 'Changes made in the UI'],
 ];
 
-const view = { main: null, filters: {}, next: null, events: [], fixShown: new Set() };
+const view = { main: null, filters: {}, next: null, events: [], fixShown: new Set(), asked: 0, filterRow: null, results: null };
 
 function driver(who) {
   if (!who) return ['', ''];
@@ -46,17 +46,25 @@ function canaryFix(e, n) {
   if (view.fixShown.has(key)) return null;
   view.fixShown.add(key);
   const name = `canary-fix-${n}`;
-  const whole = h('input', { type: 'radio', name, value: 'whole', checked: e.inside ? true : null,
+  // D231: a match found only once the request's disguises were off (%20, full-width letters) can be added as a
+  // spelling of its own, so it is replaced from then on. Not one with an invisible character in it: that is hiding.
+  const spellable = Boolean(e.decoded && e.written && !/[​-‍⁠﻿­]/.test(e.written));
+  const whole = h('input', { type: 'radio', name, value: 'whole', checked: e.inside && !spellable ? true : null,
     disabled: e.inside ? null : true });
-  const ignore = h('input', { type: 'radio', name, value: 'ignore', checked: e.inside ? null : true });
+  const spelling = spellable ? h('input', { type: 'radio', name, value: 'spelling', checked: true }) : null;
+  const ignore = h('input', { type: 'radio', name, value: 'ignore', checked: e.inside || spellable ? null : true });
   const scope = h('select', { class: 'canary-scope', 'aria-label': 'Ignore for' },
     e.client === 'global' ? null : h('option', { value: e.client }, `${e.client} only`),
     h('option', { value: 'global' }, 'Everyone'));
   const apply = h('button', { type: 'button', class: 'canary-apply' }, 'Apply');
   const status = h('span', { class: 'hint canary-status' });
   const panel = h('div', { class: 'canary-fix' },
-    h('div', {}, 'Matched entry ', h('strong', { class: 'mono canary-declared' }, e.declared), ` (${e.client})`,
-      e.inside ? ' - found inside a longer word.' : ' - found as a whole word.'),
+    h('div', {}, 'Matched term ', h('strong', { class: 'mono canary-declared' }, e.declared), ` (${e.client})`,
+      e.inside ? ' - found inside a longer word.' : ' - found as a whole word.',
+      spellable ? h('span', {}, ' Written as ', h('strong', { class: 'mono canary-written' }, e.written),
+        ', which reads as it once decoded.') : null),
+    spellable ? h('label', { title: 'Add this spelling to the topic as a term of its own, so it is replaced from now on.' },
+      spelling, ' Add this spelling') : null,
     h('label', { title: e.inside ? 'Match it only where it is the entire word.'
       : 'This match is already a whole word, so whole word only would not clear it.' }, whole, ' Whole word only'),
     h('label', {}, ignore, ' Ignore for: '), scope, ' ', apply, ' ', status);
@@ -64,7 +72,10 @@ function canaryFix(e, n) {
   apply.addEventListener('click', async () => {
     apply.disabled = true;
     try {
-      if (whole.checked) {
+      if (spelling && spelling.checked) {
+        await postJSON('/api/mapping/form', { client: e.client, real: e.written });
+        status.textContent = `Added "${e.written}" to ${e.client}. Send the request again.`;
+      } else if (whole.checked) {
         await postJSON('/api/mapping/form/whole-word', { client: e.client, real: e.declared, on: true });
         status.textContent = 'Whole word only is on. Send the request again.';
       } else {
@@ -113,7 +124,7 @@ function table() {
   const empty = view.events.length ? null : h('p', { class: 'muted', id: 'log-empty' }, 'Nothing logged for this day and filter.');
   return h('div', { class: 'log-wrap' },
     h('table', { class: 'log-table', id: 'log-table' },
-      h('thead', {}, h('tr', {}, ['Time', 'Action', 'Real', 'Token', 'Client', 'Session', 'Who'].map((t) => h('th', {}, t)))),
+      h('thead', {}, h('tr', {}, ['Time', 'Action', 'Real', 'Token', 'Topic', 'Session', 'Who'].map((t) => h('th', {}, t)))),
       body),
     empty);
 }
@@ -125,9 +136,13 @@ function query(before) {
   return `/api/log?${params}`;
 }
 
+// Only the latest request's answer is drawn (D229, 2026-11-06): with two in flight - a filter changed, then a search -
+// the older one could land last and put back what had just been filtered away.
 async function load(more = false) {
+  const mine = ++view.asked;
   try {
     const body = await getJSON(query(more ? view.next : 0));
+    if (mine !== view.asked) return;
     view.events = more ? view.events.concat(body.events) : body.events;
     view.next = body.next;
     view.days = body.days;
@@ -136,8 +151,24 @@ async function load(more = false) {
     view.old = body.skipped_old;
     paint();
   } catch (error) {
-    sayError(error);
+    if (mine === view.asked) sayError(error);
   }
+}
+
+// The filter row is made once per visit and kept across redraws (D229): rebuilt with each answer, it threw away
+// whatever was being typed in Search while the previous filter's results were still on their way. Only the day list
+// is refreshed, as new days appear.
+function filterRow() {
+  if (!view.filterRow) view.filterRow = filters();
+  const day = view.filterRow.querySelector('#log-day');
+  const days = (view.days && view.days.length ? view.days : [view.day]).filter(Boolean);
+  const wanted = days.join('|');
+  if (day.dataset.days !== wanted) {
+    day.replaceChildren(...days.map((d) =>
+      h('option', { value: d, selected: d === view.day }, `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`)));
+    day.dataset.days = wanted;
+  }
+  return view.filterRow;
 }
 
 function filters() {
@@ -146,7 +177,7 @@ function filters() {
       h('option', { value: d, selected: d === view.day }, `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6)}`)));
   const action = h('select', { id: 'log-action', 'aria-label': 'Action' },
     ACTIONS.map(([value, label]) => h('option', { value, selected: value === (view.filters.action || '') }, label)));
-  const client = h('input', { type: 'text', id: 'log-client', placeholder: 'Client id', value: view.filters.client || '', 'aria-label': 'Client' });
+  const client = h('input', { type: 'text', id: 'log-client', placeholder: 'Topic id', value: view.filters.client || '', 'aria-label': 'Topic' });
   const session = h('input', { type: 'text', id: 'log-session', placeholder: 'Session', value: view.filters.session || '', 'aria-label': 'Session' });
   const text = h('input', { type: 'search', id: 'log-q', placeholder: 'Search', value: view.filters.q || '', 'aria-label': 'Search' });
   const apply = () => {
@@ -169,16 +200,27 @@ function paint() {
     view.old ? ` ${view.old} older ${view.old === 1 ? 'line' : 'lines'} in the previous format are not shown here.` : '');
   const more = view.next ? h('button', { type: 'button', id: 'log-more' }, 'Show more') : null;
   if (more) more.addEventListener('click', () => load(true));
-  view.main.replaceChildren(
-    h('div', { class: 'page-head' }, h('h1', {}, 'Log')),
-    h('section', { class: 'card' },
-      h('p', { class: 'hint' }, 'Real names, kept on this machine. Read here; there is no download.'),
-      filters(), summary, table(), more));
+  // The card and its filter row are put on the page once; each answer redraws only what is under them. Taking the row
+  // out and putting it back took the keyboard away from Search, so what was typed while an answer landed went nowhere
+  // (D229).
+  if (!view.results || !view.main.contains(view.results)) {
+    view.results = h('div', { class: 'log-results' });
+    view.main.replaceChildren(
+      h('div', { class: 'page-head' }, h('h1', {}, 'Log')),
+      h('section', { class: 'card' },
+        h('p', { class: 'hint' }, 'Real names, kept on this machine. Read here; there is no download.'),
+        filterRow(), view.results));
+  } else {
+    filterRow();                          // the day list, refreshed in place
+  }
+  view.results.replaceChildren(...[summary, table(), more].filter(Boolean));
 }
 
 export async function render(main) {
   view.main = main;
   view.events = [];
+  view.filterRow = null;
+  view.results = null;
   main.append(h('div', { class: 'page-head' }, h('h1', {}, 'Log')));
   await load();
 }

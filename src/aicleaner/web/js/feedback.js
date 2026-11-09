@@ -96,7 +96,7 @@ function consentView(state, onConnected, onCancel) {
     h('p', {}, `AI Cleaner will connect to ${state.relay} - the only place it connects to that you did not set up yourself. `
       + 'It connects from the machine AI Cleaner runs on, so feedback works here and through remote access alike.'),
     h('p', {}, 'Each ticket carries technical details about AI Cleaner - what is switched on, the page you were on, the version - '
-      + 'and never your folders, client names, files, or anything that identifies you. You can see exactly what is sent before sending.'),
+      + 'and never your folders, real names, files, or anything that identifies you. You can see exactly what is sent before sending.'),
     h('div', { class: 'form-row' }, connect, later));
 }
 
@@ -147,7 +147,7 @@ function newTab(dialog, refreshCounts) {
     h('div', { class: 'form-row' }, kind),
     h('label', { class: 'field' }, 'Title', title, count),
     h('label', { class: 'field' }, 'Description, and how to make it happen again', toolbar(box), box),
-    h('p', { class: 'hint' }, 'Client names in what you write are replaced by their tokens before it is sent.'),
+    h('p', { class: 'hint' }, 'Real names in what you write are replaced by their tokens before it is sent.'),
     h('div', { class: 'form-row' }, includeLog), more);
   view.sendButton = send;            // placed far right in the dialog's footer, opposite Cancel
   return view;

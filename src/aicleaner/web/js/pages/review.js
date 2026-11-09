@@ -162,7 +162,7 @@ function contextCell(candidate, status) {
   const clients = seenWith(candidate).map((cid) => h('span', { class: 'chip' }, `${labelOf(status, cid)} ${counts[cid]}x`));
   const where = [...(candidate.projects || []).map((p) => `project ${p}`),
     ...(candidate.sessions || []).map((s) => `session ${s}`)];
-  if (!clients.length && !where.length) return h('td', { class: 'seen-with' }, h('span', { class: 'muted' }, 'no client'));
+  if (!clients.length && !where.length) return h('td', { class: 'seen-with' }, h('span', { class: 'muted' }, 'no topic'));
   return h('td', { class: 'seen-with' }, ...clients, where.length ? h('div', { class: 'hint' }, where.join(', ')) : null);
 }
 
@@ -177,7 +177,7 @@ function clientSelect(status, attrs, withNew) {
   const selected = choices.some((c) => c.id === view.lastClient) ? view.lastClient : (choices[0] || {}).id;
   return h('select', attrs,
     choices.map((c) => h('option', { value: c.id, selected: c.id === selected }, c.label)),
-    withNew ? h('option', { value: '__new' }, '+ New client...') : null);
+    withNew ? h('option', { value: '__new' }, '+ New topic...') : null);
 }
 
 async function mapValues(values, client) {
@@ -193,7 +193,7 @@ async function ignoreValue(value, scope) {
 
 function newClientForm(values) {
   const form = h('form', { id: 'new-client', class: 'card form-row' },
-    h('label', { class: 'field' }, 'New client id', h('input', { type: 'text', name: 'id', required: true, pattern: '[A-Za-z0-9](?:[A-Za-z0-9_]|-){0,63}', placeholder: 'e.g. acme' })),
+    h('label', { class: 'field' }, 'New topic id', h('input', { type: 'text', name: 'id', required: true, pattern: '[A-Za-z0-9](?:[A-Za-z0-9_]|-){0,63}', placeholder: 'e.g. acme' })),
     h('label', { class: 'field' }, 'Display name (optional)', h('input', { type: 'text', name: 'label', maxlength: '80', placeholder: 'e.g. ACME Pty Ltd' })),
     h('label', { class: 'field' }, 'Index (optional)', h('input', { type: 'number', name: 'index', min: '1', placeholder: 'automatic' })),
     h('button', { type: 'submit', class: 'primary' }, `Create and map ${values.length === 1 ? 'it' : `all ${values.length}`}`),
@@ -245,7 +245,7 @@ function row(candidate, status) {
         // low-confidence find is sent deliberately; this one was meant to be held back and no
         // placeholder could be minted, which is a failure and should not read the same (D12).
         : candidate.unprotected
-          ? h('div', { class: 'hint bad-text' }, 'sent WITHOUT being replaced: no placeholder was left')
+          ? h('div', { class: 'hint bad-text' }, 'sent WITHOUT being replaced: no token was left')
           : h('div', { class: 'hint' }, 'sent as-is'),
       whyClient(candidate)),
     h('td', { class: 'kind' }, h('span', { class: `chip ${candidate.confidence === 'high' ? 'warn' : ''}` },
@@ -337,7 +337,7 @@ function applyFilter(table, text) {
 // it runs (busyButton), and offers its own undo when it is done.
 function bulkBar(status, table) {
   const count = h('span', { class: 'muted bulk-count', id: 'bulk-count' }, '0 selected items');
-  const select = clientSelect(status, { id: 'bulk-client', 'aria-label': 'Which client they belong to' }, true);
+  const select = clientSelect(status, { id: 'bulk-client', 'aria-label': 'Which topic they belong to' }, true);
   const filter = h('input', { type: 'search', id: 'review-filter', value: view.filter,
     placeholder: 'Filter, e.g. acme', 'aria-label': 'Filter identifiers' });
   const map = h('button', { type: 'button', id: 'bulk-map', class: 'primary' }, 'Make them theirs');
@@ -367,8 +367,8 @@ function bulkBar(status, table) {
     count.textContent = `${n} selected item${n === 1 ? '' : 's'}` + (shown < total ? ` of ${shown} shown (${total} in all)` : '');
     const named = chosenClient();
     ignoreHere.textContent = named ? `In ${labelOf(status, named)}` : 'In ...';
-    ignoreHere.title = named ? 'Never propose these again for that client; other clients still see them.'
-      : 'Choose a client on the left. For Global, use "Everywhere".';
+    ignoreHere.title = named ? 'Never propose these again for that topic; other topics still see them.'
+      : 'Choose a topic on the left. For Global, use "Everywhere".';
     for (const button of [map, ignoreAll, dismiss]) button.disabled = !n;
     ignoreHere.disabled = !n || !named;
   };
@@ -426,9 +426,9 @@ function bulkBar(status, table) {
 // One real value and the token that replaces it, for something you already know about rather
 // than something the queue found.
 function addMappingForm() {
-  const who = clientSelect(view.ctx.status, { class: 'map-to', 'aria-label': 'Client' }, false);
-  const real = h('input', { type: 'text', name: 'real', placeholder: 'real identifier',
-    'aria-label': 'Real identifier' });
+  const who = clientSelect(view.ctx.status, { class: 'map-to', 'aria-label': 'Topic' }, false);
+  const real = h('input', { type: 'text', name: 'real', placeholder: 'real',
+    'aria-label': 'Real' });
   const token = h('input', { type: 'text', name: 'token', placeholder: 'token (blank = automatic)',
     'aria-label': 'Token' });
   const form = h('form', { id: 'add-mapping', class: 'form-row' },
@@ -500,7 +500,7 @@ function kindOffers(offers) {
 // and out of reach under a few hundred rows when it is not.
 function makeThings() {
   const addClient = h('button', { type: 'button', id: 'start-new-client', class: 'primary' },
-    '+ New client');
+    '+ New topic');
   addClient.addEventListener('click', async () => {
     const { askForNewClient } = await import('./newclient.js');
     askForNewClient(async () => { await reload(); });
@@ -508,8 +508,8 @@ function makeThings() {
   return h('div', { class: 'card', id: 'review-make' },
     h('div', { class: 'form-row' }, addClient, addMappingForm()),
     h('p', { class: 'hint' },
-      'A client id names the file and is what the command line wants; the display name is what '
-      + 'you read here. A mapping is one real value and the token that replaces it everywhere.'));
+      'A topic id names the topic file and is what the command line wants; the display name is what '
+      + 'you read here. A mapping is one real term and the token that replaces it everywhere.'));
 }
 
 // Entries a colleague added to a client you share (DECISIONS 67). A shared file is only as trusted as
@@ -539,9 +539,9 @@ async function othersCard() {
   });
   return h('div', { class: 'card', id: 'others-additions' },
     h('h2', {}, 'Added by someone else'),
-    h('p', { class: 'hint' }, 'Entries a colleague added to a client you share. Keep the right ones; '
+    h('p', { class: 'hint' }, 'Terms a colleague added to a topic you share. Keep the right ones; '
       + 'Remove takes a wrong one out of the shared file for everyone.'),
-    h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Client'), h('th', {}, 'Value'),
+    h('table', {}, h('thead', {}, h('tr', {}, h('th', {}, 'Topic'), h('th', {}, 'Real'),
       h('th', {}, 'Token'), h('th', {}, 'Added by'), h('th', { class: 'actions' }, ''))), h('tbody', {}, rows)));
 }
 
@@ -552,7 +552,7 @@ async function paint() {
   const pending = answer.pending || [];
   view.pending = new Map(pending.map((c) => [c.value, c]));
   const head = h('div', { class: 'page-head' }, h('h1', {}, 'Review'),
-    h('span', { class: 'muted' }, 'Identifiers seen on the wire that are not in the mapping. Map them to a client, or ignore them if they are not client-specific.'));
+    h('span', { class: 'muted' }, 'Identifiers seen on the wire that are not in the mapping. Map them to a topic, or ignore them if they belong to no topic.'));
   const offers = kindOffers(answer.kind_offers || []);
   if (!pending.length) {
     view.main.replaceChildren(...[head, offers, others, makeThings(),

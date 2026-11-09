@@ -124,9 +124,9 @@ class ScanRunner:
         if not folder.strip() or not where.is_dir():
             raise ScanError(f"not a folder on this machine: {folder}")
         if mode in ("add", "queue") and not client:
-            raise ScanError(f"{mode} needs a client")
+            raise ScanError(f"{mode} needs a topic")
         if client and known is not None and client not in known:
-            raise ScanError(f"no client called {client}")
+            raise ScanError(f"no topic called {client}")
         with self._lock:
             if self.job and self.job.state == "running":
                 raise ScanError(f"a {self.job.kind} of {self.job.folder} is still running")

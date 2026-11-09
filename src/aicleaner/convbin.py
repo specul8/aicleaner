@@ -43,7 +43,7 @@ def delete(projects: Iterable[str], conv_id: str, root: Path, bin_root: Path, pr
         raise BinError("that conversation is running in a session - stop it first")
     path = _find(projects, conv_id, root)
     if path is None:
-        raise BinError("no such conversation in this profile's folders")
+        raise BinError("no such conversation in this project session's folders")
     now = now or time.time()
     if now - path.stat().st_mtime < BUSY_WINDOW_S:
         raise BinError("that conversation was written to in the last few minutes - a terminal or an editor "

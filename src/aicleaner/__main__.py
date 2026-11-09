@@ -573,7 +573,7 @@ def cmd_unwire_claude(cfg: Config) -> int:
     Code tab's proxy settings, hook and MCP entries (feature 117), its certificate authority, the
     Bash guard's hook (feature 98) and the between-tool-calls hook (feature 119) - by the same code
     that put them there."""
-    from . import bashguard, codetab_settings, deliver
+    from . import bashguard, codetab_settings, deliver, settingsguard
     from .codetab_ca import Authority
 
     state = Path(cfg.state_dir) if cfg.state_dir else Path(cfg.mapping).parent / "state"
@@ -581,11 +581,13 @@ def cmd_unwire_claude(cfg: Config) -> int:
     for label, step in (("Code tab", lambda: codetab_settings.apply(False, state, "", "", cfg.listen)),
                         ("Bash guard", lambda: bashguard.apply(False)),
                         ("Between-tool-calls hook", lambda: deliver.apply(False, cfg.port)),
-                        ("Rename-collapse guard", lambda: deliver.apply_collapse_guard(False, cfg.port))):
+                        ("Rename-collapse guard", lambda: deliver.apply_collapse_guard(False, cfg.port)),
+                        ("Settings guard", lambda: settingsguard.apply(False, Path("."), state))):
         try:
             said = step()
             print(said or f"{label}: nothing to remove")
-        except (codetab_settings.SettingsError, bashguard.GuardError, deliver.DeliverError) as exc:
+        except (codetab_settings.SettingsError, bashguard.GuardError, deliver.DeliverError,
+                settingsguard.SettingsGuardError) as exc:
             print(f"{label}: {exc}", file=sys.stderr)
             failed += 1
     Authority(state).remove()

@@ -107,10 +107,10 @@ def primary_of(folders: list[str], declared: str = "") -> dict:
     if declared.strip():
         for path in paths:
             if path.name.lower() == declared.strip().lower():
-                return {"folder": str(path), "how": f"named in the client file as {declared}",
+                return {"folder": str(path), "how": f"named in the topic file as {declared}",
                         "workspace": ""}
-        return {"folder": "", "how": f"the client file names {declared}, which is not in this "
-                                     f"profile's folders", "workspace": ""}
+        return {"folder": "", "how": f"the topic file names {declared}, which is not in this "
+                                     f"project session's folders", "workspace": ""}
     holding = [path for path in paths if workspace_file(path) is not None]
     if len(holding) == 1:
         found = workspace_file(holding[0])
@@ -123,7 +123,7 @@ def primary_of(folders: list[str], declared: str = "") -> dict:
                 if _same(candidate, known):
                     return {"folder": str(known),
                             "how": f"first folder listed in {found.name}", "workspace": str(found)}
-    return {"folder": "", "how": "no .code-workspace file and nothing named in the client file",
+    return {"folder": "", "how": "no .code-workspace file and nothing named in the topic file",
             "workspace": ""}
 
 
@@ -281,8 +281,8 @@ def may_write_agent_files(folder: str | Path, primary: str) -> str:
     protect. Claude's own edits to project files are not this and are not restricted.
     """
     if not primary:
-        return ("no primary repo is known for this client, so there is nowhere safe to write "
-                "agent settings. Name one in the client file, or open the workspace that says.")
+        return ("no primary repo is known for this topic, so there is nowhere safe to write "
+                "agent settings. Name one in the topic file, or open the workspace that says.")
     if _same(folder, primary):
         return ""
     return (f"{Path(folder).name} is not the primary repo ({Path(primary).name}). Agent settings "
@@ -361,7 +361,7 @@ def derived_home(workspaces: list[str], projects: list[str]) -> dict:
             return {"folder": str(folders[0][1]), "how": f"first folder in {path.name}"}
         break                                   # only the first workspace file decides
     first = next((str(p) for p in projects if str(p).strip()), "")
-    return {"folder": first, "how": "first folder of the profile" if first else "no folders yet"}
+    return {"folder": first, "how": "first folder of the project session" if first else "no folders yet"}
 
 
 def home_of(workspaces: list[str], projects: list[str], override: str = "") -> dict:

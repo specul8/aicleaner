@@ -58,6 +58,30 @@ param(
 $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
 
 Set-StrictMode -Version Latest
+
+function Get-AiCleanerApiHeader {
+    <#
+    .SYNOPSIS
+        The header that carries this install's API key (H2, AI Cleaner 1.1): a change through the API from this machine
+        is refused without it. Read from the DPAPI-protected file AI Cleaner makes at its first start; none yet (an
+        older AI Cleaner) gives no header, as before.
+    #>
+    [OutputType([hashtable])]
+    param([string]$StateFolder = (Join-Path $env:USERPROFILE '.aicleaner'))
+    # Given outright (a test, or a script started by AI Cleaner itself): whoever sets this already has the key.
+    if ($env:AICLEANER_API_KEY) { return @{ 'X-AI-Cleaner-Key' = [string]$env:AICLEANER_API_KEY } }
+    $file = Join-Path $StateFolder 'secrets\api-key.dpapi'
+    if (-not (Test-Path -LiteralPath $file)) { return @{} }
+    try {
+        Add-Type -AssemblyName System.Security
+        $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($file), $null, 'CurrentUser')
+        try { return @{ 'X-AI-Cleaner-Key' = [Text.Encoding]::UTF8.GetString($bytes).Trim() } }
+        finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+    } catch {
+        Write-Verbose "The API key could not be read: $($_.Exception.Message)"
+        return @{}
+    }
+}
 $ErrorActionPreference = 'Stop'
 
 function Write-Status {
@@ -142,9 +166,9 @@ function Test-RoundTrip {
         $form = @($mapping.clients | ForEach-Object { $_.forms } | Where-Object { $_.real }) | Select-Object -First 1
         if (-not $form) { return [pscustomobject]@{ Ok = $false; Why = 'no entry to test with' } }
         $real = [string]$form.real
-        $tokenised = Invoke-RestMethod -Uri "http://127.0.0.1:$ProxyPort/api/tokenise" -Method POST `
+        $tokenised = Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Uri "http://127.0.0.1:$ProxyPort/api/tokenise" -Method POST `
             -Body $real -ContentType 'text/plain' -TimeoutSec 10
-        $back = Invoke-RestMethod -Uri "http://127.0.0.1:$ProxyPort/api/rehydrate" -Method POST `
+        $back = Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Uri "http://127.0.0.1:$ProxyPort/api/rehydrate" -Method POST `
             -Body $tokenised -ContentType 'text/plain' -TimeoutSec 10
         if ([string]$tokenised -eq $real) {
             return [pscustomobject]@{ Ok = $false; Why = "'$real' was not replaced at all" }

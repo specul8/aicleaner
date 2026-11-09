@@ -12,6 +12,8 @@ import { openFeedback } from '../feedback.js';
 import { aiToolsTable } from '../aitools.js';
 import { casualFolderField } from '../chatnow.js';
 import { arrangeSheet } from '../sheet.js';
+import { deviceName } from '../device.js';
+import { askAgainWhichDevice } from '../remotedesktop.js';
 
 const view = { main: null, ctx: null, config: null, host: null, cards: [], group: null, side: null };
 
@@ -24,6 +26,8 @@ const view = { main: null, ctx: null, config: null, host: null, cards: [], group
 const GROUPS = [
   { key: 'aicleaner', label: 'aicleaner',
     cards: ['setup', 'updates', 'service', 'restart', 'contact', 'feedback', 'menu-layout', 'importexport'] },
+  // Feature 163 (Brad, 2026-11-05): a subheading of its own for how the page behaves for the person reading it.
+  { key: 'accessibility', label: 'Accessibility', cards: ['animations'] },
   { key: 'sessions', label: 'Sessions', cards: ['session', 'editor', 'autocorrect', 'highlight', 'notifications'] },
   { key: 'filtering', label: 'Filtering',
     cards: ['kinds', 'near-miss', 'public-list', 'tools', 'images', 'ocr', 'scan-markers'] },
@@ -48,14 +52,16 @@ const BUILTIN_WORDS = {
   contact: ['profile', 'account', 'email', 'my name', 'who am i'],
   feedback: ['bug report', 'issue', 'suggestion', 'support', 'help'],
   'menu-layout': ['navigation', 'sidebar', 'top bar', 'menu position'],
+  animations: ['motion', 'reduced motion', 'animation effects', 'pulse', 'highlight', 'smooth scroll'],
   importexport: ['backup', 'restore', 'migrate', 'transfer', 'download'],
   session: ['chat sessions', 'project sessions', 'conversations', 'claude code', 'permissions', 'profiles'],
   editor: ['code editor', 'monaco', 'minimap', 'completion', 'suggestions', 'markdown preview'],
   autocorrect: ['spelling', 'spell check', 'typos', 'replacements', 'dictionary'],
+  voice: ['microphone', 'mic', 'dictation', 'speech', 'speak', 'talk', 'push to talk', 'spacebar'],
   highlight: ['colour', 'color', 'terminal', 'green text', 'rehydrated'],
   notifications: ['alerts', 'toast', 'footer', 'popups', 'messages'],
   kinds: ['detection', 'auto-add', 'new names', 'identifiers', 'placeholders', 'quiet'],
-  'near-miss': ['typos', 'misreadings', 'misspellings', 'fuzzy', 'similar names'],
+  'near-miss': ['typos', 'near misses', 'near-misses', 'misspellings', 'fuzzy', 'similar names', 'ocr errors'],
   'public-list': ['shared identifiers', 'global list', 'common names', 'public names'],
   tools: ['tool calls', 'MCP', 'tool arguments', 'tokens in tools'],
   images: ['pictures', 'screenshots', 'vision', 'photos', 'attachments', 'redact images',
@@ -424,8 +430,8 @@ function showCard(name) {
 
 // The cards that are red only while their switch is on, and what each one says when it is.
 const DANGEROUS = [
-  ['bypass', 'proxy.bypass', 'BYPASS IS ON: NOTHING IS FILTERED'],
-  ['fail-open', 'canary.fail_open', 'FAIL-OPEN IS ON: THE CANARY IS NOT STOPPING ANYTHING'],
+  ['bypass', 'proxy.bypass', 'SEND EVERYTHING UNFILTERED IS ON: NOTHING IS FILTERED'],
+  ['fail-open', 'canary.fail_open', 'SEND WHAT THE CANARY REFUSES IS ON: THE CANARY IS NOT STOPPING ANYTHING'],
   ['images', 'attachments.allow_images', 'IMAGES ARE SENT UNFILTERED'],
 ];
 
@@ -455,6 +461,7 @@ function paintCards() {
   const everyday = [
     setupCard(),                                   // shown remotely too (E4): the wizard says what is local
     menuLayoutCard(),
+    animationsCard(s),
     aiToolsCard(),                                 // item H: sign-in works remotely; routing stays local
     loggingCard(s), notificationsCard(s, Boolean(view.config.remote)), kindsCard(s, kinds),
     nearMissCard(s), ocrCard(s), sessionCard(s), tunnelCard(s), highlightCard(s),
@@ -467,7 +474,7 @@ function paintCards() {
     updatesCard(s), feedbackCard(),
     foldersCard(s), remoteDesktopCard(s), scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
-    contactCard(status.contact), editorCard(s), autocorrectCard(s), diagnosticsCard(s, status),
+    contactCard(status.contact), editorCard(s), autocorrectCard(s), voiceCard(s), diagnosticsCard(s, status),
     advancedCard(status, view.config, view.config.dialects || []),
   ];
   // Every one of these turns a protection off - forwarding untouched, sending pictures unfiltered,
@@ -497,6 +504,22 @@ function menuLayoutCard() {
     [group], null);
 }
 
+// Animations where the device has them off (feature 163, Brad, 2026-11-05): with Windows "Animation effects" off the
+// pulse on the turn a View button lands on, the light on the half pressed, the running tool dot and smooth scrolling
+// all stopped. On (the default) the page animates anyway; off, it follows the device. AI Cleaner's setting, so every
+// device gets it; motion.js applies it the moment it is saved.
+function animationsCard(s) {
+  const override = checkbox('animations-override', 'Animate even when this device has animations turned off',
+    s['ui.animations_override'] !== false);
+  return card('animations', 'Animations',
+    'AI Cleaner shows where it took you - the turn a View button lands on pulses, the half of the button you pressed '
+    + 'lights up - and that it is working, by animating. A device with its animation effects turned off (in Windows: '
+    + 'Settings, Accessibility, Visual effects) asks web pages for less motion, and these stop. On: they play anyway. '
+    + 'Off: AI Cleaner follows the device.',
+    [h('div', { class: 'form-row' }, override)],
+    () => ({ 'ui.animations_override': override.querySelector('input').checked }));
+}
+
 // The setup wizard (feature 106), opened again from here: on this machine only, as it runs its scripts.
 // Every AI tool AI Cleaner knows (item H, 2026-10-19): found, filtered, signed in, and sign-in. The table
 // locks what runs on this machine itself, so the card is not locked as a whole.
@@ -509,7 +532,7 @@ function aiToolsCard() {
 }
 
 function setupCard() {
-  return card('setup', 'Set up', 'Step by step: route your AI tools through AI Cleaner, add a client, and set up remote access.',
+  return card('setup', 'Set up', 'Step by step: route your AI tools through AI Cleaner, add a topic, and set up remote access.',
     [h('div', { class: 'form-row' }, h('a', { class: 'btn primary', href: '#/setup' }, 'Open the setup wizard'))], null);
 }
 
@@ -608,7 +631,7 @@ function notificationsCard(s, remote) {
     learning.title = LOCAL_ONLY;
   }
   const footer = checkbox('footer', "Footer on the model's reply", s['detect.footer']);
-  const toast = checkbox('toast', 'Windows toast', s['detect.toast']);
+  const toast = checkbox('toast', 'Windows notification', s['detect.toast']);
   return card('notifications', 'Notifications', 'How you hear about new identifiers to review.',
     [h('div', { class: 'form-row' }, learning), h('div', { class: 'form-row' }, footer, toast)],
     () => ({ ...(remote ? {} : { 'detect.enabled': learning.querySelector('input').checked }),
@@ -620,7 +643,7 @@ function imagesCard(s) {
   const now = s['attachments.allow_images'] ? 'as_is' : (s['attachments.redact_images'] ? 'redacted' : 'text');
   const choices = [
     ['text', 'Text only (recommended): the picture is never sent; its text is read here and filtered'],
-    ['redacted', 'Redacted picture: sent with client names, identifiers and secrets blacked out, plus its text'],
+    ['redacted', 'Redacted picture: sent with real names, identifiers and secrets blacked out, plus its text'],
     ['as_is', 'Picture as it is: sent unfiltered'],
   ];
   const mode = h('div', { class: 'images-mode' }, ...choices.map(([value, label]) => h('label', { class: 'check' },
@@ -635,7 +658,7 @@ function imagesCard(s) {
   const session = sessionPicturesField(s, picked);
   mode.addEventListener('change', session.follow);
   const section = card('images', 'Pictures',
-    'Text only (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. Redacted picture: the picture goes too, with every client name, unmapped identifier and secret the reader can see blacked out, and it is read again before it leaves - a name still legible keeps it back. What the reader cannot read (handwriting, a logo, tiny or rotated text) is not blacked out. Picture as it is: JPEG, PNG, GIF and WebP are sent unfiltered, so any client name in them reaches the provider (replies are still filtered). Other image types are always withheld. Office documents and PDFs with text are read to text and filtered either way; a scanned PDF (no text) goes as redacted pictures, page by page, with Redacted picture, and is read to text otherwise.',
+    'Text only (recommended): the image itself is never sent. Its text is read on this machine, rows and columns intact, and that text is filtered like anything else. Redacted picture: the picture goes too, with every real name, unmapped identifier and secret the reader can see blacked out, and it is read again before it leaves - a name still legible keeps it back. What the reader cannot read (handwriting, a logo, tiny or rotated text) is not blacked out. Picture as it is: JPEG, PNG, GIF and WebP are sent unfiltered, so any real name in them reaches the AI service (replies are still filtered). Other image types are always withheld. Office documents and PDFs with text are read to text and filtered either way; a scanned PDF (no text) goes as redacted pictures, page by page, with Redacted picture, and is read to text otherwise.',
     [mode,
      session.field,
      // Saying this plainly is part of the decision to do it at all (feature 36). A proxy that
@@ -687,8 +710,8 @@ function sessionPicturesField(s, pictures) {
 function nearMissCard(s) {
   const on = checkbox('near_miss', 'Correct misreadings in text read from images and documents',
     s['detect.near_miss']);
-  return card('near-miss', 'Near-misses',
-    'An OCR engine turns rn into m and l into I, and a mangled client name would walk straight past the filter. With this on, a word one letter away from a mapped identifier is corrected back to it - but only in text read from an image, a scan or a document, which is the only place a misreading is expected. Typed text is never touched: there, almost every match would be an ordinary long word being replaced by a client token.',
+  return card('near-miss', 'Misreadings',
+    'An OCR engine turns rn into m and l into I, and a misread real would walk straight past the filter. With this on, a word one letter away from a term is corrected back to it - but only in text read from an image, a scan or a document, which is the only place a misreading is expected. Typed text is never touched: there, almost every match would be an ordinary long word being replaced by a token.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'detect.near_miss': on.querySelector('input').checked }));
 }
@@ -716,8 +739,8 @@ function foldersCard(s) {
   getJSON('/api/folders/roots').then((info) => {
     if (!info.in_use || !info.in_use.length) return;
     inUse.replaceChildren(
-      h('p', { class: 'hint' }, 'Also reachable because a profile or a share already points at them. '
-        + 'Add one above to keep it when that profile or share changes.'),
+      h('p', { class: 'hint' }, 'Also reachable because a project session or a project assets folder already points at them. '
+        + 'Add one above to keep it when that project session or project assets folder changes.'),
       h('ul', { class: 'small muted' }, info.in_use.map((p) => h('li', { class: 'mono' }, p))));
   }).catch(() => {});
   const hint = 'One full path per line. A folder picker can reach these and everything inside them, '
@@ -726,7 +749,7 @@ function foldersCard(s) {
     + 'a typed path reached anything this Windows account could read.';
   const refused = h('p', { class: 'hint' },
     'System folders are refused from either side: Program Files, Program Files (x86), ProgramData '
-    + 'and Windows, and anything inside them. Client work is never in one, and a root there would '
+    + 'and Windows, and anything inside them. Work for a topic is never in one, and a folder there would '
     + 'put every file under it behind the picker.');
   return card('folders', 'Folders the pages can open', hint,
     [h('div', { class: 'form-row' }, area), inUse, refused],
@@ -743,12 +766,30 @@ function remoteDesktopCard(s) {
   const hint = 'One per line, a name and its address: Name = https://address. Each becomes an entry in the menu that '
     + 'opens that machine\'s remote desktop page in a new tab. The address comes from aicleaner-rdp, which is installed '
     + 'on each machine whose desktop you want to reach.';
-  return card('remote-desktop', 'Remote desktops', hint, [h('div', { class: 'form-row' }, area)], () => ({
+  // Feature 168: which device this browser is on is asked once on a remote page and kept in this browser; this asks
+  // again now. On the page at this machine the device is the machine itself, so there is nothing to ask.
+  const again = h('button', { type: 'button', class: 'rdp-ask-again' }, 'Ask again which device this is');
+  again.addEventListener('click', () => { askAgainWhichDevice(); });
+  const named = deviceName();
+  const device = view.config.remote ? h('div', { class: 'form-row' }, again,
+    h('span', { class: 'hint' }, named ? `This browser says it is on ${named}.` : 'This browser has not said which device it is on.'))
+    : null;
+  // The full device name aicleaner-rdp recorded (f168) is not in the text: carried over by address when saved.
+  const devices = new Map((s['remote_desktop.hosts'] || []).filter((host) => host.device)
+    .map((host) => [host.url.replace(/\/+$/, '').toLowerCase(), host.device]));
+  const withDevice = (entry) => {
+    const device = devices.get(entry.url.replace(/\/+$/, '').toLowerCase());
+    return device ? { ...entry, device } : entry;
+  };
+  const section = card('remote-desktop', 'Remote desktops', hint, [h('div', { class: 'form-row' }, area), device], () => ({
     'remote_desktop.hosts': area.value.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
       const at = line.indexOf('=');
-      return at < 0 ? { name: '', url: line } : { name: line.slice(0, at).trim(), url: line.slice(at + 1).trim() };
+      return withDevice(at < 0 ? { name: '', url: line } : { name: line.slice(0, at).trim(), url: line.slice(at + 1).trim() });
     }),
   }));
+  again.disabled = false;                 // this browser's own answer, never the machine's: not locked remotely
+  again.removeAttribute('title');
+  return section;
 }
 
 // Which folders inside a repository hold output rather than something somebody wrote. A scan reads
@@ -761,9 +802,9 @@ function scanMarkersCard(s) {
     'One path fragment per line, matched inside the folder being scanned. In a file a machine wrote - '
     + 'a diagnostic dump, a portal export, a capture - a scan only keeps what carries a name the '
     + 'mapping already knows, because a bare GUID or address in one of those belongs to whoever made '
-    + 'the tool, not to your client. Scanning one repository this way went from 1,442 entries to 480 '
-    + 'while keeping every one that named the client. Empty means the built-in list; a scan says how '
-    + 'much it held back, so a missing client name shows up as a number rather than as silence.',
+    + 'the tool, not to your topic. Scanning one repository this way went from 1,442 terms to 480 '
+    + 'while keeping every one that named the topic. Empty means the built-in list; a scan says how '
+    + 'much it held back, so a missing real name shows up as a number rather than as silence.',
     [h('div', { class: 'form-row' }, area)],
     () => ({ 'scan.generated_markers': area.value.split('\n').map((line) => line.trim()).filter(Boolean) }));
 }
@@ -789,33 +830,33 @@ function uninspectedCard(paths) {
 const MODES = [['auto', 'Auto-tokenise'], ['review', 'Tokenise & Review'], ['ignore', 'Ignore']];
 // Kinds whose owner the value itself can prove, so Auto-add means something.
 const OWNED_KINDS = ['email', 'tenant', 'sharepoint', 'domain', 'devops-org', 'devops-project', 'client-resource'];
-const EMAIL_IGNORE_WARNING = 'An address at a client\'s mapped domain still has its domain replaced, but the name before the @ goes to the AI service as written.';
+const EMAIL_IGNORE_WARNING = 'An address at a topic\'s mapped domain still has its domain replaced, but the name before the @ goes to the AI service as written.';
 // What proves a value is a particular client's, where it can be said in a phrase.
 const OWNER_EXAMPLES = {
-  email: 'an address at a client\'s mapped domain',
-  sharepoint: 'a SharePoint host of a client\'s tenant',
+  email: 'an address at a topic\'s mapped domain',
+  sharepoint: 'a SharePoint host of a topic\'s tenant',
 };
 
 // The net effect of the choices on one row, in words (the user, 2026-10-06: a ? beside each type).
 function kindEffect(kind, mode, autoAdd) {
   const what = `A new ${kindLabel(kind).toLowerCase()}`;
   if (mode === 'auto') {
-    return `${what} is replaced by the same stand-in every time it is sent, and replies show you the real value. `
+    return `${what} is replaced by the same token every time it is sent, and replies show you the real one. `
       + 'It is never stored and never reaches Review.';
   }
   if (mode === 'ignore') {
     const proof = OWNER_EXAMPLES[kind] ? ` - ${OWNER_EXAMPLES[kind]} -` : '';
     const added = OWNED_KINDS.includes(kind) && autoAdd
-      ? ` But when the value itself proves whose it is${proof} it is added to that client and replaced from then on.`
+      ? ` But when the value itself proves whose it is${proof} it is added to that topic and replaced from then on.`
       : '';
     return `${what} is sent to the AI service as written and is not offered in Review.${added}`
       + (kind === 'email' && !autoAdd ? ` ${EMAIL_IGNORE_WARNING}` : '');
   }
-  let said = `${what} is replaced by a placeholder while it waits in Review for you to add it to a client or ignore it.`;
+  let said = `${what} is replaced by a token while it waits in Review for you to add it to a topic or ignore it.`;
   if (OWNED_KINDS.includes(kind)) {
     const proof = OWNER_EXAMPLES[kind] ? ` - ${OWNER_EXAMPLES[kind]} -` : '';
     said += autoAdd
-      ? ` When the value itself proves whose it is${proof} it is added to that client straight away instead.`
+      ? ` When the value itself proves whose it is${proof} it is added to that topic straight away instead.`
       : ' Auto-add is off, so it always waits in Review.';
   }
   return said;
@@ -831,7 +872,7 @@ function kindsCard(s, kinds) {
   const chosen = Object.fromEntries(kinds.map((kind) => [kind, { review: ownerAdd.has(kind), ignore: ignoreAdd.has(kind) }]));
   const rows = kinds.filter((kind) => kind !== 'name' && kind !== 'guid');
   const modeOf = (kind) => (quiet.has(kind) ? 'auto' : review.has(kind) ? 'review' : 'ignore');
-  const head = h('tr', {}, h('th', {}, 'Type'), MODES.map(([, label]) => h('th', {}, label)), h('th', {}, 'Auto-add to client'));
+  const head = h('tr', {}, h('th', {}, 'Type'), MODES.map(([, label]) => h('th', {}, label)), h('th', {}, 'Auto-add to topic'));
   const fixed = h('tr', { dataset: { kind: 'guid' } }, h('td', {}, kindLabel('guid')),
     h('td', {}, h('input', { type: 'radio', name: 'mode-guid', checked: true, disabled: true,
       title: 'Always: GUIDs are never proposed, never stored, always replaced' })),
@@ -840,7 +881,7 @@ function kindsCard(s, kinds) {
     const radios = MODES.map(([value]) => h('input', { type: 'radio', name: `mode-${kind}`, value,
       checked: modeOf(kind) === value, 'aria-label': `${kindLabel(kind)}: ${value}` }));
     const tick = OWNED_KINDS.includes(kind)
-      ? h('input', { type: 'checkbox', name: `owner-${kind}`, checked: chosen[kind][modeOf(kind)] || false, 'aria-label': `${kindLabel(kind)}: auto-add to client` })
+      ? h('input', { type: 'checkbox', name: `owner-${kind}`, checked: chosen[kind][modeOf(kind)] || false, 'aria-label': `${kindLabel(kind)}: auto-add to topic` })
       : null;
     const warn = kind === 'email' ? h('div', { class: 'hint kind-warning', hidden: true }, EMAIL_IGNORE_WARNING) : null;
     // The help mark (an emoji, written as its escape, so it stands out - the user) shows what the row's choices add up to: on hover (title), and on a click or tap, which
@@ -889,9 +930,9 @@ function kindsCard(s, kinds) {
   };
   return card('kinds', 'New names found',
     // Shorter, with the detail behind each row's ? (the user, 2026-10-06).
-    'What AI Cleaner does with identifiers the mapping does not know yet, for each type. Hover over or click the \u2753 beside a type to see what its current choices will do. Private IP addresses and anything on an ignore list are never touched - but an ignore wildcard (admin*, *-prod) never covers a value that contains a client\'s name: admin-<client>-vm still reaches Review unless that exact value is on the list.',
+    'What AI Cleaner does with identifiers the mapping does not know yet, for each type. Hover over or click the \u2753 beside a type to see what its current choices will do. Private IP addresses and anything on an ignore list are never touched - but an ignore wildcard (admin*, *-prod) never covers a value that contains a topic\'s name: admin-<topic>-vm still reaches Review unless that exact value is on the list.',
     [h('div', { class: 'kinds-wrap' }, table),
-      h('p', { class: 'hint' }, 'Always, whatever is chosen here: a name that carries a client\'s token is added to that client (Client07 Northern Rivers joins the client behind Client07).')],
+      h('p', { class: 'hint' }, 'Always, whatever is chosen here: a name that carries a topic\'s token is added to that topic (Client07 Northern Rivers joins the topic behind Client07).')],
     read);
 }
 
@@ -907,12 +948,13 @@ function sessionCard(s) {
   // Job cleanup (2026-10-24): off, a session's job only counts its processes; on, a broker that crashes or is
   // killed takes its whole tree with it. Stop still lets work in hand finish (D112).
   // Two ways of working with a session (Brad, 2026-10-27).
-  const thinking = checkbox('show-thinking', 'Show thinking: Claude\'s thinking is drawn expanded in the chat (off: folded to one line, opened with a click)',
+  const thinking = checkbox('show-thinking', 'Show thinking: Claude\'s thinking is drawn expanded in the conversation (off: folded to one line, opened with a click)',
     s['session.show_thinking'] !== false);
   const summary = checkbox('turn-summary', 'Turn summary: a message sent while Claude works is answered when the task is done, unless it asks for something now ("quickly change x, then carry on")',
     s['session.turn_summary'] === true);
-  // Feature 154 (on by default): a Markdown file Claude wrote and names in its reply is opened for review.
-  const review = checkbox('review-files', 'Open files for review: a Markdown file Claude has just written and names in its reply opens in Preview, in a tab behind the one in front, with "Claude has opened a file to review" in the menu',
+  // Feature 154 (on by default): a Markdown file Claude wrote is opened for review when its reply asks you to read or
+  // review it (2026-11-06: not every file it names - specs and reports come all the time).
+  const review = checkbox('review-files', 'Open files for review: when Claude asks you to read or review a Markdown file it has just written, the file opens in Preview in a tab behind the one in front, and the menu says so - click that to bring it to the front',
     s['session.review_files'] !== false);
   const cleanup = checkbox('job-cleanup', "End a session's leftover processes when its broker ends (a crash, a kill or a shutdown) - new sessions only",
     s['session.job_cleanup'] === true);
@@ -928,14 +970,14 @@ function sessionCard(s) {
   // The casual-chats folder (item J): asked for here when Project Sessions is on and none is chosen.
   const casual = casualFolderField(null);
   const casualAsk = h('p', { class: 'hint casual-ask', hidden: true },
-    'Choose a folder for casual chats - chats that belong to no client or project, started with Chat now in the menu.');
+    'Choose a folder for casual conversations - conversations that belong to no topic or project, started with Chat now in the menu.');
   const askIfNeeded = () => {
     casualAsk.hidden = !(on.querySelector('input').checked && !s['session.casual_folder'] && !casual.input.value.trim());
   };
   on.querySelector('input').addEventListener('change', askIfNeeded);
   setTimeout(askIfNeeded, 0);
   return card('session', 'Session page',
-    'On: the Session page can start Claude Code on this machine in your profiles\' folders, with every request filtered and every action waiting for your approval. Through the tunnel it works from your phone. Off: the page and its API refuse, and switching it off stops any session that is running. Takes effect straight away.',
+    'On: the Session page can start Claude Code on this machine in your project sessions\' folders, with every request filtered and every action waiting for your approval. Through the tunnel it works from your phone. Off: the page and its API refuse, and switching it off stops any session that is running. Takes effect straight away.',
     [h('div', { class: 'form-row' }, on),
       h('div', { class: 'form-row' }, h('label', { class: 'field' },
         'Sessions running at once (0 = no cap; the machine is the limit). Lowering it stops nothing - it only refuses new starts until enough have stopped.', most)),
@@ -1035,8 +1077,8 @@ function tunnelCard(s) {
 
 function highlightCard(s) {
   const terminal = checkbox('terminal', 'Also colour them in Claude Code (terminal and VS Code)', s['highlight.terminal']);
-  return card('highlight', 'Real names in green',
-    'Names the proxy restored in a reply are shown in green, so you can see what the filter did and read an odd answer in that light - the AI saw a token where you see the name. The session page always does this. Claude Code gets it as a terminal colour: turn it on and look at a reply, and if the VS Code panel shows raw codes such as [32;22m instead of colour, turn it off again. Claude Desktop is not coloured.',
+  return card('highlight', 'Real terms in green',
+    'Terms AI Cleaner restored in a reply are shown in green, so you can see what the filter did and read an odd answer in that light - the AI saw a token where you see the name. The session page always does this. Claude Code gets it as a terminal colour: turn it on and look at a reply, and if the VS Code panel shows raw codes such as [32;22m instead of colour, turn it off again. Claude Desktop is not coloured.',
     [h('div', { class: 'form-row' }, terminal)],
     () => ({ 'highlight.terminal': terminal.querySelector('input').checked }));
 }
@@ -1135,10 +1177,10 @@ function claudeaiStatus(info) {
 function claudeaiCard(s) {
   const wasOn = Boolean(s['claudeai.enabled']);
   const on = checkbox('claudeai', 'Filter Claude Desktop\'s chat (signed in to claude.ai)', wasOn);
-  const understood = checkbox('claudeai_understood', 'I understand: claude.ai keeps my conversations with tokens in place of client names', false);
+  const understood = checkbox('claudeai_understood', 'I understand: claude.ai keeps my conversations with tokens in place of real names', false);
   // Said before it can be turned on (spec, section 5): the switch stays greyed until this is ticked.
   const warning = h('div', { class: 'hint claudeai-warning', hidden: wasOn },
-    'Before you turn this on: your conversations, project files, titles and memory are stored on claude.ai with tokens in place of client names. On this machine they read with the real names; in claude.ai in another browser, on your phone or on another computer they show the tokens, and claude.ai\'s own search works on the tokens.',
+    'Before you turn this on: your conversations, project files, titles and memory are stored on claude.ai with tokens in place of real names. On this machine they read with the real names; in claude.ai in another browser, on your phone or on another computer they show the tokens, and claude.ai\'s own search works on the tokens.',
     h('div', { class: 'form-row' }, understood));
   const box = on.querySelector('input');
   const agreed = understood.querySelector('input');
@@ -1151,7 +1193,7 @@ function claudeaiCard(s) {
   getJSON('/api/claudeai').then((info) => { status.textContent = claudeaiStatus(info); })
     .catch(() => { status.textContent = ''; });
   return card('claudeai', 'Claude Desktop: chat',
-    'With this on, the Windows proxy setting sends claude.ai - and only claude.ai - to aicleaner: what you type, project instructions and knowledge, and the files you attach (read on this machine and sent as filtered text) go out with client names replaced, and replies come back with them restored. claude.ai in Edge on this machine is filtered too. Every other site goes where it went before, through your own proxy if you have one. aicleaner\'s claude.ai certificate, which can only vouch for claude.ai, is added to your Windows certificates the first time this is turned on here, and Windows asks you to confirm; after that it can be turned on or off from anywhere. While aicleaner\'s forward proxy is down, Claude Desktop\'s chat fails rather than going out unfiltered. Restart Claude Desktop after changing it. No API key or credit is needed: it is your own claude.ai sign-in.',
+    'With this on, the Windows proxy setting sends claude.ai - and only claude.ai - to aicleaner: what you type, project instructions and knowledge, and the files you attach (read on this machine and sent as filtered text) go out with real names replaced, and replies come back with them restored. claude.ai in Edge on this machine is filtered too. Every other site goes where it went before, through your own proxy if you have one. aicleaner\'s claude.ai certificate, which can only vouch for claude.ai, is added to your Windows certificates the first time this is turned on here, and Windows asks you to confirm; after that it can be turned on or off from anywhere. While aicleaner\'s forward proxy is down, Claude Desktop\'s chat fails rather than going out unfiltered. Restart Claude Desktop after changing it. No API key or credit is needed: it is your own claude.ai sign-in.',
     [h('div', { class: 'form-row' }, on), warning, status],
     () => ({ 'claudeai.enabled': box.checked }));
 }
@@ -1189,7 +1231,9 @@ function editorCard(s) {
   // Which service suggests the code (spec 2026-10-23-editor-suggestion-services.md). VS Code's own Copilot
   // completions cannot be reached from AI Cleaner (GitHub refuses the token), so "auto" takes Claude, Copilot, Codex.
   const serviceChoices = [
-    ['auto', 'Automatic - the first signed in of Claude, Copilot, Codex'],
+    ['auto', 'Automatic - the first signed in of Copilot (fast), Claude, Copilot CLI (filtered), Codex'],
+    // f167: GitHub's own Copilot language server - Copilot's real inline completions, about a quarter of a second.
+    ['copilot_fast', 'GitHub Copilot - fast, filtered'],
     ['claude', 'Claude (Haiku) - filtered'],
     ['copilot', 'GitHub Copilot CLI - UNFILTERED, as VS Code sends it'],
     ['copilot_filtered', 'GitHub Copilot CLI - filtered (unsupported)'],
@@ -1204,10 +1248,54 @@ function editorCard(s) {
       `${one.label}: ${one.available ? 'signed in' : 'not available here'} - ${one.cost}.`);
     const active = (info.services || {})[info.active];
     lines.unshift(info.active ? `Answering now: ${active.label}.` : 'No service answers now (off, or none signed in).');
-    if (info.active === 'copilot') lines.splice(1, 0, 'Unfiltered: file contents, client names included, go to GitHub as written.');
+    if (info.active === 'copilot') lines.splice(1, 0, 'Unfiltered: file contents, real names included, go to GitHub as written.');
     serviceState.textContent = lines.join(' ');
   };
-  getJSON('/api/editor/services').then(describe).catch(() => { serviceState.textContent = ''; });
+  getJSON('/api/editor/services').then((info) => { describe(info); showCopilotSignIn(info); })
+    .catch(() => { serviceState.textContent = ''; });
+  // f167: the fast Copilot route signs in with its own GitHub device code - entered on github.com from any device.
+  const copilotRow = h('div', { class: 'form-row copilot-fast-signin', hidden: true });
+  const showCopilotSignIn = (info) => {
+    const fast = ((info && info.services) || {}).copilot_fast;
+    if (!fast) return;
+    copilotRow.hidden = false;
+    const user = fast.server && fast.server.user;
+    if (fast.signed_in) {
+      const out = h('button', { type: 'button', class: 'copilot-signout' }, 'Sign out');
+      out.addEventListener('click', async () => {
+        try { await postJSON('/api/editor/copilot/signout', {}); say('Signed out of the fast Copilot suggestions.', 'ok'); }
+        catch (error) { sayError(error); }
+        getJSON('/api/editor/services').then(showCopilotSignIn).catch(() => {});
+      });
+      copilotRow.replaceChildren(h('span', { class: 'hint' }, `GitHub Copilot (fast): signed in${user ? ` as ${user}` : ''}.`), out);
+      return;
+    }
+    const start = h('button', { type: 'button', class: 'copilot-signin' }, 'Sign in to GitHub for fast Copilot');
+    const said = h('span', { class: 'hint copilot-signin-code' });
+    start.addEventListener('click', async () => {
+      start.disabled = true;
+      said.textContent = fast.installed ? 'Asking GitHub for a code...' : 'Installing GitHub\'s Copilot language server, then asking for a code...';
+      try {
+        const answer = await postJSON('/api/editor/copilot/signin', {});
+        if (answer.signed_in) { getJSON('/api/editor/services').then(showCopilotSignIn).catch(() => {}); return; }
+        said.replaceChildren('Open ', h('a', { href: answer.url, target: '_blank', rel: 'noopener noreferrer' }, answer.url),
+          ' on any device and enter ', h('strong', { class: 'mono' }, answer.code), '. This card shows when it is done.');
+        const until = Date.now() + (answer.expires_s || 900) * 1000;
+        const poll = async () => {
+          const now = await getJSON('/api/editor/services').catch(() => null);
+          const one = now && now.services && now.services.copilot_fast;
+          if (one && one.signed_in) { describe(now); showCopilotSignIn(now); return; }
+          if (Date.now() < until && copilotRow.isConnected) setTimeout(poll, 3000);
+        };
+        setTimeout(poll, 3000);
+      } catch (error) {
+        start.disabled = false;
+        said.textContent = '';
+        sayError(error);
+      }
+    });
+    copilotRow.replaceChildren(start, said);
+  };
   // The minimap down the right of a file tab: off by default (Brad, 2026-10-23).
   const minimap = checkbox('minimap', 'Show the minimap (the file in miniature, down the right edge)', s['editor.minimap'] === true);
   return card('editor', 'File editor',
@@ -1219,7 +1307,7 @@ function editorCard(s) {
     + 'written, as VS Code does. VS Code\'s own Copilot suggestions stay in VS Code: GitHub does not let another '
     + 'program use them. Alt+\\ still asks the session\'s AI on purpose.',
     [h('label', { class: 'field' }, 'Double-click in a Markdown preview', pick), h('div', { class: 'form-row' }, inline),
-      h('label', { class: 'field' }, 'Which service suggests code', service), serviceState,
+      h('label', { class: 'field' }, 'Which service suggests code', service), serviceState, copilotRow,
       h('div', { class: 'form-row' }, minimap)],
     () => ({ 'editor.preview_dblclick': pick.value, 'editor.inline_suggest': inline.querySelector('input').checked,
       'editor.inline_service': service.value, 'editor.minimap': minimap.querySelector('input').checked }),
@@ -1228,10 +1316,28 @@ function editorCard(s) {
 
 // Autocorrect in the Session page's prompt (feature 94). Its only switch since its button left the
 // prompt row (the user, 2026-10-18). Code and paths are always left alone; the rest is the user's choice.
+// Voice to text in the prompt (feature 166, Brad 2026-11-08): the two ways Space talks while the Microphone is on, each
+// on or off, and how long Space is held before it listens - in tenths of a second (3 = a third of a second).
+function voiceCard(s) {
+  const hold = checkbox('voice_hold', 'Hold Space to talk (a quick tap still types a space)', s['prompt.voice_hold'] !== false);
+  const toggle = checkbox('voice_toggle', 'On an empty prompt, Space starts listening and Space again stops',
+    s['prompt.voice_toggle'] !== false);
+  const tenths = h('input', { type: 'number', name: 'voice_hold_tenths', min: '1', max: '20', step: '1',
+    value: String(s['prompt.voice_hold_tenths'] || 3), 'aria-label': 'Hold time in tenths of a second' });
+  return card('voice', 'Voice to text in the prompt',
+    'The Microphone button beside Code turns it on for the prompt. The browser\'s own speech recognition turns your '
+    + 'speech into text: in Edge the audio goes to Microsoft\'s speech service and in Chrome to Google\'s, not through '
+    + 'AI Cleaner; the text it gives goes into the prompt and is filtered like anything typed. Firefox has none.',
+    [h('div', { class: 'form-row' }, hold), h('div', { class: 'form-row' }, toggle),
+      h('label', { class: 'field' }, 'How long Space is held before it listens, in tenths of a second (3 = a third of a second)', tenths)],
+    () => ({ 'prompt.voice_hold': hold.querySelector('input').checked, 'prompt.voice_toggle': toggle.querySelector('input').checked,
+      'prompt.voice_hold_tenths': Number(tenths.value) || 3 }));
+}
+
 function autocorrectCard(s) {
   const on = checkbox('autocorrect', 'Correct spelling in the prompt as you type', s['prompt.autocorrect']);
   const skip = new Set(s['prompt.autocorrect_skip'] || []);
-  const skips = [['clients', 'Client names the filter knows'], ['used', 'Words already in the conversation or the prompt'],
+  const skips = [['clients', 'Real names the filter knows'], ['used', 'Words already in the conversation or the prompt'],
     ['capitalised', 'Words starting with a capital']].map(([value, label]) =>
     checkbox(`skip-${value}`, label, skip.has(value)));
   const own = h('textarea', { class: 'mono ac-own-words', rows: '4', 'aria-label': 'Your own words' },
@@ -1355,20 +1461,20 @@ function processesView(data) {
 // nothing to it. First card on the page, because everything below it is moot while it is on.
 function bypassCard(s) {
   const on = checkbox('bypass', 'TEMPORARY: forward every request untouched (no filtering at all)', s['proxy.bypass']);
-  const section = card('bypass', 'Bypass filtering',
-    'On: model traffic passes straight through. Nothing is replaced, nothing is held back, secrets are not redacted, images and documents are not withheld, the canary does not check, and replies are not restored - so real client names, and anything else in a prompt, reach the AI provider exactly as written. Every request is logged as PROXY BYPASS. This exists so the filter can be switched off without an uninstall while its own faults are worked through, and is to be removed before the tool is relied on.',
+  const section = card('bypass', 'Send everything unfiltered',
+    'On: model traffic passes straight through. Nothing is replaced, nothing is held back, secrets are not redacted, images and documents are not withheld, the canary does not check, and replies are not restored - so real names, and anything else in a prompt, reach the AI service exactly as written. Every request is logged as PROXY BYPASS. This exists so the filter can be switched off without an uninstall while its own faults are worked through, and is to be removed before the tool is relied on.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'proxy.bypass': on.querySelector('input').checked }));
-  return danger(section, s['proxy.bypass'], 'BYPASS IS ON: NOTHING IS FILTERED');
+  return danger(section, s['proxy.bypass'], 'SEND EVERYTHING UNFILTERED IS ON: NOTHING IS FILTERED');
 }
 
 function failOpenCard(s) {
   const on = checkbox('fail-open', 'EMERGENCY: send requests the canary would refuse', s['canary.fail_open']);
   const section = card('fail-open', 'Send what the canary refuses',
-    'Only for getting past a false 403 ("a real client identifier survived tokenisation"). While this is on, a request the canary would refuse is sent anyway - if the match was real, that client name reaches the AI provider. Every such request is written to the evidence log as FAIL-OPEN, and each match - with the text around it - goes to the newest logs/proxy-stderr-*.log and the Log page. It can be turned on from the phone, because a false positive stays in the conversation and would otherwise refuse every request until you are back at this machine. Turn it off as soon as you are past the problem.',
+    'Only for getting past a false refusal ("a real name survived tokenisation"). While this is on, a request the canary would refuse is sent anyway - if the match was real, that real name reaches the AI service. Every such request is written to the evidence log as FAIL-OPEN, and each match - with the text around it - goes to the newest logs/proxy-stderr-*.log and the Log page. It can be turned on from the phone, because a false positive stays in the conversation and would otherwise refuse every request until you are back at this machine. Turn it off as soon as you are past the problem.',
     [h('div', { class: 'form-row' }, on)],
     () => ({ 'canary.fail_open': on.querySelector('input').checked }));
-  return danger(section, s['canary.fail_open'], 'FAIL-OPEN IS ON: THE CANARY IS NOT STOPPING ANYTHING');
+  return danger(section, s['canary.fail_open'], 'SEND WHAT THE CANARY REFUSES IS ON: THE CANARY IS NOT STOPPING ANYTHING');
 }
 
 // Stop-AiCleaner.ps1, then Start-AiCleaner.ps1 -Detach, without a terminal: settings that are read
@@ -1628,7 +1734,7 @@ function feedbackCard() {
     catch (error) { sayError(error); }
   });
   return card('feedback', 'Feedback',
-    'Raise tickets anonymously and follow the replies. Each ticket carries which settings are on or off, the page and the version - never folders, client names or anything that identifies you. Connecting again later, even after a reinstall on this machine, finds the same tickets.',
+    'Raise tickets anonymously and follow the replies. Each ticket carries which settings are on or off, the page and the version - never folders, real names or anything that identifies you. Connecting again later, even after a reinstall on this machine, finds the same tickets.',
     [line, h('div', { class: 'form-row' }, open, disconnect)], null);
 }
 
@@ -1697,8 +1803,8 @@ function publicListCard() {
       h('summary', {}, `Suppressed since the proxy started (${rows.length})`),
       h('p', { class: 'hint' },
         'Seen in traffic and treated as belonging to nobody, so never queued, never stood in for '
-        + 'and never tokenised. If one of these really belongs to a client, it is being sent as '
-        + 'written - add it to that client by hand.'),
+        + 'and never tokenised. If one of these really belongs to a topic, it is being sent as '
+        + 'written - add it to that topic by hand.'),
       h('table', {}, h('tbody', {}, rows.map((row) => h('tr', {},
         h('td', {}, h('span', { class: 'mono' }, row.value)),
         h('td', { class: 'kind' }, kindLabel(row.kind)),
@@ -1710,7 +1816,7 @@ function publicListCard() {
   return card('public-list', 'Shared identifiers',
     'Microsoft first-party application ids, built-in role and policy ids, Graph permission ids, '
     + 'vendor hosts and standards-body domains. Every one is the same in every tenant, so it names '
-    + 'no client: these are never queued for review, never stood in for by a placeholder and never '
+    + 'no topic: these are never queued for review, never held back as a token and never '
     + 'tokenised. It is generated by tools/build_public_identifiers.py from the sources below and '
     + 'shipped with the install, so it is the same for everyone and is not edited here. Use your '
     + "own ignore lists for anything specific to you.",
@@ -1721,27 +1827,27 @@ function publicListCard() {
 
 function importExportCard(status) {
   const clients = [...(status.global ? [{ id: 'global', label: 'Global' }] : []), ...status.clients.map((r) => ({ id: r.id, label: displayName(r) }))];
-  const select = h('select', { 'aria-label': 'Client to export' }, clients.map((c) => h('option', { value: c.id }, c.label)));
-  const exportOne = h('a', { class: 'btn', href: '#' }, icon('download'), 'Export this client');
+  const select = h('select', { 'aria-label': 'Topic to export' }, clients.map((c) => h('option', { value: c.id }, c.label)));
+  const exportOne = h('a', { class: 'btn', href: '#' }, icon('download'), 'Export this topic');
   const sync = () => {
     exportOne.href = `/api/export/client/${encodeURIComponent(select.value)}`;
     exportOne.setAttribute('download', `${select.value}.json`);
   };
   select.addEventListener('change', sync);
   if (clients.length) sync();
-  const exportAll = h('a', { class: 'btn', href: '/api/export/all', download: 'aicleaner-clients.json' }, icon('download'), 'Export all clients');
-  const file = h('input', { type: 'file', accept: '.json,application/json', 'aria-label': 'Client file to import' });
-  const area = h('textarea', { rows: '4', placeholder: '{"id": "fabrikam", "forms": [{"real": "..."}], "ignore": []}', 'aria-label': 'Client document to import' });
+  const exportAll = h('a', { class: 'btn', href: '/api/export/all', download: 'aicleaner-clients.json' }, icon('download'), 'Export all topics');
+  const file = h('input', { type: 'file', accept: '.json,application/json', 'aria-label': 'Topic file to import' });
+  const area = h('textarea', { rows: '4', placeholder: '{"id": "fabrikam", "forms": [{"real": "..."}], "ignore": []}', 'aria-label': 'Topic document to import' });
   file.addEventListener('change', async () => { if (file.files[0]) area.value = await file.files[0].text(); });
   // What happens to a client already held (DECISIONS 44). Merge is the default: it is what a
   // teammate's copy of the same client is for.
   const MODES = [
-    ['merge', 'Merge into a client already here', 'Adds what the file has and yours lacks; keeps everything of yours. A different token for the same value is reported, never taken.'],
-    ['new', 'New clients only', 'Adds clients not held here; skips one held here with the same entries; refuses one that differs.'],
-    ['replace', 'Replace a client already here', 'The file wins entirely. Your copy is backed up first.'],
+    ['merge', 'Merge into a topic already here', 'Adds what the file has and yours lacks; keeps everything of yours. A different token for the same value is reported, never taken.'],
+    ['new', 'New topics only', 'Adds topics not held here; skips one held here with the same terms; refuses one that differs.'],
+    ['replace', 'Replace a topic already here', 'The file wins entirely. Your copy is backed up first.'],
   ];
   const explain = h('p', { class: 'hint', id: 'import-mode-explain' });
-  const mode = h('select', { name: 'import-mode', 'aria-label': 'When the client is already here' },
+  const mode = h('select', { name: 'import-mode', 'aria-label': 'When the topic is already here' },
     MODES.map(([value, label]) => h('option', { value }, label)));
   const show = () => { explain.textContent = MODES.find(([value]) => value === mode.value)[2]; };
   mode.addEventListener('change', show);
@@ -1764,10 +1870,10 @@ function importExportCard(status) {
     }
   });
   return card('importexport', 'Import and export',
-    'A client file is the unit of sharing: the same file on a colleague\'s machine gives the same tokens. It contains real identifiers, so share it as you would client work.',
+    'A topic file is the unit of sharing: the same file on a colleague\'s machine gives the same tokens. It contains real names, so share it as you would the work itself.',
     [h('div', { class: 'form-row' }, select, exportOne, exportAll),
       h('h3', {}, 'Import'), h('div', { class: 'form-row' }, file), area,
-      h('div', { class: 'form-row' }, h('label', { class: 'field' }, 'When the client is already here', mode), importButton),
+      h('div', { class: 'form-row' }, h('label', { class: 'field' }, 'When the topic is already here', mode), importButton),
       explain],
     null);
 }
@@ -1819,7 +1925,7 @@ export async function render(main, ctx) {
   // Through remote access (J4, Brad 2026-10-20): why some controls are shown but cannot be used here.
   const remoteNote = view.config.remote ? h('p', { class: 'callout settings-remote-note' },
     h('b', {}, 'Through remote access: '),
-    'every setting is shown, but some cannot be changed from here - those that would let client data reach the AI '
+    'every setting is shown, but some cannot be changed from here - those that would let real names reach the AI '
     + 'service unfiltered, those that trigger a prompt on the machine where AI Cleaner is deployed, and those that could '
     + 'give access to other systems (such as reading stored secrets). They are greyed out, saying so; change them at that machine.')
     : null;

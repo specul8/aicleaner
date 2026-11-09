@@ -6,14 +6,16 @@
     receives and replies in stand-ins; the engine puts the real names back before you see the reply or a file is
     written.</desc>
   <defs>
-    <marker id="down" viewBox="0 0 10 10" refX="5" refY="9" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
-      <path d="M0,0 L10,0 L5,10 z" fill="#6fae9f"/>
+    <!-- Arrowheads point along +x and turn with their line (orient auto): drawn pointing down, they were turned a
+         further quarter-turn on every downward line and showed crooked (2026-11-06). -->
+    <marker id="down" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6fae9f"/>
     </marker>
     <marker id="tip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" fill="#6fae9f"/>
     </marker>
-    <marker id="down-amber" viewBox="0 0 10 10" refX="5" refY="9" markerWidth="9" markerHeight="9" orient="auto">
-      <path d="M0,0 L10,0 L5,10 z" fill="#c9a85a"/>
+    <marker id="down-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c9a85a"/>
     </marker>
     <style>
       .bg { fill: #070d0c; }

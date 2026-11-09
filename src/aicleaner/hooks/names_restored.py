@@ -14,7 +14,7 @@ import sys
 import urllib.request
 
 TIMEOUT_S = 3
-SAID = ("aicleaner: this call was carried out with the real client names wherever you see tokens, so the "
+SAID = ("aicleaner: this call was carried out with the real names wherever you see tokens, so the "
         "file names, paths and text it wrote are correct on disk. Do not rename or rewrite anything to "
         "remove a token - leave it as written.")
 

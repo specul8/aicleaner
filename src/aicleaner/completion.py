@@ -45,10 +45,34 @@ SYSTEM = ("You are a code completion engine inside a code editor. You are shown 
           "nothing useful fits, reply with an empty message.")
 # The services the editor can ask (spec 2026-10-23-editor-suggestion-services.md): `auto` takes the first signed in of
 # AUTO_ORDER (VS Code's own Copilot completions cannot be reached from aicleaner - GitHub refuses the token).
-SERVICES = ("auto", "off", "claude", "copilot", "copilot_filtered", "codex")
-AUTO_ORDER = ("claude", "copilot", "codex")
+SERVICES = ("auto", "off", "claude", "copilot", "copilot_filtered", "copilot_fast", "codex")
+# f167: the fast, filtered Copilot route first; and never unfiltered Copilot on its own say (D230 item 2).
+AUTO_ORDER = ("copilot_fast", "claude", "copilot_filtered", "codex")
 PROSE = re.compile(r"^(here|sure|this|the |i |i'|certainly|okay|ok[,.]|to |you |note|based on)", re.I)
 FENCE = re.compile(r"^```[\w+-]*\s*\n?|\n?```\s*$")
+
+
+_TAIL = re.compile(r"[\w.@-]+$")
+_HEAD = re.compile(r"^[\w.@-]+")
+HALF_TYPED_MIN = 4
+
+
+def half_typed(mapper: Any, before: str, after: str) -> bool:
+    """D230 item 3: the cursor sits inside a client's name - the word typed so far is the start of one of the mapping's
+    real forms (HALF_TYPED_MIN characters or more), or the word the cursor splits is one. The tokeniser sees whole
+    words only, so such a fragment would go out as it is: no suggestion is asked instead."""
+    if mapper is None:
+        return False
+    tail = (_TAIL.search(before) or [""])[0]
+    head = (_HEAD.search(after) or [""])[0]
+    if not tail and not head:
+        return False
+    if (tail or head) and mapper.find_real(tail + head):
+        return True
+    if len(tail) < HALF_TYPED_MIN:
+        return False
+    low = tail.lower()
+    return any(len(form.real) > len(tail) and form.real.lower().startswith(low) for form in mapper.forms)
 
 
 def prompt_for(name: str, language: str, before: str, after: str) -> str:

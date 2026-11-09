@@ -3,9 +3,9 @@
 [Home](Home.md) > Getting started
 
 This page takes you from nothing to a filtered session. One run of the deploy script installs
-AI Cleaner, waits while you tell the filter about a client, then switches filtering on;
-then you open a first Project Session. Allow an hour for the first client - most of
-it is deciding what names that client.
+AI Cleaner, waits while you tell the filter about a topic, then switches filtering on;
+then you open a first Project Session. Allow an hour for the first topic - most of
+it is deciding what names that topic.
 
 ## Before you start
 
@@ -25,7 +25,7 @@ The quickest way: download **`aicleaner-setup.zip`** from the
 [latest release](https://github.com/specul8/aicleaner/releases/latest), extract it anywhere, and
 double-click **`Install aicleaner.cmd`**. It runs the installer below for you, step by step, and -
 unless you switch your AI tools over at its last question - opens the **setup wizard** in your
-browser (`http://127.0.0.1:8787/#/setup`), which walks you through adding your first client, remote
+browser (`http://127.0.0.1:8787/#/setup`), which walks you through adding your first topic, remote
 access if you want it (including what moving your domain's DNS to Cloudflare would involve), and
 routing your AI tools last. The setup page is in
 Settings too ([Set up](Settings.md#card-setup)), on this machine only.
@@ -68,34 +68,34 @@ in brackets.
 
 ### What a run does, in order
 
-An interactive run has five framed steps and ends either with **filtering on** - you set a client
+An interactive run has five framed steps and ends either with **filtering on** - you set a topic
 up and said yes at the last question - or with the **setup wizard** open in your browser, where you
-add a client, set up remote access if you want it, and switch your AI tools over last. Everything
+add a topic, set up remote access if you want it, and switch your AI tools over last. Everything
 before that is safe to re-run and cannot stop you working, because Claude Code is still talking to
 the AI service directly until then.
 
 1. **Which agent, and which roles this machine has** - the two questions above.
 2. **Where things go.** The code always goes to `%USERPROFILE%\.aicleaner\app` (`-InstallPath` to
-   override); you are asked where the client files go - `<OneDrive>\aicleaner\clients` is suggested,
-   so clients can be shared with a team (see [Sharing a client with a team](Sharing.md)).
+   override); you are asked where the topic files go - `<OneDrive>\aicleaner\clients` is suggested,
+   so topics can be shared with a team (see [Sharing a topic with a team](Sharing.md)).
 3. **Which release.** It confirms the repository, checks it can be read (asking for a token if it
    is private), finds the newest signed `vX.Y.Z` release (unsigned ones are refused without
    `-AllowUnsigned`), and shows the plan - release, folders, roles - for you to confirm.
 4. **Fetches and verifies** the release against its signature, and copies only the files the roles
    need into the app folder.
 5. **Configuration**: creates `aicleaner-config.json` from the example if there is none, points it
-   at the clients folder, creates that folder, and pins it to this device under OneDrive so the
+   at the topics folder, creates that folder, and pins it to this device under OneDrive so the
    proxy never meets a cloud-only file. Copies your `contact-*.json` beside it.
 6. **Records** the install in `%USERPROFILE%\.aicleaner\deployment.json`, so a failed step can still
    be updated or uninstalled.
 7. **Wires each role.** For Claude Code (answers 1, 3, 4) `Install-AiCleaner-VSCode.ps1`:
    - finds Python 3.11+ (offering to install it), builds the venv in `%USERPROFILE%\.aicleaner\venv`
      and installs the requirements;
-   - validates the client mapping;
+   - validates the topic files;
    - in `%USERPROFILE%\.claude\settings.json`: `skipWebFetchPreflight`, and Claude Code's telemetry
      and error reporting off (`DISABLE_TELEMETRY`, `DISABLE_ERROR_REPORTING`) - Claude Code still
      updates itself; VS Code's telemetry off too (local and VS Code Server settings);
-   - writes the AI Cleaner rules block into your user `CLAUDE.md` (images and PDFs are read on this machine and only their text is sent; Office files are converted first; client names are used exactly as written);
+   - writes the AI Cleaner rules block into your user `CLAUDE.md` (images and PDFs are read on this machine and only their text is sent; Office files are converted first; the real terms are used exactly as written);
    - removes opt-out variables and the weekly update task an earlier install left, reviews
      OpenTelemetry variables that would capture content around the proxy, and checks for settings
      that would route around it;
@@ -108,15 +108,15 @@ the AI service directly until then.
    It does **not** point Claude Code at the proxy - that is step 9. Claude Desktop (answer 2) and
    the screenshot-only role (answer 5) have installers of their own; see Claude Desktop below.
 8. **Final Steps**: says the release is deployed and prints what is left to do - only what applies
-   here: open the app's Client Filters page and click **Add Client**. Reached from another PC
+   here: open the app's Topics page and click **Add topic**. Reached from another PC
    (answers 3, 4), it also says what that means for screenshots and how to fix it on that PC.
 9. **"Ready to activate AI Cleaner?"** The proxy is running but not in the path:
-   - **(Y)es** (the default) - you have set up at least one client: it runs `Enable-AiCleaner.ps1`,
-     which makes five checks (one refuses until a client has at least one entry) and, when all pass,
+   - **(Y)es** (the default) - you have set up at least one topic: it runs `Enable-AiCleaner.ps1`,
+     which makes five checks (one refuses until a topic has at least one term) and, when all pass,
      points your AI tools at the proxy (section 3). The run ends with **"Filtering is on"** - a
      session already running follows the change without a restart.
-   - **(N)o** - you still need to set a client up: the **setup wizard** opens in your browser
-     (`http://127.0.0.1:8787/#/setup`). Add the client there and switch the tools over in its last
+   - **(N)o** - you still need to set a topic up: the **setup wizard** opens in your browser
+     (`http://127.0.0.1:8787/#/setup`). Add the topic there and switch the tools over in its last
      step.
    - **A check fails**: nothing is switched over; it names what to fix, and the wizard opens.
 
@@ -125,7 +125,7 @@ the AI service directly until then.
 command line, and ignored.
 
 An **unattended** run (`-AssumeDefaults`) stops at step 9 with "provisioned but not switched
-over": nobody is there to set a client up, and answering the question with its default would route
+over": nobody is there to set a topic up, and answering the question with its default would route
 traffic through an empty filter. Every other answer has a parameter for scripted runs (`-Target`,
 `-ClientsPath`, `-Ref` and so on); `-WhatIf` shows the plan. Later:
 
@@ -140,7 +140,7 @@ traffic through an empty filter. Every other answer has a parameter for scripted
 
 `-RemoveAppFiles` takes the machine back to where an install deploys every file afresh: it also
 removes the Python environment, rollback copies, backups and anything left in the app folder that is
-not data. Your client files, Global, the configuration, contact, profiles, ignore list, review queue,
+not data. Your topic files, Global, the configuration, contact, project sessions, ignore list, review queue,
 logs and sessions are kept.
 
 `-RemoveRemote` offers to take remote access down: the tunnel on this machine, and - with the stored
@@ -151,36 +151,36 @@ keep or replace it). To take remote access down without uninstalling:
 
 ## 2. Set the filter up (during the pause)
 
-Routing traffic through a filter that knows no clients would forward everything untouched while
+Routing traffic through a filter that knows no topics would forward everything untouched while
 looking as if it works, and fill Review with everything it sees - which is why the install waits
 for this. Open `http://127.0.0.1:8787/` in a browser on the same machine while the deploy script
 waits at its pause. Over VS Code Remote, forward port 8787 in the Ports view and open the forwarded
 address.
 
-1. In the sidebar, choose **+ Add new client**.
+1. In the sidebar, choose **+ Add new topic**.
 2. Fill in the dialog:
 
    | Field | What to put |
    |---|---|
-   | Client id | A short key such as `contoso`. It names the client's file and is what the command line uses. |
+   | Topic id | A short key such as `contoso`. It names the topic's file and is what the command line uses. |
    | Display name | What you read in the UI, such as `Contoso Pharmaceuticals`. Optional. |
    | Index | Leave it as automatic. It is the number inside the tokens the AI sees (index 42 gives `Client42`). |
 
-3. On the client's page, add the entries that name the client: the full name, the short name or
+3. On the topic's page, add the terms that name the topic: the full name, the short name or
    acronym, house spellings, email domains, the tenant name, the people you deal with.
-4. Scan a repository of theirs, on the same client page: the **Scan a folder for this client** card.
+4. Scan a repository of theirs, on the same topic page: the **Scan a folder for this topic** card.
    Choose the folder with its picker, then one of:
 
    | Button | What it does |
    |---|---|
-   | **Scan and map** | Reads the folder and maps every high-confidence find to this client. |
+   | **Scan and map** | Reads the folder and maps every high-confidence find to this topic. |
    | **Preflight and map** | The same, over the folder **and** its Claude Code history - so picking up existing work does not send a first request full of identifiers the filter has never seen. |
-   | **Scan for review** | Reads the folder and puts the finds in Review, already marked as this client's, to decide by hand. Writes nothing to the mapping. |
+   | **Scan for review** | Reads the folder and puts the finds in Review, already marked as this topic's, to decide by hand. Writes nothing to the mapping. |
 
    A progress bar shows the reading and then the writing. Scan again after a big change to the repo.
 
    The same is available from PowerShell in the app folder, plus one thing the UI does not do -
-   reading names straight from the client's Azure tenant:
+   reading names straight from the topic's Azure tenant:
 
    ```powershell
    .\aicleaner seed contoso --resources                       # org name, domains, tenant, subscriptions
@@ -190,19 +190,19 @@ address.
    .\aicleaner preflight C:\Repos\contoso-app --add contoso   # the same, and map what it found
    ```
 
-   Useful switches: `--add <client>` maps what is found to that client (the UI's "... and map");
-   `--queue <client>` puts the finds in Review marked as that client's instead (the UI's "Scan for
+   Useful switches: `--add <client>` maps what is found to that topic (the UI's "... and map");
+   `--queue <client>` puts the finds in Review marked as that topic's instead (the UI's "Scan for
    review"); `--resources` on `seed` also adds every resource name in the tenant's subscriptions;
    `--top N` prints more finds. `preflight` says `READY` when nothing unmapped is left.
-5. Open **Review** and decide about anything waiting there: map it to the client, put it in
+5. Open **Review** and decide about anything waiting there: map it to the topic, put it in
    Global, or ignore it. See [Review](Review.md).
 
-More on clients, entries and Global: [Client Filters](Client-Filters.md).
+More on topics, terms and Global: [Topics](Client-Filters.md).
 
 ## 3. Switch filtering on
 
 Answering **Yes** at the deploy script's pause does this for you. If you answered No, ran
-unattended, or a check failed, run it yourself when the filter knows your client (from the app
+unattended, or a check failed, run it yourself when the filter knows your topic (from the app
 folder):
 
 ```powershell
@@ -212,9 +212,9 @@ folder):
 It runs five checks first, and any failure stops it:
 
 1. the proxy answers `/healthz`;
-2. the mapping loads and no client file is broken;
-3. at least one client has an entry;
-4. a real value round-trips and the canary is clean;
+2. the mapping loads and no topic file is broken;
+3. at least one topic has a term;
+4. a real term round-trips and the canary is clean;
 5. a test request survives the whole path to the AI service.
 
 Only then does it point `ANTHROPIC_BASE_URL` at `http://127.0.0.1:8787/anthropic` in
@@ -237,7 +237,7 @@ PowerShell signed in as the same user. It:
 - gives the app a locally generated gateway token, and stores your Anthropic Console API key
   DPAPI-encrypted; the proxy swaps the token for the key, so the app never holds the key.
 
-Know the trade-offs: gateway mode uses a separate app profile (`Claude-3p`), so claude.ai chats and
+Know the trade-offs: gateway mode uses a separate app profile (`Claude-3p`), so claude.ai conversations and
 projects are not visible there, and usage is billed to the Console key, not a subscription. The same
 account on a phone, another PC or claude.ai in a browser has no AI Cleaner in front of it.
 `-Remove` on the Desktop installer takes the policy away again.
@@ -248,19 +248,19 @@ The Project Sessions page runs Claude Code from the browser, through the filter.
 default.
 
 1. **Settings**, [Session page](Settings.md#card-session): tick **Drive Claude Code sessions from the Session page** and save.
-2. **Project Sessions**: choose **Edit project profiles**, then **+** to add one.
-3. Give it a name, pick the client, add the repo folders it works in, and optionally a model and a
+2. **Project Sessions**: choose **Edit project sessions**, then **+** to add one.
+3. Give it a name, pick the topic, add the repo folders it works in, and optionally a model and a
    standing brief. **Save**.
-4. Pick the profile and choose **Start**, then **Start chatting**.
+4. Pick the project session and choose **Start**, then **Start chatting**.
 
 Questions and permission prompts from Claude Code appear on the page with Allow and Deny. Names
 restored in replies are marked in green. More in [Project Sessions](Project-Sessions.md).
 
 ## What to check on day one
 
-- The **Overview** banner reads "Client-identity data filtering: On". Amber means something is
+- The **Overview** banner reads "Real-name filtering: On". Amber means something is
   waiting in Review; red means traffic is stopped - see [Troubleshooting](Troubleshooting.md).
-- The first days on a new client produce the most Review items. Work through them as they arrive.
+- The first days on a new topic produce the most Review suggestions. Work through them as they arrive.
 - To use the UI from another device, see [Remote access](Remote-access.md).
 
 ---

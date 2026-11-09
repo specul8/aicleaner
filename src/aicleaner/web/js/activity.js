@@ -129,8 +129,12 @@ function noticeReviews(sessions) {
     if (!unread.has(s.name)) unread.set(s.name, new Map());
     for (const r of fresh) unread.get(s.name).set(`${r.root}|${r.path}`, r);
     window.dispatchEvent(new CustomEvent('aicleaner:reviews', { detail: { session: s.name, reviews: fresh } }));
-    // Said even while the session is on screen: the file opens behind the tab in front, so this is the clue.
-    announce(`review:${s.name}`, 'green', `${s.name}: Claude has opened a file to review`, sessionHref(s.name));
+    // Said even while the session is on screen: the file opens behind the tab in front, so this is the clue. Its Open
+    // (the toast's, or the entry in the menu bar) brings that file's tab to the front - asked for by the click, never
+    // done to the page by itself (Brad, 2026-11-06).
+    const last = fresh[fresh.length - 1];
+    announce(`review:${s.name}`, 'green', `${s.name}: Claude has opened ${last.name} for you to review`,
+      `${sessionHref(s.name).replace(/\/chat$/, '')}/review/${encodeURIComponent(`${last.root}|${last.path}`)}`);
   }
 }
 

@@ -6,6 +6,7 @@
 // label - never a client id, which is plumbing for the filter.
 
 import { connected, getJSON, onConnection, postJSON, say, sayError, signedOut } from '../api.js';
+import { deviceName } from '../device.js';
 import { busyButton, h, iconButton, setChildren } from '../dom.js';
 import { folderPicker } from '../picker.js';
 import { pane } from '../panes.js';
@@ -22,6 +23,7 @@ import { begin, note as noteTiming } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { openSuggestTitles } from '../titlesdialog.js';
 import { attachImageReading, imageButton, isReadable, readInto, readingImages } from '../imagetext.js';
+import { attachVoice } from '../voice.js';
 import { attachments, pictureKind, readOnlyType } from '../pictures.js';
 import { codeEditor } from '../codeeditor.js';
 import { openConversationSearch } from '../convsearch.js';
@@ -38,6 +40,7 @@ import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, ne
 import { arrangeSheet } from '../sheet.js';
 import { mountPresets } from '../presets.js';
 import { scrollToChat } from '../chatscroll.js';
+import { smoothIntoView } from '../motion.js';
 
 const view = { stream: null, state: null, name: '', poll: null, editing: false, profiles: null,
   past: [], commands: null, slashRows: [], slashAt: 0, transition: false };
@@ -127,13 +130,25 @@ function turnStarts(log, kind) {
   return starts;
 }
 
-// The nearest start above the top of what is shown now, as a scroll position in the log; null when there is none.
-function previousStart(log, kind) {
+// The nearest start above (up) or below (down) the top of what is shown now, as a scroll position in the log; null
+// when there is none. Feature 162 (Brad, 2026-11-05): the buttons go both ways. Going down, the start at the top of
+// the view - the one just landed on, or the first one under Show earlier - is what is being read, so the next one
+// after it is the target; and a start the log cannot scroll to (the last ones, in view at the bottom) is none.
+const LAND_ABOVE_PX = 6;
+
+function turnStep(log, kind, direction) {
   const top = log.getBoundingClientRect().top;
+  const furthest = log.scrollHeight - log.clientHeight;
+  const reading = log.clientHeight / 4;
   let found = null;
+  let passedReading = false;
   for (const t of turnStarts(log, kind)) {
     const at = t.getBoundingClientRect().top - top + log.scrollTop;
-    if (at < log.scrollTop - 4) found = { at, turn: t };
+    if (direction === 'up' && at < log.scrollTop - 4) found = { at, turn: t };
+    if (direction === 'down' && at > log.scrollTop + 4) {
+      if (!passedReading && at - log.scrollTop < reading) { passedReading = true; continue; }   // the one being read
+      return Math.min(at - LAND_ABOVE_PX, furthest) > log.scrollTop + 1 ? { at, turn: t } : null;
+    }
   }
   return found;
 }
@@ -318,9 +333,9 @@ function clearEarlier(log) {
 // does. Calling that an error, as the page used to, was how a turn came to stop dead a few
 // seconds after the reader was told nothing had happened.
 const INTERRUPT_TEXT = {
-  interrupted: (event) => (event.late ? 'interrupted (the session was busy; it stopped when it next read its input)'
+  interrupted: (event) => (event.late ? 'interrupted (the AI session was busy; it stopped when it next read its input)'
     : 'interrupted'),
-  interrupt_pending: () => 'interrupt sent - the session is busy and will stop when it next reads its input',
+  interrupt_pending: () => 'interrupt sent - the AI session is busy and will stop when it next reads its input',
   interrupt_refused: (event) => `interrupt refused: ${event.error || 'no reason given'}`,
 };
 
@@ -1286,7 +1301,7 @@ async function renderTree(panel, name, roots, current, share) {
     const shareLabel = same(share, current) ? `${share} (this session)` : share;
     sections.push({ head: rootRow(shareLabel, share, 'share'), root: share });
   } else {
-    sections.push({ head: h('div', { class: 'tree-root share none' }, 'No OneDrive Share Location Configured') });
+    sections.push({ head: h('div', { class: 'tree-root share none' }, 'No Project Assets Folder Configured') });
   }
   const seen = share ? [share] : [];
   for (const root of roots) {
@@ -1314,7 +1329,7 @@ async function renderTree(panel, name, roots, current, share) {
   });
   setChildren(panel, ...head,
     ...sections.flatMap((section, i) => [section.head, bodies[i]]),
-    roots.length ? null : h('p', { class: 'muted' }, 'This project profile has no repo folders yet.'));
+    roots.length ? null : h('p', { class: 'muted' }, 'This project session has no repo folders yet.'));
   putBack();
   let moved = false;
   const watchScroll = () => { moved = true; };
@@ -1431,7 +1446,7 @@ function sessionList(state) {
   const runningNames = new Set(state.running || []);
   const active = profiles.filter((p) => runningNames.has(p.name));
   const picker = h('select', { id: 'session-pick', 'aria-label': PICK_PROMPT },
-    h('option', { value: '' }, profiles.length ? PICK_PROMPT : 'No project profiles yet'),
+    h('option', { value: '' }, profiles.length ? PICK_PROMPT : 'No project sessions yet'),
     ...profiles.map((p) => h('option', { value: p.name, selected: p.name === view.name ? true : null }, p.name)));
   // No Start beside the picker (the user, 2026-10-05). A project has one chat session at a time -
   // two Claude Codes in one working tree would commit over each other - and a Start here read as
@@ -1444,9 +1459,9 @@ function sessionList(state) {
         h('span', { class: 'active-sessions-label' }, 'Active Sessions:'),
         ...active.map((profile) => sessionRow(profile, state)))
       : h('p', { class: 'muted active-sessions empty' }, 'Nothing running. Pick a project, then press Start beside it.'),
-    profiles.length ? null : h('p', { class: 'muted' }, 'No project profiles yet. Add one with Edit project profiles.'),
+    profiles.length ? null : h('p', { class: 'muted' }, 'No project sessions yet. Add one with Edit project sessions.'),
     h('button', { type: 'button', id: 'session-edit-profiles', class: 'link' },
-      view.editing ? 'Close project profiles' : 'Edit project profiles'),
+      view.editing ? 'Close project sessions' : 'Edit project sessions'),
     // Importing a project from claude.ai (2026-10-16, item H): into the profile shown, or as a new client.
     h('button', { type: 'button', id: 'session-claude-import', class: 'link' },
       view.name ? 'Import from claude.ai into this session...' : 'Import from claude.ai...'),
@@ -1541,7 +1556,7 @@ function pastOptions(past, project, fromSelected = 0) {
   }
   const ordered = [...groups].sort((a, b) => (a.project === project ? -1 : b.project === project ? 1 : 0));
   return [...first, ...ordered.map((entry) =>
-    h('optgroup', { label: entry.outside ? `Not in this project profile yet: ${entry.project}` : entry.project },
+    h('optgroup', { label: entry.outside ? `Not in this project session yet: ${entry.project}` : entry.project },
       ...entry.sessions.map((row) =>
         h('option', { value: row.id, title: conversationTip(row),
                       dataset: { project: entry.project, outside: entry.outside ? '1' : null } },
@@ -1613,7 +1628,7 @@ function permissionCards(state) {
       }
       cards.push(h('div', { class: 'card warn', dataset: { permission: request.id } },
         h('h3', {}, `${name}: allow ${request.tool}?`),
-        profile.label && profile.label !== name ? h('p', { class: 'hint' }, `Client: ${profile.label}`) : null,
+        profile.label && profile.label !== name ? h('p', { class: 'hint' }, `Topic: ${profile.label}`) : null,
         h('pre', { class: 'mono' }, JSON.stringify(request.detail, null, 1)),
         h('div', { class: 'form-row' },
           h('button', { type: 'button', class: 'primary allow', dataset: { id: request.id } }, 'Allow'),
@@ -1630,9 +1645,23 @@ function permissionCards(state) {
 // What has been ticked and typed in each open question, by its request id (J5, Brad 2026-10-20: switching
 // to another session and back lost every answer - the card is drawn afresh each time). Kept for the life
 // of the page; the card puts it back whenever it is drawn again.
+// D226 (Brad, 2026-11-05): a restart of AI Cleaner (an update) lost them too - the page reloads, and the question can
+// come back under a new request id. So they are kept in this tab's storage as well, keyed by the session and the
+// questions themselves, not the request id; the newest few only.
 const questionDrafts = new Map();
+const DRAFT_STORE = 'aicleaner.questionDrafts';
+const DRAFTS_KEPT = 20;
 
-function saveDraft(card, id) {
+function draftKey(name, request) {
+  const questions = (request.detail || {}).questions || [];
+  return `${name}\n${questions.map((q) => q.question).join('\n')}`;
+}
+
+function storedDrafts() {
+  try { return JSON.parse(sessionStorage.getItem(DRAFT_STORE) || '[]'); } catch (e) { return []; }
+}
+
+function saveDraft(card, key) {
   const draft = {};
   for (const set of card.querySelectorAll('fieldset.question')) {
     draft[set.dataset.question] = {
@@ -1640,11 +1669,16 @@ function saveDraft(card, id) {
       other: set.querySelector('.other-answer').value,
     };
   }
-  questionDrafts.set(id, draft);
+  questionDrafts.set(key, draft);
+  try {
+    const kept = storedDrafts().filter(([k]) => k !== key);
+    kept.push([key, draft]);
+    sessionStorage.setItem(DRAFT_STORE, JSON.stringify(kept.slice(-DRAFTS_KEPT)));
+  } catch (e) { /* storage full or unavailable: the page's own copy still holds it */ }
 }
 
-function restoreDraft(card, id) {
-  const draft = questionDrafts.get(id);
+function restoreDraft(card, key) {
+  const draft = questionDrafts.get(key) || (storedDrafts().find(([k]) => k === key) || [])[1];
   if (!draft) return;
   for (const set of card.querySelectorAll('fieldset.question')) {
     const saved = draft[set.dataset.question];
@@ -1663,9 +1697,10 @@ function questionCard(name, request) {
     h('div', { class: 'form-row' },
       h('button', { type: 'button', class: 'primary answer-question', dataset: { id: request.id } }, 'Answer'),
       h('button', { type: 'button', class: 'deny', dataset: { id: request.id } }, 'Decline')));
-  restoreDraft(card, request.id);
-  card.addEventListener('change', () => saveDraft(card, request.id));
-  card.addEventListener('input', () => saveDraft(card, request.id));
+  const key = draftKey(name, request);
+  restoreDraft(card, key);
+  card.addEventListener('change', () => saveDraft(card, key));
+  card.addEventListener('input', () => saveDraft(card, key));
   return card;
 }
 
@@ -1720,7 +1755,7 @@ function foldersField(profile, notes, shareNow) {
   // The client's OneDrive share is always included, so it is not added here as well (DECISIONS 64).
   const bare = (path) => String(path || '').replace(/[\\/]+$/, '').toLowerCase();
   const refuse = (path) => (shareNow() && bare(path) === bare(shareNow())
-    ? 'That is the client\'s OneDrive share, which is always included - it does not need adding here.' : '');
+    ? 'That is the topic\'s project assets folder, which is always included - it does not need adding here.' : '');
   return h('div', { class: 'p-places' },
     h('label', { class: 'field' }, 'Folders added by hand (one per line)',
       area, folderPicker(area, { append: true, label: 'Add a folder', refuse })),
@@ -1781,7 +1816,7 @@ function homeField(values, workspace, row) {
   // Whether a workspace file decides the home, or (with none) the profile's first folder: the
   // Reset button and the "how" both say which (the user, 2026-10-05).
   const fromWorkspace = Boolean(workspace && (workspace.workspaces || []).length);
-  const derivedHow = fromWorkspace ? 'from workspace file' : 'first profile folder';
+  const derivedHow = fromWorkspace ? 'from workspace file' : 'first project session folder';
   const howOf = () => {
     if (home.overridden) return 'set by you';
     if (/no longer exists/.test(home.how || '')) return home.how;
@@ -1810,24 +1845,24 @@ function homeField(values, workspace, row) {
       target.value = files.length ? files[0] : folder;
       target.dispatchEvent(new Event('input', { bubbles: true }));
       shown.textContent = files.length ? `(from ${lastSegment(files[0])})` : folder;
-      how.textContent = files.length ? ' (from workspace file - save the project profile to use it)'
-        : ' (first profile folder - save the project profile to use it)';
+      how.textContent = files.length ? ' (from workspace file - save the project session to use it)'
+        : ' (first project session folder - save the project session to use it)';
       if (files.length > 1) say(`${lastSegment(folder)} holds ${files.length} workspace files; ${lastSegment(files[0])} was added. Add the others under Workspace files if they belong.`, 'info');
       row.dispatchEvent(new Event('hints-stale'));
       return;
     }
     was.value = home.derived || '';
     shown.textContent = override.value;
-    how.textContent = ' (set by you - save the project profile to use it)';
+    how.textContent = ' (set by you - save the project session to use it)';
     reset.hidden = false;
   });
   const reset = h('button', { type: 'button', class: 'p-home-reset', hidden: !home.overridden },
-    fromWorkspace ? 'Set to 1st workspace\'s Home' : 'Set to 1st Profile folder');
+    fromWorkspace ? 'Set to 1st workspace\'s Home' : 'Set to 1st project session folder');
   reset.addEventListener('click', () => {
     override.value = '';
     was.value = '';
     shown.textContent = home.derived || '(none yet)';
-    how.textContent = ` (${derivedHow} - save the project profile to use it)`;
+    how.textContent = ` (${derivedHow} - save the project session to use it)`;
     reset.hidden = true;
     row.dispatchEvent(new Event('hints-stale'));
   });
@@ -1875,7 +1910,7 @@ function createOffer(name, workspace, row) {
   busyButton(yes, async () => {
     try {
       await postJSON('/api/session/workspace-create', { name });
-      say(`${create.path} created and added to the project profile.`, 'ok');
+      say(`${create.path} created and added to the project session.`, 'ok');
       const area = row.querySelector('.p-workspaces');
       const have = linesOf(area).filter((f) => f.toLowerCase() !== create.path.toLowerCase());
       area.value = [create.path, ...have].join('\n');
@@ -1996,7 +2031,7 @@ async function trustGate(profile) {
     }
     const dialog = h('dialog', { id: 'trust-dialog', class: 'sheet trust-dialog', 'aria-label': 'Trusted folders' },
       h('h2', {}, 'Claude Code does not trust all of these folders yet'),
-      h('p', {}, 'Sessions of this profile work in these folders. Where a list does not cover one, Claude Code asks '
+      h('p', {}, 'This project session works in these folders. Where a list does not cover one, Claude Code asks '
         + 'about it again, or auto mode treats work there as unfamiliar. Adding writes your Claude Code settings '
         + '(settings.json and .claude.json), each backed up first.'),
       grid,
@@ -2053,7 +2088,7 @@ function setupPanel(name, workspace, row) {
   return h('div', { class: 'callout warn setup-panel' },
     h('strong', {}, 'Project setup'),
     h('ul', {}, ...rows),
-    name ? null : h('p', { class: 'hint' }, 'Save the profile first to use the fixes.'),
+    name ? null : h('p', { class: 'hint' }, 'Save the project session first to use the fixes.'),
     h('p', { class: 'hint' }, 'These never stop you saving.'));
 }
 
@@ -2103,7 +2138,7 @@ function addNewWorkspaceFolders(row, workspace) {
   }
   if (!added.length) return;
   area.value = [...have, ...added].join('\n');
-  say(`${added.length} folder(s) from the workspace file added. Save the project profile to keep them.`, 'ok');
+  say(`${added.length} folder(s) from the workspace file added. Save the project session to keep them.`, 'ok');
   area.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
@@ -2116,8 +2151,8 @@ function lastSegment(path) {
 function shareNote(workspace) {
   if (!workspace || !workspace.share_in_folders) return [];
   return [h('p', { class: 'hint p-share-note' }, workspace.share_is_home
-    ? `${workspace.share} is also the client's OneDrive share. It stays in this list: it is where sessions start.`
-    : `${workspace.share} is the client's OneDrive share, which is always included. It will be removed from this list when you save.`)];
+    ? `${workspace.share} is also the topic's project assets folder. It stays in this list: it is where sessions start.`
+    : `${workspace.share} is the topic's project assets folder, which is always included. It will be removed from this list when you save.`)];
 }
 
 function workspaceNotes(area, workspace) {
@@ -2132,11 +2167,11 @@ function workspaceNotes(area, workspace) {
       const added = gap.folders.filter((f) => !lower.has(String(f).toLowerCase()));
       area.value = [...have, ...added].join('\n');
       add.disabled = true;
-      say(`${added.length} folder(s) added. Save the project profile to keep them.`, 'ok');
+      say(`${added.length} folder(s) added. Save the project session to keep them.`, 'ok');
       area.dispatchEvent(new Event('input', { bubbles: true }));
     });
     notes.push(h('p', { class: 'hint' },
-      `${gap.folders.length} folder(s) in ${gap.workspace} are not in this project profile: `,
+      `${gap.folders.length} folder(s) in ${gap.workspace} are not in this project session: `,
       h('span', { class: 'mono' }, gap.folders.map(lastSegment).join(', ')),
       ' ', add));
   }
@@ -2196,7 +2231,7 @@ function watchHints(row) {
   row.addEventListener('hints-stale', again);
 }
 
-const RUNNING_LOCK = 'This project profile\'s session is running. Stop the session to rename or delete it.';
+const RUNNING_LOCK = 'This project session is running. Stop it to rename or delete it.';
 const NEW_CLIENT = '__new_client__';         // the client list's "Create new client..." (D197); never saved
 
 function profileRow(profile, clients, workspace, running) {
@@ -2205,7 +2240,7 @@ function profileRow(profile, clients, workspace, running) {
     h('option', { value: '' }, 'None (Global only)'),
     ...clients.map((c) => h('option', { value: c.id, selected: c.id === profile.client ? true : null }, c.label)),
     // D197: a client that does not exist yet, made here; the session saves, and starts once it has a name.
-    h('option', { value: NEW_CLIENT }, 'Create new client...'));
+    h('option', { value: NEW_CLIENT }, 'Create new topic...'));
   // The client's OneDrive share (D99, moved from the Clients page): per client, kept on this
   // machine. Saved on its own, so it follows the drop-down rather than the profile's Save.
   const share = shareSlot(profile.client, labelOf(profile.client));
@@ -2239,7 +2274,7 @@ function profileRow(profile, clients, workspace, running) {
   const row = h('fieldset', { class: 'profile-row', dataset: { profile: 'row', was: profile.name || '' } },
     h('div', { class: 'p-grid' },
       h('label', { class: 'field', title: running ? RUNNING_LOCK : null }, 'Name', name),
-      h('label', { class: 'field' }, 'Client', client),
+      h('label', { class: 'field' }, 'Topic', client),
       // A list, offered rather than enforced (feature 45). A name that does not exist used to be
       // accepted here and fail when the session started, which is the worst moment to find out.
       // Still an <input>, deliberately: the names come from the API using the key this machine
@@ -2329,7 +2364,7 @@ function activeRow() {
 }
 
 function tabLabel(row) {
-  return row.querySelector('.p-name').value.trim() || 'New project profile';
+  return row.querySelector('.p-name').value.trim() || 'New project session';
 }
 
 // Draws the tab strip from the rows, and shows the one chosen (by index; the first when none is).
@@ -2343,15 +2378,15 @@ function showTab(index) {
     'aria-selected': String(i === chosen), dataset: { index: String(i) },
   }, row.running ? h('span', { class: 'dot', title: 'Running' }) : null, tabLabel(row))),
   // A new project profile from the tab strip itself (the user, 2026-10-05).
-  h('button', { type: 'button', class: 'p-tab p-tab-add', title: 'Add a project profile',
-    'aria-label': 'Add a project profile' }, '+'));
+  h('button', { type: 'button', class: 'p-tab p-tab-add', title: 'Add a project session',
+    'aria-label': 'Add a project session' }, '+'));
   rows.forEach((row, i) => { row.hidden = i !== chosen; });
   const active = rows[chosen];
   view.profileTab = active ? active.dataset.was : '';
   const remove = document.getElementById('profile-delete');
   if (remove) {
     remove.disabled = !active || active.running;
-    remove.title = active && active.running ? RUNNING_LOCK : 'Delete this project profile';
+    remove.title = active && active.running ? RUNNING_LOCK : 'Delete this project session';
   }
 }
 
@@ -2379,16 +2414,16 @@ function profileEditor(data) {
   }).catch(() => {});      // the field works without them; that is the whole design
   return h('section', { class: 'card', id: 'session-profiles' },
     known, why,
-    h('h3', {}, 'Project profiles'),
+    h('h3', {}, 'Project sessions'),
     h('p', { class: 'hint' },
-      `A project profile is one engagement: its client is what the session is labelled and logged as, and its folders are what the file tree shows. Filtering is the same in every session. Stored in ${data.path}.`),
+      `A project session is one engagement: its topic is what it is labelled and logged as, and its folders are what the file tree shows. Filtering is the same in every session. Stored in ${data.path}.`),
     data.problem ? h('p', { class: 'chip warn' }, data.problem) : null,
     h('div', { id: 'profile-tabs', class: 'p-tabs', role: 'tablist' }),
     rows,
     h('div', { class: 'form-row p-actions' },
-      h('button', { type: 'button', id: 'profile-add' }, 'Add a project profile'),
+      h('button', { type: 'button', id: 'profile-add' }, 'Add a project session'),
       h('span', { class: 'grow' }),
-      iconButton('trash', 'Delete this project profile', { id: 'profile-delete', class: 'icon p-remove' }),
+      iconButton('trash', 'Delete this project session', { id: 'profile-delete', class: 'icon p-remove' }),
       h('button', { type: 'button', id: 'profile-save', class: 'primary' }, 'Save'),
       h('button', { type: 'button', id: 'profile-close' }, 'Close')));
 }
@@ -2542,6 +2577,7 @@ export async function render(main, context = {}) {
   const named = context.route && context.route.id;
   const asked = named || rememberedSession();
   const toChat = Boolean(context.route && context.route.chat);
+  const toReview = (context.route && context.route.review) || null;     // a review notice's Open (2026-11-06)
   let state;
   try {
     state = await fetchSessionState(asked);
@@ -2580,7 +2616,7 @@ export async function render(main, context = {}) {
   // Every conversation you or AI Cleaner started, not just the newest 25 (the user, 2026-10-17). Ones a
   // program started are never listed.
   const showAll = h('label', { class: 'check hint', id: 'session-show-all',
-    title: 'List every conversation in this profile, not just the newest 25 (ones a program started are never listed)' },
+    title: 'List every conversation in this project session, not just the newest 25 (ones a program started are never listed)' },
     h('input', { type: 'checkbox' }), ' Show all conversations', h('span', { id: 'session-all-note', class: 'muted' }, ''));
   // What "all" added, so ticking it visibly does something even when it finds nothing (D86).
   const allNote = showAll.querySelector('#session-all-note');
@@ -2663,21 +2699,34 @@ export async function render(main, context = {}) {
   // All three always shown, greyed out when there is nothing to go to (Brad, 2026-11-04).
   const toLatest = h('button', { type: 'button', id: 'session-latest', class: 'to-latest', disabled: true },
     'View latest');
-  // Back to the previous prompt or reply from where the transcript is (feature 156), beside View latest.
-  const toPrompt = h('button', { type: 'button', id: 'session-prev-prompt', class: 'to-previous' }, 'View previous prompt');
-  const toReply = h('button', { type: 'button', id: 'session-prev-reply', class: 'to-previous' }, 'View previous response');
+  // To the previous or next prompt or reply from where the transcript is (feature 156), beside View latest. Each is
+  // one button in two halves (feature 162, Brad, 2026-11-05): "^ View" goes up, "Prompt v" goes down; the half
+  // pressed lights up and fades, so it shows which way was taken.
+  const half = (id, direction, label, name) => h('button', {
+    type: 'button', id, class: `to-half ${direction}`, 'aria-label': name, title: name,
+  }, ...(direction === 'up'
+    ? [h('span', { class: 'to-arrow', 'aria-hidden': 'true' }), label]
+    : [label, h('span', { class: 'to-arrow', 'aria-hidden': 'true' })]));
+  const toPrompt = half('session-prev-prompt', 'up', 'View', 'Previous prompt');
+  const toNextPrompt = half('session-next-prompt', 'down', 'Prompt', 'Next prompt');
+  const toReply = half('session-prev-reply', 'up', 'View', 'Previous response');
+  const toNextReply = half('session-next-reply', 'down', 'Response', 'Next response');
+  const steps = [[toPrompt, 'prompt', 'up'], [toNextPrompt, 'prompt', 'down'], [toReply, 'reply', 'up'], [toNextReply, 'reply', 'down']];
   const previousButtons = () => {
-    toPrompt.disabled = previousStart(log, 'prompt') === null;
-    toReply.disabled = previousStart(log, 'reply') === null;
+    for (const [button, kind, direction] of steps) button.disabled = turnStep(log, kind, direction) === null;
   };
-  for (const [button, kind] of [[toPrompt, 'prompt'], [toReply, 'reply']]) {
+  for (const [button, kind, direction] of steps) {
     button.addEventListener('click', () => {
-      const found = previousStart(log, kind);
+      button.classList.remove('tapped');
+      void button.offsetWidth;            // restart the light when the same half is pressed again
+      button.classList.add('tapped');
+      const found = turnStep(log, kind, direction);
       if (found === null) return;
-      log.scrollTop = Math.max(0, found.at - 6);
+      log.scrollTop = Math.max(0, found.at - LAND_ABOVE_PX);
       pulseTurn(found.turn);
       previousButtons();
     });
+    button.addEventListener('animationend', () => button.classList.remove('tapped'));
   }
   log.addEventListener('scroll', previousButtons);
   new MutationObserver(previousButtons).observe(log, { childList: true });
@@ -2811,11 +2860,11 @@ export async function render(main, context = {}) {
     // "no client", as did any profile with no explicit label, since the server serves
     // `label or name`. The label still decides the wording; it no longer decides the answer.
     clientChip.textContent = !profile.client
-      ? 'no client'
-      : (profile.label && profile.label !== profile.name ? `for ${profile.label}` : 'client set');
+      ? 'no topic'
+      : (profile.label && profile.label !== profile.name ? `for ${profile.label}` : 'topic set');
     // A running session shows where it did start; a stopped one, where the next one will.
     const homeFolder = session.running && session.project ? session.project : ((profile.home || {}).folder || '');
-    homeShown.textContent = homeFolder || '(no folder yet - add one in Edit project profiles)';
+    homeShown.textContent = homeFolder || '(no folder yet - add one in Edit project sessions)';
     homeShown.title = homeFolder;
     const drawing = begin('paint.transcript', { events: (session.events || []).length });
     paintLog(log, session.events, view.name);
@@ -2880,7 +2929,7 @@ export async function render(main, context = {}) {
         note.hidden = !blocked;
         const client = (blocked.match(/#\/clients\/([^)\s]+)/) || [])[1] || '';
         note.replaceChildren(blocked.replace(/ \(#\/clients\/[^)]*\)/, ''), ' ',
-          client ? h('a', { href: `#/clients/${client}` }, 'Open the client') : '');
+          client ? h('a', { href: `#/clients/${client}` }, 'Open the topic') : '');
       }
     }
     // Start chatting only means something while the session is running (DECISIONS 35).
@@ -3197,21 +3246,21 @@ export async function render(main, context = {}) {
     if (started === view.name) { view.resumeChosen = started; paint(); }
     const superseded = () => view.startFrom.has(started) && view.startFrom.get(started).job !== job;
     const titles = chosen.map((r) => r.label || r.title);
-    setConsolidation(started, h('span', {}, `Summarising ${chosen.length} conversations for a new chat...`));
+    setConsolidation(started, h('span', {}, `Summarising ${chosen.length} conversations for a new conversation...`));
     const runningThere = () => Boolean(((view.state && view.state.sessions) || {})[started] && view.state.sessions[started].running);
     const poll = async () => {
       if (superseded()) return;
       let state;
       try { state = await getJSON(`/api/session/consolidate?job=${encodeURIComponent(job)}`); }
       catch (error) {
-        setConsolidation(started, h('span', {}, `Starting a new chat stopped: ${error.message || error}`));
+        setConsolidation(started, h('span', {}, `Starting a new conversation stopped: ${error.message || error}`));
         view.startFrom.delete(started);
         if (started === view.name) paint();
         return;
       }
       if (superseded()) return;
       if (state.status !== 'done') {
-        setConsolidation(started, h('span', {}, `Summarising ${Math.min(state.done + 1, state.total)} of ${state.total} for a new chat...`));
+        setConsolidation(started, h('span', {}, `Summarising ${Math.min(state.done + 1, state.total)} of ${state.total} for a new conversation...`));
         setTimeout(poll, 2000);
         return;
       }
@@ -3232,7 +3281,7 @@ export async function render(main, context = {}) {
       });
       keep.addEventListener('click', () => endConsolidation(started));
       setConsolidation(started,
-        h('p', {}, h('strong', {}, 'The new chat\'s brief is in the prompt box. '), 'Read or edit it, then press Start and Send. Made from: ',
+        h('p', {}, h('strong', {}, 'The new conversation\'s brief is in the prompt box. '), 'Read or edit it, then press Start and Send. Made from: ',
           titles.join('; '), '.'),
         state.file ? h('p', { class: 'hint' }, 'The full summaries, and the ids of the conversations they came from, are in ',
           h('span', { class: 'mono' }, state.file), '.') : null,
@@ -3246,15 +3295,15 @@ export async function render(main, context = {}) {
   // Named for what it does (the user, 2026-10-17): the originals are summarised into a NEW chat.
   const consolidateAction = {
     verb: 'Consolidate', min: 2, run: consolidateConversations,
-    heading: 'Start a new chat from existing chats', label: 'Start from these',
+    heading: 'Start a new conversation from existing conversations', label: 'Start from these',
     // The user's own wording, 2026-10-17.
     explain: [
       h('ul', {},
-        h('li', {}, 'Each selected chat is summarised by the model through AI Cleaner.'),
+        h('li', {}, 'Each selected conversation is summarised by the model through AI Cleaner.'),
         h('li', {}, 'A short, high-level summary goes into the prompt box for you to review.'),
         h('li', {}, 'The full summaries are written to Markdown files in the project\'s home folder (consolidations\\) '
           + 'and referenced in the prompt.'),
-        h('li', {}, 'Original chats are not changed, but can be deleted from within the new session once satisfied.'))],
+        h('li', {}, 'Original conversations are not changed, but can be deleted from within the new session once satisfied.'))],
   };
   // The search dialog with ticks: consolidate (item F) by default, or delete several (2026-10-17).
   // With the list: every conversation of the profile, not only the 25 newest per folder that Continue
@@ -3274,7 +3323,7 @@ export async function render(main, context = {}) {
     openConversationSearch({ name: () => view.name, choose: chooseConversation, open: openFromSearch, openLabel, action, initial });
   };
   const consolidateButton = h('button', { type: 'button', id: 'session-consolidate', class: 'conv-action',
-    title: 'Start a new conversation from summaries of several earlier ones' }, 'Start a new chat from existing chats...');
+    title: 'Start a new conversation from summaries of several earlier ones' }, 'New conversation from existing ones...');
   // Opened again, it starts from the chats chosen last time, so changing the set is a tick or two.
   consolidateButton.addEventListener('click', async (event) => {
     event.preventDefault();
@@ -3327,7 +3376,7 @@ export async function render(main, context = {}) {
     title: 'Choose conversations for the model to title: every conversation listed, the unnamed ones ticked to start with' }, 'Suggest titles');
   // Move to another project session (J3, Brad 2026-10-20): from Casual chats to a client, mostly.
   const moveButton = h('button', { type: 'button', id: 'session-move-conversation', class: 'conv-action',
-    title: 'Move a conversation to another project session - from Casual chats to a client, say' }, 'Move conversation');
+    title: 'Move a conversation to another project session - from Casual chats to a topic, say' }, 'Move conversation');
   const chosenRow = () => (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id === resume.value);
   moveButton.addEventListener('click', async (event) => {
     event.preventDefault();
@@ -3658,6 +3707,8 @@ export async function render(main, context = {}) {
   attachImageReading(firstBox, { sessionName: () => view.name, roots: sessionRoots, say, chip: offerRead, format: imageSnippet,
     take: takeFile });
   const readButton = imageButton((files) => { for (const file of files) takeFile(file); });
+  // f166: the Microphone, between Code and Upload; Space talks while it is on.
+  const voice = attachVoice(prompt.element, { isEmpty: () => !prompt.value.trim() });
   // The row made room for the AI service drop-down (the user, 2026-10-18): Feedback is the menu's
   // item and autocorrect the Settings card's switch; Insert code snippet is </>.
   const codeSlot = h('div', { id: 'session-code-editor', class: 'code-editor', hidden: true });
@@ -3697,6 +3748,7 @@ export async function render(main, context = {}) {
     h('div', { class: 'form-row' },
       h('button', { type: 'button', id: 'session-send', class: 'primary' }, 'Send'),
       insertCodeButton,
+      voice.button,
       readButton,
       agentPick,
       // Beside Send, because that is where the eye already is when waiting for a reply,
@@ -3742,7 +3794,10 @@ export async function render(main, context = {}) {
   // File tabs over the transcript (DECISIONS 50): the conversation is the first tab; a file tab
   // shows in the transcript's place while the prompt stays below it.
   const stream = h('div', { class: 'session-stream' }, log,
-    h('div', { class: 'session-underlog' }, doing, h('span', { class: 'to-group' }, toPrompt, toReply, toLatest)));
+    h('div', { class: 'session-underlog' }, doing, h('span', { class: 'to-group' },
+      h('span', { class: 'to-split', role: 'group', 'aria-label': 'Prompts' }, toPrompt, toNextPrompt),
+      h('span', { class: 'to-split', role: 'group', 'aria-label': 'Responses' }, toReply, toNextReply),
+      toLatest)));
   const tabStrip = h('div', { id: 'file-tabs', class: 'file-tabs', role: 'tablist', hidden: true });
   const filePane = h('div', { id: 'file-pane', class: 'file-pane', hidden: true });
   // The code editor in the prompt box's place, and the ways into it (feature 116).
@@ -3888,7 +3943,7 @@ export async function render(main, context = {}) {
   setChildren(main,
     h('h1', {}, 'Project Sessions'),
     h('p', { class: 'muted' },
-      'Claude Code runs on this machine and its traffic goes back through the proxy, so what you type here is filtered like anything else. Naming a session says whose work it is, not whose names may travel: every client\'s names are replaced in every session.'),
+      'Claude Code runs on this machine and its traffic goes back through the proxy, so what you type here is filtered like anything else. Naming a session says whose work it is, not whose names may travel: every topic\'s real names are replaced in every session.'),
     state.available ? null : h('p', { class: 'chip warn' }, 'The Claude Code CLI was not found on this machine.'),
     // The tree moves out of the transcript's column and under the session list (42).
     //
@@ -3951,7 +4006,7 @@ export async function render(main, context = {}) {
     }
     const sentFrom = view.name;
     try {
-      await postJSON('/api/session/prompt', { name: sentFrom, text, ...(images.length ? { images } : {}) });
+      await postJSON('/api/session/prompt', { name: sentFrom, text, device: deviceName(), ...(images.length ? { images } : {}) });
       if (view.name === sentFrom) { setPrompt(''); if (view.autocorrect) view.autocorrect.clear(); }
       if (images.length) pictures.clear(sentFrom);
       saveDraft(sentFrom);
@@ -4034,9 +4089,9 @@ export async function render(main, context = {}) {
     try {
       const answer = await postJSON('/api/session/interrupt', { name: view.name });
       if (answer && answer.state === 'pending') {
-        say('Interrupt sent. The session is busy and will stop when it next reads its input.', 'info');
+        say('Interrupt sent. The AI session is busy and will stop when it next reads its input.', 'info');
       } else {
-        say('Stopped this turn. The session is still running.', 'ok');
+        say('Stopped this turn. The AI session is still running.', 'ok');
       }
       await refresh();
     } catch (error) {
@@ -4134,6 +4189,15 @@ export async function render(main, context = {}) {
       scrollToChat();
       if (!box.disabled) box.focus({ preventScroll: true });
     });
+  }
+  // Asked for a file to review - the notice's Open: its tab in front, in Preview, and the file panel in view. On a
+  // phone the files sit behind the rail, which is opened for it.
+  if (toReview && view.name) {
+    tabs.showReview(view.name, toReview).then((found) => {
+      if (!found) return;
+      if (window.matchMedia(PHONE).matches && !band.classList.contains('rail-open')) setFilesOpen(true, false);
+      requestAnimationFrame(() => smoothIntoView(filePane, 'start'));
+    }).catch(sayError);
   }
   // Another session's question must not wait for the selected session to say something, so the
   // page asks periodically as well as listening to the stream it is watching.
@@ -4270,7 +4334,7 @@ export async function render(main, context = {}) {
       } catch (error) { sayError(error); return; }
       try {
         await commit(was ? saved.map((p) => (p.name === was ? mine : p)) : [...saved, mine],
-          `Project profile ${mine.name} saved.`);
+          `Project session ${mine.name} saved.`);
         active.dataset.was = mine.name;
         rebase(active);                 // saved: nothing to lose on leaving this tab now (D98)
         hintsFor(active, (view.profiles.workspace || {})[mine.name] || null);
@@ -4294,7 +4358,7 @@ export async function render(main, context = {}) {
       for (const ask of remove.querySelectorAll('.p-delete-ask')) ask.remove();
       const index = profileRows().indexOf(active);
       try {
-        if (was) await commit(saved.filter((p) => p.name !== was), `Project profile ${was} deleted.`);
+        if (was) await commit(saved.filter((p) => p.name !== was), `Project session ${was} deleted.`);
         forget(active);
         active.remove();
         showTab(Math.max(0, index - 1));

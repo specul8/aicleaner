@@ -15,8 +15,8 @@ import { arrangeSheet } from './sheet.js';
 // 2026-10-20) - with New folder to make one there; with no root folders yet, a link to the setting instead.
 export function casualFolderField(onSaved, saveLabel = 'Save the folder') {
   const input = h('input', { type: 'text', name: 'casual-folder', class: 'wide', autocomplete: 'off', readonly: true,
-    placeholder: 'Browse to a folder inside your root folders', 'aria-label': 'Folder for casual chats' });
-  const browse = folderPicker(input, { label: 'Browse', title: 'A folder for casual chats', firstRoot: true,
+    placeholder: 'Browse to a folder inside your root folders', 'aria-label': 'Folder for casual conversations' });
+  const browse = folderPicker(input, { label: 'Browse', title: 'A folder for casual conversations', firstRoot: true,
     chooseLabel: 'Use this folder' });
   const offers = h('div', { class: 'form-row casual-offers' });
   const note = h('p', { class: 'hint casual-note' });
@@ -62,10 +62,10 @@ function askForFolder() {
     let done = false;
     const field = casualFolderField(async () => { done = true; close(); resolve(true); }, 'Save and start');
     const cancel = h('button', { type: 'button' }, 'Cancel');
-    const dialog = h('dialog', { id: 'casual-folder', class: 'sheet casual-dialog', 'aria-label': 'A folder for casual chats' },
-      h('h2', {}, 'A folder for casual chats'),
-      h('p', { class: 'hint' }, 'Chats that belong to no client or project keep their files here. A OneDrive or Google Drive '
-        + 'folder is synced, so what a chat makes is on your other devices too.'),
+    const dialog = h('dialog', { id: 'casual-folder', class: 'sheet casual-dialog', 'aria-label': 'A folder for casual conversations' },
+      h('h2', {}, 'A folder for casual conversations'),
+      h('p', { class: 'hint' }, 'Conversations that belong to no topic or project keep their files here. A OneDrive or Google Drive '
+        + 'folder is synced, so what a conversation makes is on your other devices too.'),
       field.element,
       h('div', { class: 'fb-footer' }, cancel));
     const close = () => { dialog.close(); dialog.remove(); if (!done) resolve(false); };
@@ -92,7 +92,7 @@ export async function chatNow() {
       if (!(await askForFolder())) return;
       answer = await postJSON('/api/session/chat-now', {});
     }
-    say('A new casual chat - ask away.', 'ok');
+    say('A new casual conversation - ask away.', 'ok');
     openSession(answer.name);
   } catch (error) {
     sayError(error);

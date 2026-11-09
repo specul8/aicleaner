@@ -11,12 +11,13 @@ import { scanBlock } from './clientscan.js';
 import { heldCallout, keySection } from './clientkeys.js';
 import { track } from '../unsaved.js';
 import { folderPicker } from '../picker.js';
+import { smoothIntoView } from '../motion.js';
 
 // Quotes and backslashes are fine (escaped where JSON needs it); control characters never are.
 const FORBIDDEN = /[\u0000-\u001f]/;
 const NOT_YET = 'Control characters are not allowed.';
 const LOCKED = 'Also in Global; remove it from Global to change it here.';
-const GLOBAL_DESC = 'yours alone: your employer and vendors you use; applies to every client; tokens Org00; stored with your install, never shared';
+const GLOBAL_DESC = 'yours alone: your employer and vendors you use; applies to every topic; tokens Org00; stored with your install, never shared';
 
 const expanded = new Set();
 const view = { main: null, ctx: null };
@@ -69,7 +70,7 @@ function paintHeader(section, row) {
   toggle.replaceChildren(...[icon('chevron'), h('span', { class: 'name' }, displayName(row)),
     row.id === 'global' ? h('span', { class: 'desc' }, GLOBAL_DESC) : null,
     ...stateChips(row),
-    h('span', { class: 'count' }, `${row.entries} ${row.entries === 1 ? 'entry' : 'entries'}`)].filter(Boolean));
+    h('span', { class: 'count' }, `${row.entries} ${row.entries === 1 ? 'term' : 'terms'}`)].filter(Boolean));
   toggle.querySelector('svg').classList.add('chev');
   section.className = `client ${levelClass(row)}`.trim();
 }
@@ -108,19 +109,19 @@ function problemCallout(row, clientView) {
   if (row.state.includes('broken')) {
     parts.push(h('div', { class: 'callout bad' }, h('b', {}, `${file} is invalid and there is no good copy on this machine. `),
       'AI communication is stopped until it is fixed.',
-      err && err.kind === 'rule' && err.index !== undefined ? ` Row ${err.index + 1}: ${err.message}. Edit or delete the highlighted row.` : ''));
+      err && err.kind === 'rule' && err.index !== undefined ? ` Term ${err.index + 1}: ${err.message}. Edit or delete the highlighted term.` : ''));
   } else if (row.state.includes('missing') && err) {
-    parts.push(h('div', { class: 'callout bad' }, h('b', {}, 'This client\'s file is missing. '),
+    parts.push(h('div', { class: 'callout bad' }, h('b', {}, 'This topic file is missing. '),
       `${err.message} Its names are still replaced, from the version of ${since}.`));
   } else if (row.state.includes('fallback') && err) {
     parts.push(h('div', { class: 'callout' }, h('b', {}, `An edit to ${file} was rejected. `),
       err.kind === 'rule' && err.index !== undefined
-        ? `Row ${err.index + 1}: ${err.message}. Using the version from ${since} until it is fixed: edit the highlighted row, or add a valid entry and delete it.`
+        ? `Term ${err.index + 1}: ${err.message}. Using the version from ${since} until it is fixed: edit the highlighted term, or add a valid term and delete it.`
         : `${err.message}. Using the version from ${since} until it is fixed.`));
   }
   if (row.state.includes('conflict-copy')) {
     parts.push(h('div', { class: 'callout bad' }, h('b', {}, 'A conflicting copy of this file was found: '),
-      `${(row.conflicts || []).join(', ')}. With the client key on this machine, a copy signed with it is merged in on its own; `
+      `${(row.conflicts || []).join(', ')}. With the topic key on this machine, a copy signed with it is merged in on its own; `
       + 'this one is not signed with it (or there is no key here), so it is ignored. Compare it with the file, then delete it.'));
   }
   if (row.state.includes('hand-edited')) {
@@ -156,14 +157,14 @@ function rawView(raw, row, cid) {
   // of the broken file itself, so it keeps this afternoon's work that the last-good copy predates
   // - and it is the only answer at all on a machine with no good copy (feature 13).
   const salvage = h('button', { type: 'button', class: canRestore ? 'salvage' : 'primary salvage' },
-    icon('patch'), 'Keep the valid entries');
+    icon('patch'), 'Keep the valid terms');
   salvage.addEventListener('click', async () => {
     try {
       const answer = await postJSON(`/api/clients/${encodeURIComponent(cid)}/salvage`, {});
       const lost = answer.dropped.length
         ? ` ${answer.dropped.length} could be read but not used: ${answer.dropped.join(', ')}.`
         : '';
-      say(`Rebuilt ${raw.file} from ${answer.forms} entries.${lost} The broken file is kept at ${answer.kept}.`,
+      say(`Rebuilt ${raw.file} from ${answer.forms} terms.${lost} The broken file is kept at ${answer.kept}.`,
           answer.dropped.length ? 'warn' : 'ok');
       await reloadClient(cid);
     } catch (error) {
@@ -171,8 +172,8 @@ function rawView(raw, row, cid) {
     }
   });
   const hint = h('p', { class: 'hint' }, canRestore
-    ? 'Restore goes back to the last good copy, losing anything added since. Keep the valid entries rebuilds from this file, losing only what cannot be read.'
-    : 'There is no good copy of this file on this machine. Keep the valid entries rebuilds from what is still readable; anything else needs a text editor.');
+    ? 'Restore goes back to the last good copy, losing anything added since. Keep the valid terms rebuilds from this file, losing only what cannot be read.'
+    : 'There is no good copy of this file on this machine. Keep the valid terms rebuilds from what is still readable; anything else needs a text editor.');
   const where = errLine ? ` (line ${errLine}, column ${fileError.column})` : '';
   return h('div', { class: 'callout bad' }, h('b', {}, `${raw.file} is not valid JSON${where}. `),
     fileError ? fileError.message : '', pre,
@@ -225,7 +226,7 @@ function seenDetail(form) {
   const with_ = Object.entries(seen.seen_with || {});
   if (with_.length) lines.push(`Alongside: ${with_.map(([c, n]) => `${c} (${n})`).join(', ')}`);
   if ((seen.notes || []).length) lines.push(...seen.notes);
-  if (lines.length === 1 && !seen.added) lines.push('No detail was recorded for this entry.');
+  if (lines.length === 1 && !seen.added) lines.push('No detail was recorded for this term.');
   return lines.join('\n');
 }
 
@@ -257,7 +258,7 @@ function matchWhy(rule) {
     const side = m.side === 'preceded_by' ? 'after' : 'before';
     return `Replaced only where it comes ${side} one of: ${m.words}. Still detected everywhere.`;
   }
-  return 'This entry has a matching rule.';
+  return 'This term has a matching rule.';
 }
 
 // "Whole word only" (the checkbox beside the name): matched only where the name is the entire word,
@@ -353,10 +354,10 @@ function entryRow(cid, form, reason, readOnly) {
     actions.replaceChildren(h('div', { class: 'actions-wrap' },
       iconButton('edit', `Edit ${form.real}`, { class: 'icon edit' }),
       clientOnly ? iconButton('global', `Copy ${form.real} to Global`, { class: 'icon copy-global' }) : null,
-      clientOnly && moveTargets(cid).length ? iconButton('move', `Move ${form.real} to another client`, { class: 'icon move' }) : null,
+      clientOnly && moveTargets(cid).length ? iconButton('move', `Move ${form.real} to another topic`, { class: 'icon move' }) : null,
       // The reverse of Copy to Global, offered only on Global's own rows: give it to one client.
       cid === 'global' && !reason && moveTargets(cid).length
-        ? iconButton('give', `Give ${form.real} to one client`, { class: 'icon to-client' }) : null,
+        ? iconButton('give', `Give ${form.real} to one topic`, { class: 'icon to-client' }) : null,
       reason ? null : iconButton('ignore', `Ignore ${form.real} instead of tokenising it`, { class: 'icon to-ignore' }),
       iconButton('trash', `Delete ${form.real}`, { class: 'icon danger delete' })));
     return null;
@@ -389,7 +390,7 @@ function entryRow(cid, form, reason, readOnly) {
     // form, so setting one here can never reduce what the filter finds - which is why it is safe
     // to offer on a row at all.
     const matchNow = matchMode(form.match);
-    const matchIn = h('select', { class: 'match', 'aria-label': `When ${form.real} counts as the client` },
+    const matchIn = h('select', { class: 'match', 'aria-label': `When ${form.real} counts as the topic` },
       h('option', { value: '', selected: matchNow.mode === '' ? true : null }, 'Matches anywhere'),
       h('option', { value: 'cased', selected: matchNow.mode === 'cased' ? true : null }, 'Only this capitalisation'),
       // Only where one of the words listed is next to it (before or after) - not "whole word", which is its column.
@@ -483,7 +484,7 @@ function entryRow(cid, form, reason, readOnly) {
     if (!button) return;
     if (button.classList.contains('edit')) enterEdit();
     else if (button.classList.contains('delete')) {
-      actions.replaceChildren(h('span', { class: 'confirm' }, 'Delete this entry?',
+      actions.replaceChildren(h('span', { class: 'confirm' }, 'Delete this term?',
         h('button', { type: 'button', class: 'danger confirm-delete' }, 'Delete'),
         h('button', { type: 'button', class: 'cancel-delete' }, 'Keep')));
     } else if (button.classList.contains('cancel-delete') || button.classList.contains('cancel-move')
@@ -492,7 +493,7 @@ function entryRow(cid, form, reason, readOnly) {
       // A declared entry is tokenised whatever any ignore list says, so this takes it off the token
       // list and puts it on an ignore list in one step: this client's, or Global's for everywhere.
       actions.replaceChildren(h('span', { class: 'confirm' }, 'Ignore instead of tokenising:',
-        cid !== 'global' ? h('button', { type: 'button', class: 'confirm-ignore', dataset: { scope: cid } }, 'For this client') : null,
+        cid !== 'global' ? h('button', { type: 'button', class: 'confirm-ignore', dataset: { scope: cid } }, 'For this topic') : null,
         h('button', { type: 'button', class: 'confirm-ignore', dataset: { scope: 'global' } }, 'Everywhere'),
         h('button', { type: 'button', class: 'cancel-ignore' }, 'Cancel')));
     } else if (button.classList.contains('confirm-ignore')) {
@@ -507,7 +508,7 @@ function entryRow(cid, form, reason, readOnly) {
     else if (button.classList.contains('copy-global')) {
       try {
         await postJSON('/api/mapping/form/copy-to-global', { client: cid, real: form.real });
-        say(`Copied ${form.real} to Global. The ${displayName(rowById(cid) || { id: cid })} entry stays, locked, for anyone sharing this client.`, 'ok');
+        say(`Copied ${form.real} to Global. The ${displayName(rowById(cid) || { id: cid })} term stays, locked, for anyone sharing this topic.`, 'ok');
         await reloadClient(cid);
       } catch (error) {
         sayError(error, refusalHandlers(cid));
@@ -518,7 +519,7 @@ function entryRow(cid, form, reason, readOnly) {
       actions.replaceChildren(h('span', { class: 'confirm' }, 'Give to', select,
         h('button', { type: 'button', class: 'primary confirm-to-client' }, 'Give'),
         h('button', { type: 'button', class: 'cancel-move' }, 'Cancel'),
-        h('span', { class: 'hint' }, 'If that client already has it, this only unlocks their entry.')));
+        h('span', { class: 'hint' }, 'If that topic already has it, this only unlocks its term.')));
     } else if (button.classList.contains('confirm-to-client')) {
       const to = actions.querySelector('select.move-to').value;
       try {
@@ -534,7 +535,7 @@ function entryRow(cid, form, reason, readOnly) {
       actions.replaceChildren(h('span', { class: 'confirm' }, 'Move to', select,
         h('button', { type: 'button', class: 'primary confirm-move' }, 'Move'),
         h('button', { type: 'button', class: 'cancel-move' }, 'Cancel'),
-        h('span', { class: 'hint' }, 'This changes the client for everyone who shares it.')));
+        h('span', { class: 'hint' }, 'This changes the topic for everyone who shares it.')));
     } else if (button.classList.contains('confirm-move')) {
       const to = actions.querySelector('select.move-to').value;
       try {
@@ -591,9 +592,9 @@ function addEntryForm(cid, real, table) {
     const there = [...table.querySelectorAll('tr.entry')].some((tr) => (tr.dataset.real || '').toLowerCase() === typed);
     if (there) {
       submit.disabled = true;
-      message.textContent = 'Already an entry of this client - it is the row showing below.';
+      message.textContent = 'Already a term of this topic - it is the one showing below.';
     }
-    submit.title = submit.disabled ? '' : `Add "${real.value.trim()}" to this client's entries`;
+    submit.title = submit.disabled ? '' : `Add "${real.value.trim()}" to this topic's terms`;
     return !submit.disabled;
   };
   real.addEventListener('input', check);
@@ -768,10 +769,10 @@ function ignoresBlock(cid, values) {
       `${offer.covered.length} ${offer.says}: `,
       h('button', {
         type: 'button', class: 'link ignore-parent', dataset: { parent: offer.entry },
-        title: `Ignore ${offer.entry} instead of these ${offer.covered.length} entries: ${offer.covered.join(', ')}`,
+        title: `Ignore ${offer.entry} instead of these ${offer.covered.length} terms: ${offer.covered.join(', ')}`,
         // Said, because it is what the entry does (feature 76): a value carrying a client's name is
         // never covered by a wildcard or a parent, so it still reaches Review.
-      }, `ignore ${offer.entry} instead, unless it contains a client's name`))));
+      }, `ignore ${offer.entry} instead, unless it contains a real name`))));
   suggestions.addEventListener('click', async (event) => {
     const button = event.target.closest('button.ignore-parent');
     if (!button) return;
@@ -786,7 +787,7 @@ function ignoresBlock(cid, values) {
           await postJSON('/api/ignore/delete', { value: host, scope });
         } catch (error) { /* one that will not go is not worth losing the parent over */ }
       }
-      say(`Ignoring ${parent}, and removed ${covered.length} entries it covers.`, 'ok');
+      say(`Ignoring ${parent}, and removed ${covered.length} terms it covers.`, 'ok');
       await reloadClient(cid);
     } catch (error) {
       button.disabled = false;
@@ -796,8 +797,8 @@ function ignoresBlock(cid, values) {
   return h('div', { class: 'card' },
     h('h3', {}, cid === 'global' ? 'Ignored everywhere' : `Ignored for ${displayName(rowById(cid) || { id: cid })}`),
     h('p', { class: 'hint' }, cid === 'global'
-      ? 'Strings that look like identifiers but are not client-specific, such as vendors and public services.'
-      : 'Never proposed for review again for this client.'),
+      ? 'Strings that look like identifiers but belong to no topic, such as vendors and public services.'
+      : 'Never proposed for review again for this topic.'),
     chips, suggestions, form);
 }
 
@@ -932,10 +933,10 @@ async function eachReal(cid, values, send, done, undoFrom) {
 // too (D45).
 function bulkEntries(cid, table) {
   const here = displayName(rowById(cid) || { id: cid });
-  const count = h('span', { class: 'muted bulk-count' }, '0 selected items');
+  const count = h('span', { class: 'muted bulk-count' }, '0 selected terms');
   const targets = moveTargets(cid);
   const moveTo = targets.length
-    ? h('select', { class: 'bulk-move-to', 'aria-label': 'Which client they should belong to' },
+    ? h('select', { class: 'bulk-move-to', 'aria-label': 'Which topic they should belong to' },
       targets.map((t) => h('option', { value: t.id }, t.label)))
     : null;
   const remove = h('button', { type: 'button', class: 'danger bulk-delete' }, icon('trash'), 'Delete them');
@@ -956,12 +957,12 @@ function bulkEntries(cid, table) {
 
   const need = () => {
     const values = selectedReals(table);
-    if (!values.length) say('Tick at least one entry first.');
+    if (!values.length) say('Tick at least one term first.');
     return values;
   };
   const recount = () => {
     const picked = selectedReals(table).length;
-    count.textContent = `${picked} selected item${picked === 1 ? '' : 's'}`;
+    count.textContent = `${picked} selected term${picked === 1 ? '' : 's'}`;
     for (const button of [remove, move, ignore, global, ignoreAll]) if (button) button.disabled = !picked;
   };
   table.addEventListener('change', (event) => {
@@ -979,14 +980,14 @@ function bulkEntries(cid, table) {
     const values = need();
     if (!values.length) return;
     // Deleting is the one action here that cannot be undone from the page, so it asks first.
-    const confirmBox = h('span', { class: 'confirm' }, `Delete ${values.length} ${values.length === 1 ? 'entry' : 'entries'}?`,
+    const confirmBox = h('span', { class: 'confirm' }, `Delete ${values.length} ${values.length === 1 ? 'term' : 'terms'}?`,
       h('button', { type: 'button', class: 'danger go' }, 'Delete'),
       h('button', { type: 'button', class: 'cancel' }, 'Keep'));
     remove.replaceWith(confirmBox);
     confirmBox.querySelector('.cancel').addEventListener('click', () => confirmBox.replaceWith(remove));
     confirmBox.querySelector('.go').addEventListener('click', () => bulkReal(cid, values,
       (reals) => postJSON('/api/mapping/forms/delete', { client: cid, reals }),
-      (n) => `Deleted ${n} ${n === 1 ? 'entry' : 'entries'}.`,
+      (n) => `Deleted ${n} ${n === 1 ? 'term' : 'terms'}.`,
       { label: 'Undo the delete' }));
   });
 
@@ -996,7 +997,7 @@ function bulkEntries(cid, table) {
       if (!values.length) return;
       const to = moveTo.value;
       eachReal(cid, values, (real) => postJSON('/api/mapping/form/move', { client: cid, real, to }),
-        (n) => `Moved ${n} ${n === 1 ? 'entry' : 'entries'} to ${to}.`, to);
+        (n) => `Moved ${n} ${n === 1 ? 'term' : 'terms'} to ${to}.`, to);
     });
   }
 
@@ -1008,7 +1009,7 @@ function bulkEntries(cid, table) {
       // sharing that file keeps working. The bar never says "copy" - that is the mechanic.
       eachReal(cid, values,
         (real) => postJSON('/api/mapping/form/copy-to-global', { client: cid, real }),
-        (n) => `${n} ${n === 1 ? 'item belongs' : 'items belong'} to everyone now.`);
+        (n) => `${n} ${n === 1 ? 'term belongs' : 'terms belong'} to everyone now.`);
     });
   }
 
@@ -1017,7 +1018,7 @@ function bulkEntries(cid, table) {
     if (!values.length) return;
     bulkReal(cid, values,
       (reals) => postJSON('/api/mapping/forms/ignore', { client: cid, reals, scope }),
-      (n) => `${n} ${n === 1 ? 'item is' : 'items are'} no longer tokenised, and ignored ${label}.`,
+      (n) => `${n} ${n === 1 ? 'term is' : 'terms are'} no longer tokenised, and ignored ${label}.`,
       // Two halves to reverse: off the ignore list, and back onto the token list.
       { label: 'Undo the ignore', unignore: scope });
   };
@@ -1033,8 +1034,8 @@ function tools(cid, clientView, table, readOnly) {
   // entry is exactly what was typed, Add beside it makes one. Named "real" so it is the add form's
   // real identifier; a query typed and not added is not unsaved work, so it is not tracked (D98).
   const filter = h('input', { type: 'search', name: 'real', class: 'entry-filter', 'data-unsaved-ignore': '',
-    placeholder: readOnly ? 'Filter entries (real value, token, kind, ignored)' : 'Filter entries, or type a new one and Add it',
-    'aria-label': readOnly ? 'Filter entries' : 'Filter entries, or a new real identifier to add' });
+    placeholder: readOnly ? 'Filter terms (real, token, kind, ignored)' : 'Filter terms, or type a new one and Add it',
+    'aria-label': readOnly ? 'Filter terms' : 'Filter terms, or a new real term to add' });
   filter.addEventListener('input', () => {
     const q = filter.value.trim().toLowerCase();
     for (const tr of table.querySelectorAll('tr.entry')) {
@@ -1072,13 +1073,13 @@ function tools(cid, clientView, table, readOnly) {
     ? h('div', { class: 'kind-toggles' }, ...kindsPresent.map((kind) => {
       // A filter chip: lit while its rows show. The title says what a click does (2026-10-01).
       const button = h('button', { type: 'button', class: 'chip kind-toggle on', 'aria-pressed': 'true',
-        dataset: { kind }, title: `Hide ${kindLabel(kind)} rows` }, kindLabel(kind));
+        dataset: { kind }, title: `Hide ${kindLabel(kind)} terms` }, kindLabel(kind));
       button.addEventListener('click', () => {
         const off = hiddenKinds.has(kind);
         if (off) hiddenKinds.delete(kind); else hiddenKinds.add(kind);
         button.classList.toggle('on', off);
         button.setAttribute('aria-pressed', String(off));
-        button.title = `${off ? 'Hide' : 'Show'} ${kindLabel(kind)} rows`;
+        button.title = `${off ? 'Hide' : 'Show'} ${kindLabel(kind)} terms`;
         applyKinds();
       });
       return button;
@@ -1103,7 +1104,7 @@ function tools(cid, clientView, table, readOnly) {
   if (clientView.source !== 'none') {
     bar.append(h('a', { class: 'btn export', href: `/api/export/client/${encodeURIComponent(cid)}`,
                         download: `${cid}.json`,
-                        title: `Everything in ${cid}'s file: every entry and its token, and the ignore list. Not the selection.` },
+                        title: `Everything in ${cid}'s topic file: every term and its token, and the ignore list. Not the selection.` },
       // "Export" beside a bar that can say "133 selected" read as though it might take the
       // selection. It never has: the endpoint takes a client id and nothing else.
       //
@@ -1150,7 +1151,7 @@ function identityCard(cid, clientView, row, readOnly) {
     ? 'AI Cleaner scan <folder> --add global'
     : `AI Cleaner scan <folder> --add ${cid}`;
   const lines = [
-    ['Client id', cid, 'Names the file and keys the mapping. What every command line wants.'],
+    ['Topic id', cid, 'Names the topic file and keys the mapping. What every command line wants.'],
     ['Display name', row.label || clientView.label || '(none: the id is shown)',
      'What you read, everywhere in here.'],
     ['Index', index === undefined || index === null ? '(derived from the id)' : String(index),
@@ -1210,9 +1211,9 @@ function externalNames(cid, saved, readOnly) {
     try {
       const answer = await postJSON(`/api/clients/${encodeURIComponent(cid)}/external-names`, { external_names: wanted });
       const added = answer.added || [];
-      say(added.length ? `Saved. Added ${added.join(', ')} as ${added.length === 1 ? 'an entry' : 'entries'}.` : 'Saved.', 'ok');
+      say(added.length ? `Saved. Added ${added.join(', ')} as ${added.length === 1 ? 'a term' : 'terms'}.` : 'Saved.', 'ok');
       for (const refusal of answer.refused || []) {
-        say(`${refusal.name} is saved but was not added as an entry.`, 'warn', { why: refusal.why });
+        say(`${refusal.name} is saved but was not added as a term.`, 'warn', { why: refusal.why });
       }
       await reloadClient(cid);
     } catch (error) {
@@ -1222,7 +1223,7 @@ function externalNames(cid, saved, readOnly) {
   });
   const block = h('div', { class: 'external-names', dataset: { card: 'external-names' } },
     h('h3', {}, 'Names in other systems'),
-    h('p', { class: 'hint' }, 'What this client is called elsewhere, such as ConnectWise, for tools on this machine that look it up. The name is added to the entries too, so it is tokenised like the others.'),
+    h('p', { class: 'hint' }, 'What this topic is called elsewhere, such as ConnectWise, for tools on this machine that look it up. The name is added to the terms too, so it is tokenised like the others.'),
     table,
     readOnly ? null : h('div', { class: 'form-row' }, system, name, save));
   // Rows removed but not saved count as unsaved, as well as a name typed and not saved (D98).
@@ -1243,7 +1244,7 @@ function renumberRow(cid, index) {
     } catch (error) { sayError(error); }
   });
   return h('details', { class: 'hint renumber-row' },
-    h('summary', {}, 'Change the index (before sharing, if a colleague’s client has the same one)'),
+    h('summary', {}, 'Change the index (before sharing, if a colleague’s topic has the same one)'),
     h('div', { class: 'form-row' }, box, go));
 }
 
@@ -1254,7 +1255,7 @@ function shareInOneDrive(cid) {
   const row = h('p', { class: 'hint share-onedrive' });
   getJSON(`/api/clients/${encodeURIComponent(cid)}/onedrive`).then((where) => {
     if (!where.url) {
-      row.textContent = 'This client\'s folder is not in OneDrive, so it cannot be shared from there.';
+      row.textContent = 'This topic\'s folder is not in OneDrive, so it cannot be shared from there.';
       return;
     }
     const open = h('a', { class: 'button open-onedrive', href: where.url, target: '_blank', rel: 'noopener' },
@@ -1302,14 +1303,14 @@ async function loadBody(cid, body) {
       readOnly ? h('th', { class: 'pick' }) : h('th', { class: 'pick', dataset: { col: 'pick' } }, pickBox('Select all', { class: 'pick-all' })),
       h('th', { dataset: { col: 'real' } }, 'Real'),
       h('th', { class: 'whole', dataset: { col: 'whole' },
-        title: 'Matched only where the name is the entire word, never inside a longer one' }, 'Whole word'),
+        title: 'Matched only where the term is the entire word, never inside a longer one' }, 'Whole word'),
       h('th', { dataset: { col: 'token' } }, 'Token'),
       h('th', { dataset: { col: 'kind' } }, 'Kind'),
       h('th', { class: 'actions' }, 'Actions'))),
     h('tbody', {}, listed.map(({ form, i }) => entryRow(cid, form, reasonFor(form, i), readOnly))));
   const entriesCard = h('div', { class: 'card' }, tools(cid, clientView, table, readOnly),
     readOnly ? h('p', { class: 'hint' }, 'Showing the last good version, read-only until the file is restored or fixed.') : null,
-    clientView.forms.length ? table : h('p', { class: 'empty' }, 'No entries yet - type one in the box above and Add it.'));
+    clientView.forms.length ? table : h('p', { class: 'empty' }, 'No terms yet - type one in the box above and Add it.'));
   if (!clientView.forms.length) entriesCard.append(h('table', { class: 'entries', hidden: true }));
   const scopeValues = ((ignores.scopes || {})[cid === 'global' ? 'global' : cid]) || [];
   // Global is not an engagement, so there is no repo of theirs to scan for it.
@@ -1367,7 +1368,7 @@ function emailRulesCard(cid, rules, forms, readOnly) {
     h('table', { class: 'entries email-rules-table' }, h('tbody', {}, rest.map(rowFor)))) : null;
   return h('div', { class: 'card email-rules' },
     h('h3', {}, 'Email rules'),
-    h('p', { class: 'hint' }, 'A rule says every address at the domain is this client\'s: each is replaced the first time it is seen, whatever the email setting, with a token that is the same on every machine sharing this client. Addresses already here keep their tokens. Removing a rule lists them again; nothing is deleted.'),
+    h('p', { class: 'hint' }, 'A rule says every address at the domain is this topic\'s: each is replaced the first time it is seen, whatever the email setting, with a token that is the same on every machine sharing this topic. Addresses already here keep their tokens. Removing a rule lists them again; nothing is deleted.'),
     pending.length ? h('table', { class: 'entries email-rules-table' }, h('tbody', {}, pending.map(rowFor)))
       : h('p', { class: 'hint' }, 'Nothing to decide: no domain here has addresses listed without a rule.'),
     folded);
@@ -1408,7 +1409,7 @@ function refusalHandlers(cid) {
       const sec = view.main.querySelector('section.client[data-client-id="global"]');
       if (!sec) return;
       if (sec.hasAttribute('hidden')) sec.removeAttribute('hidden');
-      sec.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      smoothIntoView(sec, 'start');
     },
     find: (offer) => {
       const sec = view.main.querySelector(`section.client[data-client-id="${CSS.escape(cid)}"]`);
@@ -1417,7 +1418,7 @@ function refusalHandlers(cid) {
       filter.value = offer.value;
       filter.dispatchEvent(new Event('input'));
       const tr = sec.querySelector(`tr.entry[data-real="${CSS.escape(offer.value)}"]`);
-      if (tr) tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      if (tr) smoothIntoView(tr, 'center');
     },
   };
 }
@@ -1426,17 +1427,17 @@ function refusalHandlers(cid) {
 
 function addClientForm(list) {
   const form = h('form', { id: 'add-client-form', class: 'card form-row', hidden: true },
-    h('label', { class: 'field' }, 'Client id', h('input', { type: 'text', name: 'id', required: true, placeholder: 'e.g. northwind' })),
+    h('label', { class: 'field' }, 'Topic id', h('input', { type: 'text', name: 'id', required: true, placeholder: 'e.g. northwind' })),
     h('label', { class: 'field' }, 'Display name (optional)', h('input', { type: 'text', name: 'label', maxlength: '80', placeholder: 'e.g. Northwind Traders' })),
-    h('button', { type: 'submit', class: 'primary' }, icon('plus'), 'Add client'),
-    h('span', { class: 'hint' }, 'Letters, digits, - and _. The number inside its stand-ins is worked out from the id.'));
+    h('button', { type: 'submit', class: 'primary' }, icon('plus'), 'Add topic'),
+    h('span', { class: 'hint' }, 'Letters, digits, - and _. The number inside its tokens is worked out from the id.'));
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const id = form.elements.id.value.trim();
     const label = form.elements.label.value.trim();
     try {
       await postJSON('/api/mapping/client', { id, index: null, label: label || null });
-      say(`Added client ${label || id}.`, 'ok');
+      say(`Added topic ${label || id}.`, 'ok');
       expanded.add(id);
       view.ctx.status = await view.ctx.refresh();
       form.reset();
@@ -1547,9 +1548,9 @@ function joinShared() {
       location.hash = `#/clients/${encodeURIComponent(answer.client)}`;
     } catch (error) { sayError(error); }
   });
-  return h('span', { class: 'join-shared', title: 'A colleague shared a client with you: add its folder to your OneDrive '
+  return h('span', { class: 'join-shared', title: 'A colleague shared a topic with you: add its folder to your OneDrive '
     + '("Add shortcut to My files"), then choose it here' }, chosen,
-  folderPicker(chosen, { label: 'Joined a shared client?', title: 'Choose the client folder that was shared with you' }));
+  folderPicker(chosen, { label: 'Joined a shared topic?', title: 'Choose the topic folder that was shared with you' }));
 }
 
 function paintList(list) {
@@ -1563,21 +1564,21 @@ export async function render(main, ctx) {
   if (id) {
     const row = rowById(id);
     if (!row) {
-      main.append(h('div', { class: 'page-head' }, h('h1', {}, id)), h('p', { class: 'error-text' }, `There is no client called ${id}. `),
-        h('a', { id: 'show-all', href: '#/clients' }, 'Show all clients'));
+      main.append(h('div', { class: 'page-head' }, h('h1', {}, id)), h('p', { class: 'error-text' }, `There is no topic called ${id}. `),
+        h('a', { id: 'show-all', href: '#/clients' }, 'Show all topics'));
       return;
     }
-    const indexNote = row.id === 'global' ? GLOBAL_DESC : `id ${row.id}; tokens are derived from the client index`;
+    const indexNote = row.id === 'global' ? GLOBAL_DESC : `id ${row.id}; tokens are derived from the topic index`;
     const title = h('h1', {}, displayName(row));
     const head = h('div', { class: 'page-head' }, title);
     if (row.id !== 'global') head.append(renameControl(row, head, title));
-    head.append(h('span', { class: 'muted' }, indexNote, ' - ', h('a', { id: 'show-all', href: '#/clients' }, 'show all clients')));
+    head.append(h('span', { class: 'muted' }, indexNote, ' - ', h('a', { id: 'show-all', href: '#/clients' }, 'show all topics')));
     main.append(head, h('div', { class: 'client-list' }, section(row, true)));
     return;
   }
-  const find = h('input', { type: 'search', id: 'find-client', placeholder: 'Find a client, value, token or ignored entry',
-    'aria-label': 'Find a client or an entry in any client' });
-  const addButton = h('button', { type: 'button', id: 'add-client' }, icon('plus'), 'Add client');
+  const find = h('input', { type: 'search', id: 'find-client', placeholder: 'Find a topic, term, token or ignored string',
+    'aria-label': 'Find a topic or a term in any topic' });
+  const addButton = h('button', { type: 'button', id: 'add-client' }, icon('plus'), 'Add topic');
   const list = h('div', { class: 'client-list', id: 'client-list' });
   const form = addClientForm(list);
   // The Add Client wizard (feature 111); the short form below once "Skip the wizard next time" is ticked.
@@ -1594,8 +1595,8 @@ export async function render(main, ctx) {
     clearTimeout(view.findTimer);
     view.findTimer = setTimeout(() => findEverywhere(list, find.value.trim().toLowerCase()).catch(sayError), 250);
   });
-  main.append(h('div', { class: 'page-head' }, h('h1', {}, 'Client Filters'),
-    h('span', { class: 'muted' }, `${ctx.status.clients.length} ${ctx.status.clients.length === 1 ? 'client' : 'clients'} and Global`),
+  main.append(h('div', { class: 'page-head' }, h('h1', {}, 'Topics'),
+    h('span', { class: 'muted' }, `${ctx.status.clients.length} ${ctx.status.clients.length === 1 ? 'topic' : 'topics'} and Global`),
     h('div', { class: 'actions' }, find, addButton, joinShared())), form, list);
   paintList(list);
 }

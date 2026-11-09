@@ -116,6 +116,30 @@ param(
 )
 
 Set-StrictMode -Version Latest
+
+function Get-AiCleanerApiHeader {
+    <#
+    .SYNOPSIS
+        The header that carries this install's API key (H2, AI Cleaner 1.1): a change through the API from this machine
+        is refused without it. Read from the DPAPI-protected file AI Cleaner makes at its first start; none yet (an
+        older AI Cleaner) gives no header, as before.
+    #>
+    [OutputType([hashtable])]
+    param([string]$StateFolder = (Join-Path $env:USERPROFILE '.aicleaner'))
+    # Given outright (a test, or a script started by AI Cleaner itself): whoever sets this already has the key.
+    if ($env:AICLEANER_API_KEY) { return @{ 'X-AI-Cleaner-Key' = [string]$env:AICLEANER_API_KEY } }
+    $file = Join-Path $StateFolder 'secrets\api-key.dpapi'
+    if (-not (Test-Path -LiteralPath $file)) { return @{} }
+    try {
+        Add-Type -AssemblyName System.Security
+        $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($file), $null, 'CurrentUser')
+        try { return @{ 'X-AI-Cleaner-Key' = [Text.Encoding]::UTF8.GetString($bytes).Trim() } }
+        finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+    } catch {
+        Write-Verbose "The API key could not be read: $($_.Exception.Message)"
+        return @{}
+    }
+}
 $ErrorActionPreference = 'Stop'
 
 function Initialize-LogFile {
@@ -163,6 +187,7 @@ function Invoke-AiCleanerApi {
     # bytes: Windows PowerShell 5.1 would otherwise send a string as ISO-8859-1 and mangle any non-ASCII text.
     param([string]$Api, [string]$Method, [string]$Path, $Body = $null)
     $request = @{ Uri = "$Api$Path"; Method = $Method; UseBasicParsing = $true; TimeoutSec = 120 }
+    if ($Method -ne 'GET') { $request.Headers = Get-AiCleanerApiHeader }      # H2: a change needs the install's key
     if ($null -ne $Body) {
         $request.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 5 -Compress))
         $request.ContentType = 'application/json; charset=utf-8'

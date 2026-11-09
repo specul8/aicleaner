@@ -9,6 +9,7 @@
 // anything about the tab changes, and a rebuilt textarea would lose the caret mid-word.
 
 import { postJSON, say, sayError } from './api.js';
+import { deviceName } from './device.js';
 import { h } from './dom.js';
 import { attachCompletion } from './editor/complete.js';
 import { layerFor } from './editor/highlight.js';
@@ -79,7 +80,7 @@ async function suggest(tab, hooks, box, button, instruction = '') {
   button.textContent = 'Asking...';
   try {
     const answer = await postJSON('/api/session/suggest', { name: hooks.name(), path: tab.path || tab.name,
-      language: monacoLanguage(tab.name), line, before, after, instruction });
+      language: monacoLanguage(tab.name), line, before, after, instruction, device: deviceName() });
     box.offer(position, answer.code);
   } catch (error) {
     sayError(error);

@@ -31,6 +31,10 @@ class SubCounter(Counter):
         self.pairs: Counter[tuple[str, str, str]] = Counter()
 
 
+# The note on the evidence line of a request the canary refused (proxy.py).
+CANARY_REFUSED_NOTE = "canary refused request"
+
+
 class EvidenceLog:
     def __init__(self, log_dir: Path, detail: bool = True, detail_retention_days: int = 90,
                  every_request: bool = False):
@@ -154,13 +158,19 @@ class EvidenceLog:
                 events = self._substitutions(base, outbound, inbound, held, auto_added, unprotected, declined)
                 # One event per match, with its surroundings (DECISIONS 40); a request the emergency
                 # switch sent anyway is marked as such rather than as refused.
-                action = "canary-refused" if status == 403 else "canary-fail-open"
+                # Told by the note, not the status: a refusal answered 403 until D231 and 400 since, and a request
+                # sent anyway carries the service's own status, which can be 400 too.
+                action = "canary-refused" if note == CANARY_REFUSED_NOTE else "canary-fail-open"
                 if canary_matches:
                     events += [{**base, "type": "substitution", "action": action, "direction": "out",
                                 "client": m["client"], "real": m["found"], "token": "", "kind": "",
                                 "where": f"{m['path']} ({m['where']})", "before": m["before"],
                                 "after": m["after"], "declared": m.get("declared", ""),
-                                "inside": bool(m.get("inside"))} for m in canary_matches]
+                                "inside": bool(m.get("inside")),
+                                # D231: found only with its disguises off - as it stands in the request, for the
+                                # Log page's "Add this spelling".
+                                **({"written": m["written"], "decoded": True} if m.get("decoded") else {})}
+                               for m in canary_matches]
                 else:
                     events += [{**base, "type": "substitution", "action": action, "direction": "out",
                                 "client": cid, "real": "", "token": "", "kind": ""} for cid in canary]

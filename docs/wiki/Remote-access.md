@@ -86,6 +86,16 @@ empty `allowed_emails` list lets nobody in. Each check that fails is refused wit
 The verified address and country are recorded as "who" in the substitution log for changes made
 remotely.
 
+## Which device you are on
+
+A web page cannot read a computer's name, so the first page you open through remote access asks
+once: **Which device is this?** Pick one of your Remote desktops entries or type the device's name
+("Don't ask me again" stops the question). The answer is kept in that browser only. Each prompt you
+send then carries the note "The user is accessing the AI Cleaner app remotely from <device name>",
+so rules in your CLAUDE.md can depend on the device - for example, "from the tablet, do not suggest
+running commands on the desktop". The name is what the browser was told, not proof of the device.
+That device's own entry in the Remote desktops menu is greyed out.
+
 ## What is refused remotely
 
 | Through the tunnel | Why |
@@ -94,15 +104,15 @@ remotely.
 | Secrets page and `/api/secrets` | An API key is not something to read from a train. The menu entry stays, greyed out |
 | `/api/tokenise`, `/api/rehydrate` | Turning tokens into names on demand has no use from a browser |
 | Most settings | Only a short list can be changed remotely (see below); the rest say "local only" |
-| Client keys (generate, enter, rotate) | A key is what makes a change to a shared file trusted |
-| Approving a remote MCP server for real names | Who receives client names is decided on the machine |
-| Adding a shared client, renumbering a client | They change what this machine loads |
+| Topic keys (generate, enter, rotate) | A key is what makes a change to a shared file trusted |
+| Approving a remote MCP server for the real terms | Who receives the real terms is decided on the machine |
+| Adding a shared topic, renumbering a topic | They change what this machine loads |
 | Generating the tunnel code, and where a device keeps its key | Set on the machine itself (the code is shown once, so it is never sent through the tunnel) |
 
 Settings that **can** be changed remotely include the session switch and permission mode (every mode,
-including `bypassPermissions`), review footers and toasts, detail logging, detection choices
-(placeholder kinds, near-miss, auto-mapping), allowed folder locations, and the canary's emergency
-`fail_open` switch. Everything else - Review, Client Filters, export, driving sessions - works as it
+including `bypassPermissions`), review footers and notifications, detail logging, detection choices
+(held-back kinds, misreadings, auto-mapping), allowed folder locations, and the canary's emergency
+`fail_open` switch. Everything else - Review, Topics, export, driving sessions - works as it
 does at the desk.
 
 These refusals are made by the server, not just hidden by the page.

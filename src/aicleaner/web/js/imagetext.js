@@ -96,7 +96,7 @@ async function readNow(box, what, sessionName, say, mark, label, format) {
     // The Misreadings setting put a client name right (one letter out, as engines misread): said,
     // so a changed word in the snippet is not a surprise.
     if (text.trim() && answer.corrected) {
-      say(`${named}: ${answer.corrected} likely misreading${answer.corrected === 1 ? '' : 's'} of a client name put right.`, 'ok');
+      say(`${named}: ${answer.corrected} likely misreading${answer.corrected === 1 ? '' : 's'} of a real name put right.`, 'ok');
     }
   } catch (error) {
     replaceMark(box, mark + '\n', '');

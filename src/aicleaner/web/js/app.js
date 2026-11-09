@@ -22,6 +22,7 @@ import { isSealed, openTunnel } from './sealed.js';
 import { openFeedback } from './feedback.js';
 import { chatNow } from './chatnow.js';
 import { setupRemoteDesktops } from './remotedesktop.js';
+import { setupMotion } from './motion.js';
 
 const PAGES = { overview, review, clients, global: clients, secrets, settings, session, log: logPage, wiki, setup, alerts };
 
@@ -190,7 +191,7 @@ function problemRows(status) {
 export function statusItems(status) {
   const red = [];
   // First and red: with bypass on nothing is filtered, so "Filtering on" would be untrue (D148).
-  if (status.bypass) red.push({ level: 'red', text: 'Filtering OFF - bypass is on', href: '#/settings/bypass' });
+  if (status.bypass) red.push({ level: 'red', text: 'Filtering OFF - Send everything unfiltered is on', href: '#/settings/bypass' });
   for (const row of [...(status.global ? [status.global] : []), ...status.clients]) {
     const name = displayName(row);
     const href = clientHref(row.id);
@@ -198,7 +199,7 @@ export function statusItems(status) {
     if (row.state.includes('newer')) red.unshift({ level: 'red', text: `${name}: update AI Cleaner to read it`, href });
     else if (row.state.includes('broken')) red.unshift({ level: 'red', text: `${name}: file invalid`, href });
     // Its file is gone - unsynced, unshared, not downloaded - and last-good protects it (DECISIONS 67).
-    else if (row.state.includes('missing')) red.unshift({ level: 'red', text: `${name}: client file missing`, href });
+    else if (row.state.includes('missing')) red.unshift({ level: 'red', text: `${name}: topic file missing`, href });
     else if (row.state.includes('fallback')) red.push({ level: 'red', text: `${name}: edit rejected`, href });
     if (row.state.includes('conflict-copy')) red.push({ level: 'red', text: `${name}: conflict copy`, href });
     // Changed without the client key (DECISIONS 51): last-good in use, someone has to look.
@@ -232,7 +233,7 @@ export function statusItems(status) {
   }
   // Each client's folder is what is shared with its engagement in OneDrive (DECISIONS 51).
   if (status.clients_in_onedrive === false) {
-    items.push({ level: 'amber', text: 'client files are not in OneDrive: nothing syncs to colleagues', href: '#/settings' });
+    items.push({ level: 'amber', text: 'topic files are not in OneDrive: nothing syncs to colleagues', href: '#/settings' });
   }
   // Folders other people on this PC could write to (H18): said, never enforced.
   for (const folder of status.open_folders || []) {
@@ -317,7 +318,7 @@ function renderNav(status) {
         h('span', { class: 'nav-client-name' }, displayName(row)))),
     // Not "add-client": the Clients page already has a button by that name, and two elements
     // with one id is a lookup that quietly finds the wrong one.
-    navAdd('nav-add-client', 'Add new client', 'Add a new client filter'));
+    navAdd('nav-add-client', 'Add new topic', 'Add a new topic'));
   const toggle = document.getElementById('clients-toggle');
   // Global lives in this list now, so being on it is a reason to have the list open.
   const inClients = app.route && (app.route.name === 'clients' || app.route.name === 'global');
@@ -350,10 +351,10 @@ function renderNavSessions(status) {
   if (list.dataset.sig === sig) return;
   list.dataset.sig = sig;
   // The way to make another one, at the foot of the list as under the clients (the user, 2026-10-15).
-  const add = navAdd('nav-add-session', 'Add new session', 'Add a new session: a project profile to name, give folders and start');
+  const add = navAdd('nav-add-session', 'Add new session', 'Add a new project session: name it, give it folders and start it');
   list.replaceChildren(...running.map((s) => h('a', {
     href: `#/session/${encodeURIComponent(s.name)}/chat`, class: s.waiting ? 'waiting' : null,
-    title: s.waiting ? `${s.name} is waiting on you` : `${s.name} - open its chat`,
+    title: s.waiting ? `${s.name} is waiting on you` : `${s.name} - open its conversation`,
     dataset: { session: s.name },
   }, h('span', { class: 'dot', 'aria-hidden': 'true' }),
   // Collapsed to the icon rail, the first letter stands in for the name (the user, 2026-10-13: the
@@ -491,7 +492,7 @@ function setupClientsToggle() {
   toggle.append(icon('chevron'));
   // Its name says what a click does (the user, 2026-10-01): it read "Show clients" while they showed.
   const name = () => {
-    const what = list.hidden ? 'Show clients' : 'Hide clients';
+    const what = list.hidden ? 'Show topics' : 'Hide topics';
     toggle.setAttribute('aria-label', what);
     toggle.title = what;
   };
@@ -567,7 +568,9 @@ function parseRoute() {
   // ... and on the Wiki, the page (2026-10-07).
   else if (name === 'wiki') id = parts[1] || null;
   const chat = name === 'session' && parts[2] === 'chat';
-  return { name, id, chat };
+  // ... and `/review/<root|path>`: a review notice's Open, the file's tab brought to the front (2026-11-06).
+  const review = name === 'session' && parts[2] === 'review' ? parts[3] || null : null;
+  return { name, id, chat, review };
 }
 
 // The address a page was drawn for, so a guarded move can be put back (D98).
@@ -671,7 +674,7 @@ async function start() {
   setupNavToggle();
   setupClientsToggle();
   setupAddSession();
-  setupRemoteDesktops();
+  setupMotion();
   setupSessionsToggle();
   setupTopFlyouts();
   watchTables(document.getElementById('page'));
@@ -688,6 +691,8 @@ async function start() {
     }
   });
   await refreshStatus();
+  // After the status: the menu's entries depend on whether this page is remote and on this machine's name (f168).
+  setupRemoteDesktops(app.status);
   await route();
   // Only while AI Cleaner answers (D138): during a restart the link's own probe asks, once every few
   // seconds, and the status comes back the moment it does.

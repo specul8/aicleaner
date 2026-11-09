@@ -129,7 +129,7 @@ class _Scrubber:
 
     def other(self, what: str) -> dict[str, str]:
         self.counts["other_withheld"] += 1
-        return _notice(f"[aicleaner: an attachment ({what or 'unknown type'}) was withheld: it cannot be checked for client names.]")
+        return _notice(f"[aicleaner: an attachment ({what or 'unknown type'}) was withheld: it cannot be checked for real names.]")
 
     def image(self, block: dict[str, Any], media: str, raw: bytes | None = None) -> Any:
         if self.allow_images and media in ACCEPTED_IMAGE_TYPES:
@@ -164,9 +164,9 @@ class _Scrubber:
             self.counts["image_redaction_refused"] += 1
             return None
         self.counts["image_redacted" if result.hidden else "image_clean"] += 1
-        said = (f"[aicleaner: this image was sent with {result.hidden} client name(s) or identifier(s) blacked out; "
+        said = (f"[aicleaner: this image was sent with {result.hidden} real name(s) or identifier(s) blacked out; "
                 "its readable text follows.]" if result.hidden else
-                "[aicleaner: this image was checked on this machine and had no client names; its readable text follows.]")
+                "[aicleaner: this image was checked on this machine and had no real names; its readable text follows.]")
         media = "image/png"                    # always re-encoded (feature 114 security review)
         picture = {"type": "image", "source": {"type": "base64", "media_type": media,
                                                "data": base64.b64encode(result.image).decode("ascii")}}
@@ -192,7 +192,7 @@ class _Scrubber:
                 return None
             blocks.extend(sent)
         self.counts["pdf_redacted"] += 1
-        head = _notice(f"[aicleaner: {_the_pdf(name)} is a scan; its {len(pages)} page(s) follow as pictures with client "
+        head = _notice(f"[aicleaner: {_the_pdf(name)} is a scan; its {len(pages)} page(s) follow as pictures with real "
                        "names and identifiers blacked out, each with its text.]")
         return [head, *blocks]
 

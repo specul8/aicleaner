@@ -145,6 +145,8 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "session.job_cleanup", "session.max_processes", "session.max_memory_gb",
                    "session.show_thinking", "session.turn_summary", "session.review_files",
                    "session.idle_offer_hours",
+                   # How the page looks on the device reading it (feature 163); nothing on this machine changes.
+                   "ui.animations_override",
                    # What the Session page does with a picture (D216): read, attach or both. The proxy still decides
                    # what leaves (attachments.*, local only), so this weakens nothing.
                    "session.picture_mode",
@@ -175,6 +177,8 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    # Prompt autocorrect (feature 94): a typing aid.
                    "prompt.autocorrect", "prompt.autocorrect_skip", "prompt.autocorrect_words",
                    "prompt.autocorrect_replace",
+                   # Voice to text in the prompt (f166): how Space talks - this browser's typing aid.
+                   "prompt.voice_hold", "prompt.voice_toggle", "prompt.voice_hold_tenths",
                    # Copilot in VS Code (Brad, 2026-10-19): on or off from anywhere; only adding its
                    # certificate needs someone at the machine, so remotely it waits for that.
                    "copilot.enabled",
@@ -196,7 +200,7 @@ REMOTE_SETTINGS = ("detect.footer", "detect.toast", "logs.detail", "logs.detail_
                    "ui.setting_keywords")
 LOCAL_ONLY_SETTINGS = tuple(k for k in Config.EDITABLE if k not in REMOTE_SETTINGS)
 from .mapping import (GLOBAL_ID, SOURCE_MANUAL, SOURCE_REVIEW, MappingError)
-from . import bashguard, lifecycle, rules
+from . import bashguard, desktopconfirm, lifecycle, rules
 from .models import ModelList
 from .restart import RestartError, restart
 from .store import _UNSET, MappingStore
@@ -365,7 +369,7 @@ def _settle_homes_and_shares(wanted: list, stored: list, shares: dict | None) ->
             if len(kept) != len(folders):
                 entry["projects"] = kept
                 notes.append(f"{entry.get('name')}: {share} was removed from the folders - it is the "
-                             "client's OneDrive share, which is always included.")
+                             "topic's project assets folder, which is always included.")
         old = before.get(str(entry.get("name", "")).lower())
         # A renamed profile keeps its history (the user, 2026-10-06): `was` names the stored profile
         # it came from, honoured only when that name has left the list - renamed, not copied. What
@@ -496,6 +500,18 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             body["suggest"] = suggest  # what the UI can offer instead (see treat_as_public)
         return web.json_response(body, status=status)
 
+    async def _confirmed_here(request: web.Request, changes: list[str]) -> web.Response | None:
+        """H2 part B: a change that turns a protection off, made on this machine, waits for a Yes on the desktop; the
+        refusal to send back when it is not given, else None. A remote request is Access-verified and the person's own:
+        it is granted instead, so a script it starts is not asked again."""
+        if not changes or proxy is None or not getattr(proxy.cfg, "desktop_confirm", False):
+            return None
+        if request.get(REMOTE):
+            desktopconfirm.grant(changes)
+            return None
+        ok, why = await desktopconfirm.confirm(changes)
+        return None if ok else err(PermissionError(desktopconfirm.refusal(why)), status=403)
+
     async def candidates(request: web.Request) -> web.Response:
         # kind_offers: kinds ignored far more often than kept, which Review offers to stop (31).
         return web.json_response({"pending": store.pending(), "kind_offers": store.kind_offers()})
@@ -531,7 +547,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     async def client_share(request: web.Request) -> web.Response:
         cid = request.match_info["cid"]
         if cid.lower() == GLOBAL_ID.lower():
-            return err(ValueError("Global is not an engagement, so it has no share"), status=404)
+            return err(ValueError("Global is not an engagement, so it has no project assets folder"), status=404)
         return web.json_response(share_view(cid))
 
     async def client_share_save(request: web.Request) -> web.Response:
@@ -540,7 +556,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
 
         cid = request.match_info["cid"]
         if cid.lower() == GLOBAL_ID.lower():
-            return err(ValueError("Global is not an engagement, so it has no share"), status=404)
+            return err(ValueError("Global is not an engagement, so it has no project assets folder"), status=404)
         from .folders import FolderError, FolderOutside, check_usable
 
         body = await request.json()
@@ -549,10 +565,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                 # Created inside OneDrive by the store, so it lands where OneDrive is; it still has
                 # to come out inside an allowed root, or it is a folder the pages may not reach.
                 proxy.share_store.create(cid, share_label(cid))
-                check_usable(proxy.share_store.get(cid), folder_roots(), "share folder")
+                check_usable(proxy.share_store.get(cid), folder_roots(), "project assets folder")
             elif str(body.get("path", "")).strip():
                 # boundary only: the share store says "does not exist" better than this can
-                check_usable(str(body["path"]), folder_roots(), "share folder", must_exist=False)
+                check_usable(str(body["path"]), folder_roots(), "project assets folder", must_exist=False)
                 proxy.share_store.set(cid, str(body["path"]))
             else:
                 proxy.share_store.clear(cid)
@@ -620,7 +636,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         kept = {str(entry.get("name", "")).lower() for entry in wanted if isinstance(entry, dict)}
         for name, sess in host.sessions.items():
             if sess.running and name.lower() not in kept:
-                return err(ValueError(f"{name} is running; stop it before removing its profile"))
+                return err(ValueError(f"{name} is running; stop it before removing its project session"))
         # A profile's project folders are folders a session may read and write, so they answer to
         # folders.roots like anything else. Checked before the file is written rather than when a
         # session is started, so a profile cannot be saved naming somewhere it may never go.
@@ -676,7 +692,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except SessionError as problem:
             return err(problem, status=404)
         if not any(_same(folder, f) for f in host.tree_of(profile)):
-            return err(ValueError(f"{folder} is not one of {profile.name}'s client folders"), status=403)
+            return err(ValueError(f"{folder} is not one of {profile.name}'s project folders"), status=403)
         try:
             check_usable(folder, folder_roots(), "project folder")
         except FolderError as problem:
@@ -938,6 +954,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                                            request.get(timing.REQUEST_PARTS))
             return web.json_response({"projects": past})
         except SessionError as problem:
+            # A session just removed (a worktree's Remove) can still be asked for its list by the page it was open
+            # on; it has no conversations to list, so that is the answer rather than an error the page logs.
+            if name and not any(p.name.lower() == name.lower() for p in session_host().profiles):
+                return web.json_response({"projects": [], "gone": True})
             return err(problem, status=404)
 
     async def conversation_search(request: web.Request) -> web.Response:
@@ -1066,12 +1086,12 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
 
         name = str(new.get("client") or "").strip()
         if not name:
-            raise ValueError("name the new client")
+            raise ValueError("name the new topic")
         cid = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")[:64]
         if not cid:
-            raise ValueError(f"{name!r} has no letters or digits to make a client id from")
+            raise ValueError(f"{name!r} has no letters or digits to make a topic id from")
         if any(str(e.get("name", "")).lower() == name.lower() for e in proxy.read_profiles()):
-            raise ValueError(f"there is already a profile called {name}: import into it instead")
+            raise ValueError(f"there is already a project session called {name}: import into it instead")
         folder = Path(str(new.get("folder") or "").strip() or str(Path("C:/Repos") / name))
         check_usable(str(folder), folder_roots(), "project folder", must_exist=False)
         home = folder / f"_{cid.lower()}-tooling"
@@ -1082,7 +1102,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if share == "create":
             proxy.share_store.create(cid, share_label(cid))
         elif share.strip():
-            check_usable(share, folder_roots(), "share folder", must_exist=False)
+            check_usable(share, folder_roots(), "project assets folder", must_exist=False)
             proxy.share_store.set(cid, share)
         entries = proxy.read_profiles() + [{"name": name, "client": cid, "projects": [str(home)]}]
         proxy.profile_store.save(entries, set(proxy.client_labels()))
@@ -1684,7 +1704,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return web.json_response({"ok": True, "workspace": chosen_ws, "value": value})
         entry = next((e for e in proxy.read_profiles() if e.get("name") == name), None) if proxy else None
         if entry is None:
-            return err(ValueError(f"no profile named {name!r}"))
+            return err(ValueError(f"no project session named {name!r}"))
         view = (await asyncio.to_thread(_workspace_view, [entry], mf)).get(name) or {}
         folder, found = view.get("folder", ""), view.get("workspace", "")
         suggested = (view.get("cwd") or {}).get("suggested", "")
@@ -1788,7 +1808,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         try:
             clean, folders, home, workspace_dirs = await trust_inputs(request)
             missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
-            done = await asyncio.to_thread(claudetrust.add, missing, clean["name"] or "a project profile")
+            done = await asyncio.to_thread(claudetrust.add, missing, clean["name"] or "a project session")
         except (ValueError, OSError, claudetrust.TrustError) as exc:
             return err(exc)
         return web.json_response(done)
@@ -1805,10 +1825,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         entries = proxy.read_profiles() if proxy else []
         entry = next((e for e in entries if e.get("name") == name), None)
         if entry is None:
-            return err(ValueError(f"no profile named {name!r}"))
+            return err(ValueError(f"no project session named {name!r}"))
         create = ((await asyncio.to_thread(_workspace_view, [entry], mf)).get(name) or {}).get("create")
         if not create:
-            return err(ValueError("nothing to create: the profile already has a workspace file, or no home folder"))
+            return err(ValueError("nothing to create: the project session already has a workspace file, or no home folder"))
         path = Path(create["path"])
         if not is_usable(path.parent, proxy._allowed_roots()):
             return err(ValueError(f"{path.parent} is outside the folders the pages may reach"), status=403)
@@ -1835,7 +1855,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         entries = proxy.read_profiles() if proxy else []
         entry = next((e for e in entries if e.get("name") == name), None)
         if entry is None:
-            return err(ValueError(f"no profile named {name!r} - save it first"))
+            return err(ValueError(f"no project session named {name!r} - save it first"))
         view = (await asyncio.to_thread(_workspace_view, [entry], mf, proxy.share_store.load())).get(name) or {}
         offered = [f for f in view.get("setup") or [] if f.get("fix") == fix and setupcheck._same(f["folder"], folder)]
         if not offered:
@@ -2024,7 +2044,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # "queued": a turn is running, so it waits on the page until that turn ends (D176).
             from .origin import page_note
             # Where it was typed, said to Claude (the user, 2026-10-18): remote access or this machine.
-            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""))
+            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""),
+                             str(body.get("device") or ""))
             outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")), origin=note,
                                                   images=images)
         except SessionError as exc:
@@ -2115,7 +2136,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(ValueError("the session is not running - start it to get suggestions"), status=409)
         queue = session.watch()
         try:
-            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""))
+            note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""),
+                             str(body.get("device") or ""))
             await host.prompt(text, name=name, origin=note)
             loop = asyncio.get_running_loop()
             deadline = loop.time() + 300
@@ -2377,9 +2399,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         unignore = str(body.get("unignore") or "").strip()
         unmap = str(body.get("unmap") or "").strip()
         if not isinstance(records, list) or not records or not all(isinstance(r, dict) for r in records):
-            return err(ValueError("candidates must be a list of the records /api/candidates listed"))
+            return err(ValueError("suggestions must be a list of the records /api/candidates listed"))
         if unignore and unmap:
-            return err(ValueError("a candidate is undone from one action: unignore or unmap, not both"))
+            return err(ValueError("a suggestion is undone from one action: unignore or unmap, not both"))
         mapped: set[str] = set()
         if unmap:
             try:
@@ -2512,7 +2534,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         body = await request.json()
         folder = str(body.get("folder", "")).strip()
         try:
-            check_usable(folder, folder_roots(), "shared client folder")
+            check_usable(folder, folder_roots(), "shared topic folder")
             cid = await asyncio.to_thread(mf.join_shared, folder)
         except FolderError as problem:
             return err(problem, status=403)
@@ -2586,7 +2608,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         is_global = draft["mode"] == "global"
         cid = GLOBAL_ID if is_global else draft["client_id"]
         if not cid:
-            return err(ValueError("the client needs an id first (the Client name page)"))
+            return err(ValueError("the topic needs an id first (the Topic name page)"))
         entries, rules, found = entries_of(draft)
         try:
             index, added = await asyncio.to_thread(mf.create_client, cid, draft["label"] or None, entries, SOURCE_MANUAL)
@@ -2594,9 +2616,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except (MappingError, ValueError) as exc:
             return err(exc)
         for real, _token in added:
-            _record_provenance(mf, cid, real, SOURCE_MANUAL, note="added in the Add Client wizard")
+            _record_provenance(mf, cid, real, SOURCE_MANUAL, note="added in the Add Topic wizard")
         for real, _token in scanned:
-            _record_provenance(mf, cid, real, SOURCE_SCAN, note="found by the Add Client wizard's repository scan")
+            _record_provenance(mf, cid, real, SOURCE_SCAN, note="found by the Add Topic wizard's repository scan")
         ruled, refused = [], []
         for domain in ([] if is_global else rules):
             try:
@@ -2657,7 +2679,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # The type chosen on the add row (2026-10-23); none or "auto" leaves it to the guess.
             kind = str(body.get("kind") or "").strip() or None
             tok = mf.add_form(cid, real, body.get("token"), source=SOURCE_MANUAL, kind=None if kind == "auto" else kind)
-            _record_provenance(mf, cid, real, SOURCE_MANUAL, note="typed in on the Clients page")
+            _record_provenance(mf, cid, real, SOURCE_MANUAL, note="typed in on the Topics page")
             return web.json_response({"ok": True, "token": tok})
         except (MappingError, KeyError, ValueError) as exc:
             return err(exc)
@@ -3022,6 +3044,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if request.method == "GET":
             return web.json_response({"mode": proxy.cfg.secrets_mode})
         body = await request.json()
+        refused = await _confirmed_here(request, desktopconfirm.weakening({"secrets.mode": str(body.get("mode", ""))},
+                                                                          {"secrets.mode": proxy.cfg.secrets_mode}))
+        if refused is not None:
+            return refused
         try:
             proxy.set_secrets_mode(str(body.get("mode", "")))
             return web.json_response({"ok": True, "mode": proxy.cfg.secrets_mode})
@@ -3084,19 +3110,27 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         """Feature 143: code for the cursor, from the warm suggestion worker - '' when a newer request took its
         place, the setting is off, or nothing fits."""
         from pathlib import PureWindowsPath
-        from .completion import clean, prompt_for
+        from .completion import clean, half_typed, prompt_for
         if proxy is None or not proxy.cfg.editor_inline_suggest:
             return web.json_response({"text": ""})
         body = await request.json()
         before, after = str(body.get("before") or ""), str(body.get("after") or "")
         if len(before.strip()) < 3:
             return web.json_response({"text": ""})
+        # D230 item 3: a client's name typed halfway would go out as a fragment the tokeniser cannot see.
+        handle = getattr(proxy, "_handle", None)
+        if half_typed(getattr(handle, "mapper", None), before, after):
+            return web.json_response({"text": "", "held": "a real name is being typed"})
         name = PureWindowsPath(str(body.get("path") or "")).name
+        if proxy.editor_service() == "copilot_fast":          # f167: the language server, warm
+            text = await proxy.copilot_fast_complete(str(body.get("path") or name), str(body.get("language") or ""),
+                                                     before, after)
+            return web.json_response({"text": text, "pause_ms": 150})
         worker = await proxy.completions()
         if worker is None:
             return web.json_response({"text": ""})
         answer = await worker.complete(prompt_for(name, str(body.get("language") or ""), before, after))
-        return web.json_response({"text": clean(answer, before, after)})
+        return web.json_response({"text": clean(answer, before, after), "pause_ms": 600})
 
     async def editor_services(request: web.Request) -> web.Response:
         """The File editor card's list: each service, whether it can answer here, and which one answers now."""
@@ -3107,6 +3141,36 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         return web.json_response({"choice": proxy.cfg.editor_inline_service, "services": services,
                                   "active": proxy.editor_service(services),
                                   "worker": worker.summary() if worker is not None else None})
+
+    async def editor_copilot_signin(request: web.Request) -> web.Response:
+        """f167: GitHub's Copilot language server installed when missing, then its device code and link. The person
+        enters it on github.com from any device; the server finishes the sign-in on its own."""
+        from . import copilotls
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        state = Path(proxy.cfg.state_dir)
+        try:
+            if not copilotls.installed(state):
+                await copilotls.install(state)
+            server = await proxy.copilot_language_server()
+            if server is None:
+                return err(RuntimeError("the fast Copilot suggestions cannot be filtered here, so they are not "
+                                        "started - see the log"))
+            return web.json_response(await server.sign_in())
+        except (RuntimeError, OSError, asyncio.TimeoutError, ConnectionError) as exc:
+            return err(exc)
+
+    async def editor_copilot_signout(request: web.Request) -> web.Response:
+        if proxy is None:
+            return err(ValueError("unavailable"))
+        server = await proxy.copilot_language_server()
+        if server is None:
+            return web.json_response({"ok": True})
+        try:
+            await server.sign_out()
+        except (RuntimeError, asyncio.TimeoutError, ConnectionError) as exc:
+            return err(exc)
+        return web.json_response({"ok": True})
 
     async def claudeai_get(request: web.Request) -> web.Response:
         if proxy is None:
@@ -3141,6 +3205,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             if local_only:
                 return err(ValueError(f"local only: {', '.join(local_only)} can only be changed on the "
                                       "machine AI Cleaner runs on"), status=403)
+        refused = await _confirmed_here(request, desktopconfirm.weakening(changes, proxy.cfg.settings()))
+        if refused is not None:
+            return refused
         was_binaries = proxy.cfg.allow_images
         # Turning timings on starts its 24 hours now (feature 91); the page never sets the clock.
         changes.pop("debug.timings_since", None)
@@ -3441,6 +3508,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         only = str(body.get("only") or "")
         if only not in ("ClaudeCode", "CodeTab", "Copilot"):
             return err(ValueError("only must be ClaudeCode, CodeTab or Copilot"))
+        refused = await _confirmed_here(request, desktopconfirm.tool_off(only))
+        if refused is not None:
+            return refused
         root = proxy.cfg.path.parent
         script = root / "installer" / "Disable-AiCleaner.ps1"
         from .restart import powershell
@@ -3620,7 +3690,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         try:
             doc = mf.export_client(cid)
         except MappingError as exc:
-            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+            return err(exc, 404 if str(exc).startswith("unknown topic") else 400)
         return web.Response(text=json.dumps(doc, indent=2, ensure_ascii=False), content_type="application/json",
                             headers={"Content-Disposition": f'attachment; filename="{cid}.json"'})
 
@@ -3773,7 +3843,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         try:
             return web.json_response(mf.client_view(request.match_info["cid"]))
         except MappingError as exc:
-            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+            return err(exc, 404 if str(exc).startswith("unknown topic") else 400)
 
     # Names in other systems (feature 150). The reads are for tooling on this machine - a ticketing
     # integration finding the client's company - and nothing on a phone has a use for them, so they
@@ -3785,7 +3855,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         try:
             names = await asyncio.to_thread(mf.get_external_names, cid)
         except MappingError as exc:
-            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+            return err(exc, 404 if str(exc).startswith("unknown topic") else 400)
         return web.json_response({"client": cid, "external_names": names})
 
     async def external_names_by_system(request: web.Request) -> web.Response:
@@ -3807,17 +3877,17 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             answer = await asyncio.to_thread(mf.set_external_names, cid, body.get("external_names"),
                                              SOURCE_MANUAL)
         except (MappingError, ValueError, AttributeError) as exc:
-            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+            return err(exc, 404 if str(exc).startswith("unknown topic") else 400)
         for name in answer["added"]:
             _record_provenance(mf, cid, name, SOURCE_MANUAL,
-                               note="the client's name in another system, set on the Clients page")
+                               note="the topic's name in another system, set on the Topics page")
         return web.json_response({"ok": True, **answer})
 
     async def client_raw(request: web.Request) -> web.Response:
         try:
             return web.json_response(mf.raw(request.match_info["cid"]))
         except MappingError as exc:
-            return err(exc, 404 if str(exc).startswith("unknown client") else 400)
+            return err(exc, 404 if str(exc).startswith("unknown topic") else 400)
 
     async def client_restore(request: web.Request) -> web.Response:
         try:
@@ -4016,6 +4086,12 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         page = (WEB / "index.html").read_text(encoding="utf-8")
         page = page.replace('<meta charset="utf-8">',
                             f'<meta charset="utf-8">\n<meta name="aicleaner-style-nonce" content="{nonce}">', 1)
+        # H2 (1.1): the page on this machine is given the API key it sends with every change (api.js). Never through
+        # the tunnel - there the Access sign-in is the gate, and the key is no business of another device.
+        key = getattr(getattr(proxy, "cfg", None), "api_key", "")
+        if key and not request.get(REMOTE):
+            page = page.replace('<meta charset="utf-8">',
+                                f'<meta charset="utf-8">\n<meta name="aicleaner-api-key" content="{key}">', 1)
         return web.Response(text=page, content_type="text/html", charset="utf-8")
 
     async def old_page(request: web.Request) -> web.Response:
@@ -4170,6 +4246,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/copilot", copilot_get)
     app.router.add_get("/api/claudeai", claudeai_get)
     app.router.add_post("/api/editor/complete", editor_complete)
+    app.router.add_post("/api/editor/copilot/signin", editor_copilot_signin)
+    app.router.add_post("/api/editor/copilot/signout", editor_copilot_signout)
     app.router.add_get("/api/editor/services", editor_services)
     app.router.add_post("/api/config", config_post)
     app.router.add_post("/api/restart", restart_proxy)

@@ -29,12 +29,15 @@ def device(user_agent: str) -> str:
     return "a browser"
 
 
-def page_note(remote: bool, host: str, user_agent: str) -> str:
+def page_note(remote: bool, host: str, user_agent: str, device_name: str = "") -> str:
+    """f168 (Brad, 2026-11-08): through remote access the note is short and names the device when the browser was told
+    which it is, so the person's own rules can depend on it ("from the tablet, no commands on the desktop"). The name
+    is the browser's word, not proof. `host` and `user_agent` are no longer said."""
     if remote:
-        where = f" at {host}" if host else ""
-        return (f"{OPEN}Sent through AI Cleaner's remote access{where} from {device(user_agent)}. The person is "
-                f"not at the machine Claude runs on: assume nothing AI Cleaner installs is on their device - "
-                f"anything they must run, open or install has to be delivered for that device.{CLOSE}")
+        from .config import device_name as checked
+
+        name = checked(device_name)
+        return f"{OPEN}The user is accessing the AI Cleaner app remotely{f' from {name}' if name else ''}.{CLOSE}"
     return f"{OPEN}Sent from the AI Cleaner page on the machine Claude runs on (127.0.0.1).{CLOSE}"
 
 

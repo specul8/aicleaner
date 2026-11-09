@@ -1101,8 +1101,11 @@ class Session(_FindsClaude):
         if message.get("type") != "user":
             return
         content = (message.get("message") or {}).get("content") or []
-        text = " ".join(b.get("text", "") for b in content
-                        if isinstance(b, dict) and b.get("type") == "text")
+        # The note on where it was typed is a block of its own (origin.py), never part of what was typed: the live
+        # view leaves it out, and so does this (D227, Brad 2026-11-05: after a restart it showed in the transcript).
+        from .origin import is_note, strip
+        text = strip(" ".join(b.get("text", "") for b in content
+                              if isinstance(b, dict) and b.get("type") == "text" and not is_note(b.get("text", ""))))
         # Pictures sent with it (D216): shown by count, as the broker kept the blocks and not the names.
         pictures = image_blocks_in(content)
         if text or pictures:
@@ -1847,15 +1850,33 @@ class Session(_FindsClaude):
                 self._md_written[os.path.normcase(str(path))] = {"path": path, "at": time.time(), "mtime": mtime,
                                                                  "reviewed": None}
 
+    # Brad, 2026-11-06: "if the AI service creates a response that includes a request for me to read or review a markdown
+    # file it has created, it is then (and only then) that the alert appears (and not simply every time Claude writes a
+    # file)". Naming the file is not enough: the paragraph naming it must also ask for it to be read or reviewed.
+    REVIEW_ASK = re.compile(
+        r"\b(?:please\s+(?:review|read|look|check|go\s+(?:through|over)|skim|have\s+a\s+look|take\s+a\s+look)"
+        r"|(?:can|could|would|will)\s+you\s+(?:please\s+)?(?:review|read|look|check|go\s+(?:through|over)|skim|have\s+a\s+look|take\s+a\s+look)"
+        r"|(?:have|take)\s+a\s+(?:look|read)"
+        r"|for\s+(?:your|you\s+to)\s+(?:review|read|reading|approval|sign[- ]off|feedback|comments?)"
+        r"|(?:ready|up)\s+for\s+(?:your\s+)?(?:review|approval|sign[- ]off)"
+        r"|(?:to|you\s+can|you\s+may\s+want\s+to)\s+(?:review|read\s+(?:it|through|over))\b"
+        r"|review\s+(?:it|this|that|them|the\s+(?:spec|plan|design|doc|document|file|report|draft))\b"
+        r"|let\s+me\s+know\s+(?:what\s+you\s+think|if|whether|your\s+thoughts)"
+        r"|(?:your|any)\s+(?:review|feedback|comments|thoughts|approval)"
+        r"|worth\s+(?:a\s+)?(?:read|look|reading))",
+        re.IGNORECASE)
+
     def _review_mentions(self, text: str) -> None:
         now = time.time()
-        lowered = text.lower()
+        # The paragraphs (blank-line separated) that ask for something to be read or reviewed - only a file named in one
+        # of those is offered.
+        asking = [p.lower() for p in re.split(r"\n\s*\n", text) if self.REVIEW_ASK.search(p)]
         for key, entry in list(self._md_written.items()):
             if now - entry["at"] > self.REVIEW_WINDOW_S:
                 del self._md_written[key]
                 continue
             path: Path = entry["path"]
-            if path.name.lower() not in lowered:
+            if not any(path.name.lower() in paragraph for paragraph in asking):
                 continue
             try:
                 mtime = path.stat().st_mtime
@@ -2081,7 +2102,7 @@ class SessionHost(_FindsClaude):
             if len(self.profiles) == 1:
                 return self.profiles[0]
             if not self.profiles:
-                raise SessionError("no session profiles are configured (session.profiles)")
+                raise SessionError("no project sessions are configured (session.profiles)")
             running = [n for n, s in self.sessions.items() if s.running]
             if len(running) == 1:
                 return self.profile(running[0])
@@ -2089,7 +2110,7 @@ class SessionHost(_FindsClaude):
         for profile in self.profiles:
             if profile.name.lower() == name.lower():
                 return profile
-        raise SessionError(f"no profile called {name}")
+        raise SessionError(f"no project session called {name}")
 
     def available(self) -> bool:
         """True when the Claude Code CLI is on this machine."""
@@ -2311,7 +2332,7 @@ class SessionHost(_FindsClaude):
         except Exception as exc:  # noqa: BLE001 - the page says it does not know, never fails
             log.debug("home of %s: %s", profile.name, exc)
             first = str(profile.projects[0]) if profile.projects else ""
-            return {"folder": first, "how": "first folder of the profile", "derived": first, "overridden": False}
+            return {"folder": first, "how": "first folder of the project session", "derived": first, "overridden": False}
 
     def run_folders(self, profile: Profile) -> list[Path]:
         """The folders a session may run in: the home folder first (the default), then the rest of
@@ -2388,7 +2409,7 @@ class SessionHost(_FindsClaude):
             return ""
         if count is None or count > 0:
             return ""
-        return (f"{profile.client} has no names to filter yet - add at least one on its page "
+        return (f"{profile.client} has no terms to filter yet - add at least one on its page "
                 f"(#/clients/{profile.client}), then start")
 
     async def start(self, name: str = "", project: str = "", resume: str = "", model: str = "",
@@ -2765,7 +2786,7 @@ class SessionHost(_FindsClaude):
             raise SessionError("not a conversation id")
         path = _find(self.conversation_folders(self.profile(name)), conv_id, transcript_root())
         if path is None:
-            raise SessionError("no such conversation in this profile's folders")
+            raise SessionError("no such conversation in this project session's folders")
         return path
 
     @_agent_history

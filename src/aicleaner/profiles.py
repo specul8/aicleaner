@@ -35,25 +35,25 @@ def _agent_of(entry: dict[str, Any]) -> str:
 
     value = str(entry.get("agent") or "claude").strip().lower()
     if value not in AGENTS:
-        raise ProfileError(f"{entry.get('name', 'a profile')}: {value} is not an AI service AI Cleaner knows")
+        raise ProfileError(f"{entry.get('name', 'a project session')}: {value} is not an AI service AI Cleaner knows")
     return value
 
 
 def _clean(entry: dict[str, Any]) -> dict[str, Any]:
     """One profile, with every field the rest of the code expects present and of the right type."""
     if not isinstance(entry, dict):
-        raise ProfileError("each profile must be an object")
+        raise ProfileError("each project session must be an object")
     name = str(entry.get("name", "")).strip()
     if not name:
-        raise ProfileError("every profile needs a name")
+        raise ProfileError("every project session needs a name")
     if len(name) > MAX_NAME:
-        raise ProfileError(f"{name[:MAX_NAME]}...: a profile name is at most {MAX_NAME} characters")
+        raise ProfileError(f"{name[:MAX_NAME]}...: a project session name is at most {MAX_NAME} characters")
     if "/" in name or "\\" in name:
         # The name travels in the session's own URL, and is a key everywhere else.
-        raise ProfileError(f"{name}: a profile name cannot contain a slash")
+        raise ProfileError(f"{name}: a project session name cannot contain a slash")
     if any(c in name for c in "?#%") or name.strip(".") == "":
         # Each of these changes what the session's address means (H31).
-        raise ProfileError(f"{name}: a profile name cannot contain ? # or %, or be only dots")
+        raise ProfileError(f"{name}: a project session name cannot contain ? # or %, or be only dots")
     folders = [os.path.expandvars(str(p)).strip() for p in (entry.get("projects") or [])]
     # Workspace files, in order - the first sets the home folder (D99). All of this is about this
     # machine's disk, which is why it lives here and not in the shared client file.
@@ -101,12 +101,12 @@ def validate(entries: list[dict[str, Any]], known_clients: set[str] | None = Non
         profile = _clean(entry)
         lowered = profile["name"].lower()
         if lowered in seen:
-            raise ProfileError(f"two profiles are called {profile['name']}; names are how sessions "
-                               "are told apart")
+            raise ProfileError(f"two project sessions are called {profile['name']}; names are how "
+                               "they are told apart")
         seen[lowered] = profile["name"]
         if profile["client"] and known_clients is not None and profile["client"] not in known_clients:
-            raise ProfileError(f"{profile['name']} names client {profile['client']}, which is not in "
-                               "the mapping; add the client first or leave it blank")
+            raise ProfileError(f"{profile['name']} names topic {profile['client']}, which is not in "
+                               "the mapping; add the topic first or leave it blank")
         cleaned.append(profile)
     return cleaned
 
@@ -131,7 +131,7 @@ class ProfileStore:
             return [], f"{self.path.name}: {exc}"
         entries = raw.get("profiles") if isinstance(raw, dict) else raw
         if not isinstance(entries, list):
-            return [], f"{self.path.name}: expected a list of profiles"
+            return [], f"{self.path.name}: expected a list of project sessions"
         try:
             return validate(entries), ""
         except ProfileError as exc:

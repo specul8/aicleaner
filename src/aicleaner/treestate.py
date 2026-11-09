@@ -40,7 +40,7 @@ class TreeState:
 
     def save(self, client: str, open_keys: object) -> list[str]:
         if not client:
-            raise ValueError("a client is required")
+            raise ValueError("a topic is required")
         if not isinstance(open_keys, list) or not all(isinstance(k, str) for k in open_keys):
             raise ValueError("open must be a list of folder keys")
         keys = list(dict.fromkeys(k for k in open_keys if k and len(k) <= MAX_KEY_LEN))[:MAX_KEYS]

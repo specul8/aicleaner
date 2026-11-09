@@ -15,8 +15,9 @@ from . import fileio
 log = logging.getLogger("aicleaner")
 
 
+# The editor suggestion services: one list, kept in completion.py (D230 item 5 - it was written out twice).
+from .completion import SERVICES as INLINE_SERVICES  # noqa: E402
 # Double-click in a Markdown preview (feature 92).
-INLINE_SERVICES = ("auto", "off", "claude", "copilot", "copilot_filtered", "codex")   # completion.SERVICES
 PREVIEW_DBLCLICK = ("ask", "source", "off")
 # What prompt autocorrect may also leave alone (feature 94); code and paths always are.
 AUTOCORRECT_SKIPS = ("clients", "used", "capitalised")
@@ -111,6 +112,16 @@ ALWAYS_STOOD_IN = frozenset({"guid"})
 REMOTE_DESKTOP_MAX = 20
 
 
+_DEVICE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,62}")
+
+
+def device_name(value: Any) -> str:
+    """A device's name as a person or an installer gives it (f168): 1 to 63 letters, digits, spaces, dots, underscores
+    and hyphens, starting with a letter or digit; anything else is no name at all ('')."""
+    text = str(value or "").strip()
+    return text if _DEVICE_NAME.fullmatch(text) else ""
+
+
 def remote_desktop_hosts(value: Any, strict: bool = True) -> list[dict[str, str]]:
     """The hosts, cleaned: a name (1-60 characters) and an https address with no user name in it; one entry per
     address (a later one replaces an earlier); at most 20. strict=False (a file edited by hand) skips a bad entry."""
@@ -138,6 +149,11 @@ def remote_desktop_hosts(value: Any, strict: bool = True) -> list[dict[str, str]
             url = urlunsplit(("https", parts.netloc.lower(), parts.path or "/", parts.query, ""))
             found.pop(url, None)
             found[url] = {"name": name, "url": url}
+            # f168: the machine's full computer name, recorded by aicleaner-rdp's installer (the label is often a
+            # short form of it); the page names the device by it. Dropped, not refused, when it is not a name.
+            device = device_name(entry.get("device"))
+            if device:
+                found[url]["device"] = device
         except ValueError:
             if strict:
                 raise
@@ -199,9 +215,9 @@ def session_profiles(session: dict, legacy_projects: list[str]) -> list[dict]:
             continue
         name = str(entry.get("name", "")).strip()
         if not name:
-            raise ValueError("every session profile needs a name")
+            raise ValueError("every project session needs a name")
         if name.lower() in seen:
-            raise ValueError(f"two session profiles are called {name}")
+            raise ValueError(f"two project sessions are called {name}")
         seen.add(name.lower())
         profiles.append({
             "name": name,
@@ -223,6 +239,8 @@ class Config:
     contact_dir: Path = APP_ROOT  # where contact-*.json live; tests point it at a temp folder
     # Per-machine state (last-good copies of client files); never shared. Tests use a temp folder.
     state_dir: Path = Path.home() / ".aicleaner"
+    api_key: str = ""                  # H2: set at start from the state folder (apikey.py); never in settings
+    desktop_confirm: bool = False      # H2 part B: set at start; a protection-off change waits for a Yes on the desktop
     upstreams: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_UPSTREAMS))
     allow_non_json_paths: list[str] = field(default_factory=list)
     keep_tokenised_tools: list[str] = field(default_factory=list)
@@ -279,6 +297,11 @@ class Config:
     # always left alone, `prompt_autocorrect_skip` adds "clients", "used", "capitalised"; the user's
     # own words carry their casing (powershell -> PowerShell).
     prompt_autocorrect: bool = False    # off until a person turns it on (the user, 2026-10-18; was on - D152)
+    # f166 (Brad, 2026-11-08): with the Microphone on, Space talks - held for a moment (a tap still types a space),
+    # and on an empty prompt Space starts and stops listening; each switchable, the hold in tenths of a second.
+    prompt_voice_hold: bool = True
+    prompt_voice_toggle: bool = True
+    prompt_voice_hold_tenths: int = 3
     prompt_autocorrect_skip: list[str] = field(default_factory=lambda: list(AUTOCORRECT_SKIPS))
     prompt_autocorrect_words: list[str] = field(default_factory=lambda: ["PowerShell", "SharePoint", "aicleaner"])
     # The user's own replacements, "typed = replacement" (keyvault = Key Vault): a habit, not a typo,
@@ -289,6 +312,9 @@ class Config:
     debug_timings_since: int = 0
     # Your own words for Settings cards (feature 153), found by "Find a setting"; see setting_keywords().
     ui_setting_keywords: dict[str, list[str]] = field(default_factory=dict)
+    # Animate even where the device has its animation effects off (feature 163, Brad, 2026-11-05): the page shows
+    # where it took you (a pulse, a light) by animating, and with Windows animations off it did not.
+    ui_animations_override: bool = True
     remote_desktop_hosts: list[dict[str, str]] = field(default_factory=list)
     session_claude: str = "claude"
     session_projects: list[str] = field(default_factory=list)
@@ -455,11 +481,15 @@ class Config:
         "editor.minimap": ("editor_minimap", bool),
         "editor.inline_service": ("editor_inline_service", str),
         "prompt.autocorrect": ("prompt_autocorrect", bool),
+        "prompt.voice_hold": ("prompt_voice_hold", bool),
+        "prompt.voice_toggle": ("prompt_voice_toggle", bool),
+        "prompt.voice_hold_tenths": ("prompt_voice_hold_tenths", int),
         "prompt.autocorrect_skip": ("prompt_autocorrect_skip", list),
         "prompt.autocorrect_words": ("prompt_autocorrect_words", list),
         "prompt.autocorrect_replace": ("prompt_autocorrect_replace", list),
         "debug.timings_since": ("debug_timings_since", int),
         "ui.setting_keywords": ("ui_setting_keywords", dict),
+        "ui.animations_override": ("ui_animations_override", bool),
         "remote_desktop.hosts": ("remote_desktop_hosts", "remote_desktops"),
     }
 
@@ -479,6 +509,8 @@ class Config:
                     raise ValueError(f"{key} must be true or false")
             elif typ is int:
                 value = int(value)
+                if key == "prompt.voice_hold_tenths" and not 1 <= value <= 20:
+                    raise ValueError("prompt.voice_hold_tenths is 1 to 20 (tenths of a second)")
             elif typ is list:
                 value = [str(v).strip() for v in (value or []) if str(v).strip()]
                 if key == "detect.placeholder_kinds":
@@ -650,6 +682,12 @@ class Config:
         cfg.editor_inline_service = service if service in INLINE_SERVICES else "auto"
         prompt_cfg = data.get("prompt") or {}
         cfg.prompt_autocorrect = _flag(prompt_cfg, "autocorrect", False, "prompt.autocorrect")
+        cfg.prompt_voice_hold = _flag(prompt_cfg, "voice_hold", True, "prompt.voice_hold")
+        cfg.prompt_voice_toggle = _flag(prompt_cfg, "voice_toggle", True, "prompt.voice_toggle")
+        try:
+            cfg.prompt_voice_hold_tenths = min(20, max(1, int(prompt_cfg.get("voice_hold_tenths", 3))))
+        except (TypeError, ValueError):
+            cfg.prompt_voice_hold_tenths = 3
         # Every skip on until a person changes them (the user, 2026-10-16: out of the box it was too
         # noisy); a saved list - even an empty one - is kept as chosen.
         if "autocorrect_skip" in prompt_cfg:
@@ -668,6 +706,7 @@ class Config:
             cfg.debug_timings_since = 0
         ui_cfg = data.get("ui") if isinstance(data.get("ui"), dict) else {}
         cfg.ui_setting_keywords = setting_keywords(ui_cfg.get("setting_keywords"), strict=False)
+        cfg.ui_animations_override = _flag(ui_cfg, "animations_override", True, "ui.animations_override")
         rd_cfg = data.get("remote_desktop") if isinstance(data.get("remote_desktop"), dict) else {}
         cfg.remote_desktop_hosts = remote_desktop_hosts(rd_cfg.get("hosts") or [], strict=False)
         ses = data.get("session") or {}

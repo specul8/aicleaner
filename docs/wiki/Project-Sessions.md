@@ -2,58 +2,59 @@
 
 [Home](Home.md) > Project Sessions
 
-The **Project Sessions** page drives Claude Code from the browser. Each session runs the same
+The **Project Sessions** page drives Claude Code from the browser. Each AI session runs the same
 Claude Code CLI on this machine, in headless streaming mode, with `ANTHROPIC_BASE_URL` pointing back
 at the proxy - so a prompt typed here is tokenised on the way out and the reply rehydrated on the way
 back, exactly as in a terminal (see [How it works](How-it-works.md)). It works the same from your
 desk or from another device through the tunnel (see [Remote access](Remote-access.md)).
 
 The page is off until asked for: Settings, [Session page](Settings.md#card-session) (`session.enabled`). Switching it off
-stops every session running from it. If the CLI cannot be found, the page says so.
+stops every AI session running from it. If the CLI cannot be found, the page says so.
 
-## Project profiles
+## Project sessions
 
-Work is organised by engagement, not by folder. A **project profile** is one engagement, and every
-session is named after its profile. Profiles are edited on the page itself (**Edit project
-profiles**, a tab per profile) and stored in `profiles.json` beside `_global.json` in the app
-folder - never in the shared client folder, because a profile names folders on *this* machine.
+Work is organised by engagement, not by folder. A **project session** is one engagement, and every
+AI session is named after its project session. Project sessions are edited on the page itself
+(**Edit project sessions**, a tab per project session) and stored in `profiles.json` beside
+`_global.json` in the app folder - never in the shared topic folder, because a project session names
+folders on *this* machine.
 
 | Field | What it does |
 |---|---|
-| Name | How the session is known everywhere: the picker, the menu, notices, the page address. Up to 40 characters; no slash, `?`, `#` or `%`. Locked while its session runs |
-| Client | The client the work is for, or **None (Global only)**. Shown as the client's label, never its id |
+| Name | How the session is known everywhere: the picker, the menu, notifications, the page address. Up to 40 characters; no slash, `?`, `#` or `%`. Locked while its AI session runs |
+| Topic | The topic the work is for, or **None (Global only)**. Shown as the topic's label, never its id |
 | Workspace files | `.code-workspace` files, one per line. Their folders make up the file tree; the first sets the home folder |
 | Folders added by hand | Extra folders, one per line, chosen with the folder picker |
 | Home folder | Where sessions start. Derived from the first workspace file (or the first folder); you can choose another, and Reset goes back to the derived one |
-| OneDrive share | The client's share folder, saved per client on this machine (`client-shares.json`), not with the profile |
+| Project assets folder | The topic's project assets folder in OneDrive, saved per topic on this machine (`client-shares.json`), not with the project session |
 | Model | A drop-down of known models, **Default** (Claude Code's own choice), or **Other...** to type a name |
 | Standing brief | Text sent with the first prompt of each session, for example "Landing zone work for Contoso. Terraform only." |
 
 Folders must sit inside the allowed folder locations (`folders.roots`, set in
-[Folders the pages can open](Settings.md#card-folders)). A profile naming a client that is not in the mapping is refused when you
-save it. Edits to a profile apply from the session's next start.
+[Folders the pages can open](Settings.md#card-folders)). A project session naming a topic that is not in the mapping is refused when
+you save it. Edits to a project session apply from the AI session's next start.
 
-**Naming a session does not narrow the filter.** Every client's names are replaced in every
+**Naming a session does not narrow the filter.** Every topic's terms are replaced in every
 session; a Contoso session that mentions Fabrikam still has Fabrikam replaced.
 
 ## Starting, continuing and stopping
 
 Pick a project in **Pick a Project to chat about...**, then use the session card:
 
-- **Start** launches Claude Code in the home folder. Every other folder of the profile, and the
-  client's share, is passed with `--add-dir`, so Claude can reach them (prompts still apply).
-- **Continue** lists earlier conversations held in the profile's folders, newest first, each shown
+- **Start** launches Claude Code in the home folder. Every other folder of the project session,
+  and the topic's project assets folder, is passed with `--add-dir`, so Claude can reach them (prompts still apply).
+- **Continue** lists earlier conversations held in the project session's folders, newest first, each shown
   by its first prompt. Choosing one starts with `--resume`. A tick-box also lists conversations
   started by programs (automated reviews). A transcript written to in the last few minutes is
   flagged as possibly open elsewhere.
 - **Start chatting** scrolls down to the prompt box of a running session.
-- **Stop** ends the session: its process, context and permission grants go.
+- **Stop** ends the AI session: its process, context and permission grants go.
 - **Escape** (or **Interrupt**, shown beside a slow request) stops the current turn and keeps the
   session.
 
-Up to `session.max_running` sessions (default 4) run at once, each with its own process,
-transcript and permission queue. Running sessions are listed under Project Sessions in the menu,
-each linking straight to its chat.
+Up to `session.max_running` AI sessions (default 4) run at once, each with its own process,
+transcript and permission queue. Running AI sessions are listed under Project Sessions in the menu,
+each linking straight to its conversation.
 
 In the prompt box, Enter sends, Shift+Enter or Ctrl+Enter adds a line, Up and Down walk your
 earlier prompts, and `/` opens the list of commands that work in headless mode (the project's,
@@ -94,7 +95,7 @@ sends the choices; **Decline** refuses. If a question closed before your answer 
 is put back in the prompt box, ready to send.
 
 Cards are shown only on their own session's page; another session waiting on you shows in the
-menu and as a notice.
+menu and as a notification.
 
 ## The conversation
 
@@ -124,14 +125,21 @@ Settings > [Prompt autocorrect](Settings.md#card-autocorrect).
 
 ## Files
 
-The file tree (toggle with **Files**) shows the profile's folders, with the client's OneDrive share
-pinned at the top. Clicking a file offers:
+The file tree (toggle with **Files**) shows the project session's folders, with the topic's project
+assets folder pinned at the top. Clicking a file offers:
 
 - **Open in a tab** - beside the conversation tab. Text and code are editable with autosave; a save
   is refused if the file changed on disk since it was opened, offering Reload, Overwrite, or copy
   yours then reload. Markdown has a preview.
 - **Download** - for Word, PowerPoint and anything a tab cannot show.
 - **Put the path in the prompt**.
+
+**Files Claude asks you to read.** When a reply asks you to read or review a Markdown file Claude has just
+written ("please review spec.md", "spec.md is ready for your review", "have a look at spec.md"), the file opens
+in Preview in a tab behind the one in front, and the menu bar and a notification say "<session>: Claude has opened
+<file> for you to review". Nothing comes to the front by itself; clicking it (or the notification's **Open**)
+brings that file's tab forward. A file Claude only writes or mentions raises nothing. In [Settings](Settings.md#card-session),
+**Open files for review** turns this off.
 
 Right-click opens the same menu without opening or closing a folder. A folder's menu also has
 **View files (N)** - each of its own files that a tab can show - and **Download (zip)**, the folder
@@ -144,7 +152,7 @@ above 20); **Download** fetches up to five files one by one, and more - or any f
 in which each file keeps its folders (`docs/wiki/Settings.md`; with items from two project folders,
 each path starts with its project folder's name). Escape clears the selection.
 
-Files are shown as they are on disk, real names included: they go to you, not to the AI service.
+Files are shown as they are on disk, real terms included: they go to you, not to the AI service.
 
 ### Editing files
 
@@ -169,7 +177,7 @@ plain text, as before.
 
 Above the file tree are two buttons, **Files** and **Search**; the highlighted one is the view you
 are looking at. **Search** opens a search box. After two characters it
-searches every folder the tree shows, the share included, for files and folders whose names contain
+searches every folder the tree shows, the project assets folder included, for files and folders whose names contain
 what you typed (any case), while "Searching..." pulses. Matches are listed with their full paths and
 the same Prompt / View / Download menu. Folders that cannot be read, and folders of installed
 dependencies or tools - `node_modules`, Python virtual environments, `.terraform`, `.git` and the
@@ -180,26 +188,26 @@ folders not yet searched. **Refresh** beside the two buttons runs the search aga
 Clicking **Files** closes the file and folder search and returns the tree view to how it was before
 the search; the query is kept, and runs again when you come back to **Search**.
 
-## Notices
+## Notifications
 
-Work that finishes while you are not looking at it is announced: a toast on whatever page is open,
-and an entry in the status stack that stays until you visit it.
+Work that finishes while you are not looking at it is announced: a notification on whatever page is
+open, and an entry in the status stack that stays until you visit it.
 
-| Notice | When |
+| Notification | When |
 |---|---|
 | `<session>: Claude has finished` | A turn ended in a session you are not viewing |
 | `<session> is waiting on you` | A permission card or question arrived |
 
-**Open** on a notice goes straight to that session's chat. Visiting the session clears both the
-entry and its toast.
+**Open** on a notification goes straight to that session's conversation. Visiting the session
+clears both the entry and its notification.
 
 ## Alerts and scheduled runs
 
 An **alert** is raised by a script or a session on the AI Cleaner machine - for example "Daily close needs
 you", with a summary of what a job found. It shows in the status stack on every page and every device
-(remote access included), with a toast when it arrives, and it stays until someone presses **Dismiss** on
+(remote access included), with a notification when it arrives, and it stays until someone presses **Dismiss** on
 the **Alerts** page. Dismissing it on one device clears it everywhere. Alerts are kept across restarts.
-An alert names the session to talk it over in: **Open** goes straight to that session's chat.
+An alert names the session to talk it over in: **Open** goes straight to that session's conversation.
 
 Alerts are raised only from the AI Cleaner machine; through remote access they can be read and
 dismissed, never raised.
@@ -216,7 +224,7 @@ dismissed, never raised.
 When it sends a prompt:
 
 - **A stopped session** is started on a new conversation (titled `-Title`; `{date}` becomes the date) and
-  sent the prompt. It runs with the profile's own client, filtering and permission mode, as if you had
+  sent the prompt. It runs with the project session's own topic, filtering and permission mode, as if you had
   pressed Start.
 - **A session in use** - a turn running, a question waiting, prompts queued, or anything in the last 30
   minutes (`-IdleMinutes`) - gets the prompt queued in the conversation that is open. A conversation you
@@ -227,7 +235,7 @@ When it sends a prompt:
   raises an amber alert saying why.
 
 A session started this way can still ask you things: its questions wait on the Session page, with the
-"waiting on you" notice, until you answer - there is no time limit. While a question waits, the rest of
+"waiting on you" notification, until you answer - there is no time limit. While a question waits, the rest of
 that turn waits too.
 
 `-RegisterTask` creates one Windows Task Scheduler task for your user (no administrator rights), daily at
@@ -240,14 +248,14 @@ Two Claude Codes in one working tree commit over each other, so a project has on
 time. For a second, use a git **worktree**: a second checkout of the same repo on its own branch.
 
 1. On a project's session card, choose **Create a worktree**.
-2. Pick one of the profile's repos (**Branch from**) - or a plain folder outside OneDrive, which is
+2. Pick one of the project session's repos (**Branch from**) - or a plain folder outside OneDrive, which is
    made a git repo with a first commit - and keep or change the name (default `wt-1`, `wt-2`...).
 3. **Create** runs `git worktree add` into `<repo>.worktrees\<name>`, beside the repo, on a branch
-   of the same name, and switches to the new session, named `<profile> @ <name>` (for example
+   of the same name, and switches to the new session, named `<project session> @ <name>` (for example
    `Contoso @ wt-1`).
 
-A worktree session uses the profile's client, model and brief, but its only folder is the worktree:
-it cannot write to the original repo. It is saved with its profile and appears in the picker like
+A worktree session uses the project session's topic, model and brief, but its only folder is the
+worktree: it cannot write to the original repo. It is saved with its project session and appears in the picker like
 any other session.
 
 When the worktree session is stopped, its card offers:
@@ -255,12 +263,12 @@ When the worktree session is stopped, its card offers:
 - **Merge** - merges the branch into the repo's current branch. Refused if either side has
   uncommitted changes; a conflict is reported and the merge undone, nothing merged.
 - **Remove** - removes the worktree, and its branch if merged. A branch with unmerged commits is
-  kept. The session is removed and the page returns to the parent profile.
+  kept. The session is removed and the page returns to the parent project session.
 
 ## See also
 
 - [Remote access](Remote-access.md) - driving sessions from another device
-- [Settings](Settings.md) - `session.*`, allowed folders, restored-name colouring
+- [Settings](Settings.md) - `session.*`, allowed folders, restored-term colouring
 - [Troubleshooting](Troubleshooting.md)
 
 ---

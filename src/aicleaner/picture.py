@@ -89,7 +89,7 @@ def redact_picture(raw: bytes, mapper: Any, read_boxes: ReadBoxes, fill_boxes: F
     left = mapper.find_real("\n".join(again))
     still = [t for t in again if spans(t, mapper, candidates)]
     if left or still:
-        what = f"a client name ({', '.join(left)})" if left else "an identifier or secret"
+        what = f"a real name ({', '.join(left)})" if left else "an identifier or secret"
         return Redacted(None, text, len(boxes), f"{what} was still legible after blacking out")
     return Redacted(copy, text, len(boxes))
 

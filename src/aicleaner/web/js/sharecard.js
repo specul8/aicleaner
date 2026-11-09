@@ -26,9 +26,9 @@ function shareForm(cid, share, label, slot) {
   };
   const clear = current ? h('button', { type: 'button', class: 'share-clear' }, icon('cross'), 'Forget') : null;
   input.addEventListener('input', () => {
-    if (input.value.trim()) save({ path: input.value.trim() }, (r) => `Share set to ${r.share}.`);
+    if (input.value.trim()) save({ path: input.value.trim() }, (r) => `Project assets folder set to ${r.share}.`);
   });
-  if (clear) clear.addEventListener('click', () => save({ path: '' }, () => 'Share forgotten. The folder itself is untouched.'));
+  if (clear) clear.addEventListener('click', () => save({ path: '' }, () => 'Project assets folder forgotten. The folder itself is untouched.'));
   // The same picker as everywhere else, bounded to folders.roots by the API, so browsing shows
   // exactly what will be accepted. Not a <form>: this sits inside the profiles editor.
   const pick = folderPicker(input, { label: current ? 'Choose another folder' : 'Choose a folder' });
@@ -39,7 +39,7 @@ function shareForm(cid, share, label, slot) {
     pick.disabled = true;
   }).catch(() => {});
   return [h('p', { class: current ? 'share-current' : 'share-current muted' },
-    current || 'No OneDrive share set'), row];
+    current || 'No project assets folder set'), row];
 }
 
 // Fills `slot` with the share control for one client. Nothing when the page has no proxy behind it.
@@ -47,7 +47,7 @@ export async function fillShare(slot, cid, label) {
   try {
     const share = await getJSON(`/api/clients/${encodeURIComponent(cid)}/share`);
     slot.replaceChildren(
-      h('p', { class: 'hint' }, `OneDrive share for ${label}: the folder files cross through between this `
+      h('p', { class: 'hint' }, `Project assets folder for ${label}: the OneDrive folder files cross through between this `
         + 'machine and the one you drive a session from. It shows first in the Files tree, and the session '
         + 'can read and write it. Kept on this machine only.'),
       ...shareForm(cid, share, label, slot));

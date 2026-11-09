@@ -106,7 +106,7 @@ function openSettings(view, preset, saved) {
     h('h2', {}, `Configure ${preset.name}`),
     h('label', { class: 'field' }, 'Name', nameInput),
     h('p', { class: 'hint preset-limit' }, limitText(view)),
-    boxes.length ? list : h('p', { class: 'muted' }, 'No project profiles yet. Add one with Edit project profiles.'),
+    boxes.length ? list : h('p', { class: 'muted' }, 'No project sessions yet. Add one with Edit project sessions.'),
     count,
     h('div', { class: 'fb-footer' }, save));
   const close = () => { dialog.close(); dialog.remove(); };

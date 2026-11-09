@@ -6,9 +6,9 @@ import { h, icon, iconButton, pickBox, pickCell } from '../dom.js';
 import { track } from '../unsaved.js';
 
 const MODES = [
-  { value: 'redact', label: 'Redact', text: 'Credentials are replaced with [REDACTED-family] and the request continues. The model sees that a secret was there, never its value. The default.' },
-  { value: 'block', label: 'Block', text: 'Any credential refuses the whole request (HTTP 403 naming the family), so you remove it and retry. Strictest; use it for sessions touching production.' },
-  { value: 'off', label: 'Off', text: 'No credential scanning at all. Only for troubleshooting a false positive; client identifiers are still filtered.' },
+  { value: 'redact', label: 'Redact', text: 'Secrets are replaced with [REDACTED-family] and the request continues. The model sees that a secret was there, never its value. The default.' },
+  { value: 'block', label: 'Block', text: 'Any secret refuses the whole request (HTTP 400 naming the family), so you remove it and retry. Strictest; use it for sessions touching production.' },
+  { value: 'off', label: 'Off', text: 'No secret scanning at all. Only for troubleshooting a false positive; real names are still filtered.' },
 ];
 
 const view = { main: null, ctx: null };
@@ -43,9 +43,9 @@ function modeCard(current) {
   show(current);
   for (const radio of group.querySelectorAll('input')) lockLocal(radio);
   return h('section', { class: `card${remote() ? ' local-only' : ''}`, dataset: { card: 'secrets-mode' } },
-    h('h2', {}, 'When a credential is found in a request'),
+    h('h2', {}, 'When a secret is found in a request'),
     remote() ? h('p', { class: 'chip local-only-note' }, LOCAL_ONLY) : null,
-    h('p', { class: 'hint' }, 'Credentials with a recognisable shape (Azure keys, SAS tokens, DevOps and GitHub PATs, client secrets, JWTs, connection strings) are found automatically.'),
+    h('p', { class: 'hint' }, 'Secrets with a recognisable shape (Azure keys, SAS tokens, DevOps and GitHub PATs, client secrets, JWTs, connection strings) are found automatically.'),
     h('div', { class: 'form-row' }, group), explain);
 }
 
@@ -135,7 +135,7 @@ function savedTable(entries) {
 function addForm(enabled) {
   const form = h('form', { id: 'add-secret', class: 'form-row' },
     h('label', { class: 'field' }, 'Label', h('input', { type: 'text', name: 'label', placeholder: 'e.g. cloudflare-pat', required: true })),
-    h('label', { class: 'field' }, 'Value', h('input', { type: 'password', name: 'value', placeholder: 'paste the credential', autocomplete: 'off', required: true })),
+    h('label', { class: 'field' }, 'Value', h('input', { type: 'password', name: 'value', placeholder: 'paste the secret', autocomplete: 'off', required: true })),
     h('button', { type: 'submit', class: 'primary', disabled: !enabled }, icon('plus'), 'Save'));
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -160,7 +160,7 @@ async function paint() {
     sayError(error);
   }
   const saved = h('section', { class: 'card' }, h('h2', {}, 'Saved secrets'),
-    h('p', { class: 'hint' }, 'Anything you know is a credential but has no recognisable shape (a Cloudflare or Shopify token, a webhook secret, a licence key). Each exact value is replaced with [REDACTED-user:label] before a request leaves this machine.'),
+    h('p', { class: 'hint' }, 'Anything you know is a secret but has no recognisable shape (a Cloudflare or Shopify token, a webhook secret, a licence key). Each exact value is replaced with [REDACTED-user:label] before a request leaves this machine.'),
     addForm(data.enabled), savedTable(data.entries || []),
     h('p', { class: 'hint' }, 'Stored encrypted for this Windows user on this machine only (DPAPI). Values are never shown again, synced or logged; the evidence log records the label and a count.'));
   view.main.replaceChildren(h('div', { class: 'page-head' }, h('h1', {}, 'Secrets')), modeCard(view.ctx.status.secrets_mode), saved);

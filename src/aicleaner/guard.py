@@ -95,6 +95,15 @@ REMOTE_WRITES: frozenset[tuple[str, str]] = frozenset({
     ("POST", "/api/setup/enable")})
 
 
+# H2: the three calls Claude Code's hooks make after every tool call, which change no setting and weaken nothing - is
+# this call to be stopped (check_collapse), were names put back in it (names_restored), is a message waiting for this
+# session (deliver_queued). Without a key so a hook need not open a DPAPI file on every tool call.
+KEYLESS: frozenset[str] = frozenset({"/api/tool/check", "/api/tool/names", "/api/session/deliver",
+                                     # A session's approval host asking (mcp_approve, agents/bridge): it carries its own
+                                     # per-session token (X-Aicleaner-Approve), checked by the route.
+                                     "/api/session/permission/request"})
+
+
 def refused_remotely(path: str, method: str = "") -> bool:
     """True for what is never served through remote access. A caller that names no method is refused
     as before - only a named read or write on the lists is let through."""
@@ -108,8 +117,10 @@ UI_EXACT = {"/", "/ui", "/ui/", "/config", "/secrets"}
 TEXT_API = {"/api/tokenise", "/api/rehydrate"}
 # blob: for images and frames (D168): through the encrypted tunnel a file tab's image or PDF arrives
 # sealed and is shown from an object URL the page made itself - nothing from outside can name one.
+# connect-src also names one address on the reading device itself (feature 164): aicleaner-rdp's /here, which says
+# whether this device is one of the menu's remote desktops - an answer of one public hostname, nothing sent to it.
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
-       "frame-src 'self' blob:; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+       "frame-src 'self' blob:; connect-src 'self' http://127.0.0.1:8790/here; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
        "form-action 'self'")
 # The page itself (feature 139): a fresh nonce per load, which the file editor (Monaco) puts on the <style>
 # elements it makes. Inline styles stay forbidden - only an element carrying this load's nonce is allowed.
@@ -158,11 +169,14 @@ def origin_ok(origin: str, remote_hostname: str = "") -> bool:
     return parts.scheme == "http" and host in LOOPBACK_NAMES
 
 
-def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None) -> Any:
+def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None, api_key: str = "") -> Any:
     """Build the middleware for a given listen address (fixed for the life of the process).
 
-    `remote_hostname` and `verifier` switch on the tunnel exception; without them nothing changes.
+    `remote_hostname` and `verifier` switch on the tunnel exception; without them nothing changes. `api_key` (H2):
+    when set, a changing call to `/api/` from this machine must carry it (apikey.HEADER) - the page is given it as it
+    loads, the hooks and scripts read it from its file. Through the tunnel the Access sign-in is the gate instead.
     """
+    from .apikey import HEADER, matches
     loopback = is_loopback_listen(listen)
     remote_hostname = (remote_hostname or "").strip().lower()
 
@@ -212,6 +226,12 @@ def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None) -> 
                 return web.Response(status=403, text="aicleaner: cross-origin request refused")
             if path.startswith("/api/") and path not in TEXT_API and request.content_type != "application/json":
                 return web.Response(status=415, text="aicleaner: API writes must be application/json")
+            # H2 (1.1): from this machine, a change needs this install's key - a blind `curl` changes nothing.
+            if (api_key and not remote and path.startswith("/api/") and path not in KEYLESS
+                    and not matches(request.headers.get(HEADER, ""), api_key)):
+                log.warning("refused %s %s from this machine: no or wrong API key", request.method, path)
+                return web.json_response({"error": "AI Cleaner's API key is missing or wrong: open AI Cleaner's own "
+                                                   "page, or use its scripts, to change things"}, status=401)
         response = await handler(request)
         if ui:
             response.headers["Content-Security-Policy"] = request.get(FILE_CSP) or csp_for(request)

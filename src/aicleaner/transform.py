@@ -338,7 +338,8 @@ def canary_matches(mapper: Mapper, body: bytes, limit: int = 20) -> list[dict[st
         return re.sub(r"\s+", " ", text)
 
     def check(text: str, where: str, path: str) -> None:
-        for form, start, end in mapper.real_spans(text):
+        spans = mapper.real_spans(text)
+        for form, start, end in spans:
             if len(found) < limit:
                 # The entry's own text and whether this match is part of a longer word, so the Log
                 # page can offer "whole word only" where that would clear it, and say so where not.
@@ -347,6 +348,24 @@ def canary_matches(mapper: Mapper, body: bytes, limit: int = 20) -> list[dict[st
                               "declared": form.real, "inside": inside_word(text, start, end),
                               "before": flat(text[max(0, start - CANARY_CONTEXT):start]),
                               "after": flat(text[end:end + CANARY_CONTEXT])})
+        # D231: the canary also reads the text with its disguises off (normalised). A match only that read finds was
+        # refused with nothing to show for it; it is located now - `written` is the same stretch as it stands in the
+        # request, which the Log page offers to add as a spelling of its own.
+        plain, starts = normalised_with_map(text)
+        if plain == text:
+            return
+        seen = {(form.client, text[s:e]) for form, s, e in spans}
+        for form, start, end in mapper.real_spans(plain):
+            first, last = starts[start], starts[end - 1] + _width_at(text, starts[end - 1])
+            written = text[first:last]
+            if len(found) >= limit or (form.client, written) in seen:
+                continue
+            seen.add((form.client, written))
+            found.append({"path": path, "where": where, "client": form.client, "form": index.get(id(form), -1),
+                          "found": plain[start:end], "written": written, "decoded": True, "declared": form.real,
+                          "inside": inside_word(plain, start, end),
+                          "before": flat(text[max(0, first - CANARY_CONTEXT):first]),
+                          "after": flat(text[last:last + CANARY_CONTEXT])})
 
     def walk(node: Any, path: str) -> None:
         if isinstance(node, str):
@@ -372,8 +391,10 @@ def canary_sites(mapper: Mapper, body: bytes, limit: int = 20) -> list[str]:
         json.loads(body.decode("utf-8", errors="replace"))
     except json.JSONDecodeError:
         return ["body is not JSON"]
-    return [f"{m['path']} ({m['where']}): client {m['client']}, form #{m['form']}: "
-            f"...{m['before']}[{m['found']}]{m['after']}..." for m in canary_matches(mapper, body, limit)]
+    return [f"{m['path']} ({m['where']}): topic {m['client']}, term #{m['form']}: "
+            f"...{m['before']}[{m.get('written', m['found'])}]{m['after']}..."
+            + (f" (reads as {m['found']!r} once decoded)" if m.get("decoded") else "")
+            for m in canary_matches(mapper, body, limit)]
 
 
 def rule_declined(mapper: Mapper, body: bytes) -> list[tuple[str, str, str]]:
@@ -415,6 +436,51 @@ def normalised(text: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     text = _INVISIBLE.sub("", text)
     return _SPACELIKE.sub(" ", text)
+
+
+def normalised_with_map(text: str) -> tuple[str, list[int]]:
+    """normalised(), built a character at a time, with where each character of the result came from in `text` - so a
+    match in the decoded text can be shown as it was written. NFKC is applied per character here: the canary itself
+    keeps the whole-string form, so a difference can only cost a located spelling, never a missed refusal."""
+    import unicodedata
+
+    out: list[str] = []
+    starts: list[int] = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if char == "%" and _PERCENT.match(text, i):
+            code = int(text[i + 1:i + 3], 16)
+            if 0x20 <= code < 0x7f:
+                out.append(chr(code))
+                starts.append(i)
+                i += 3
+                continue
+        if char == "&":
+            entity = _ENTITY.match(text, i)
+            if entity:
+                out.append(" ")
+                starts.append(i)
+                i = entity.end()
+                continue
+        if _INVISIBLE.match(char):
+            i += 1
+            continue
+        piece = " " if _SPACELIKE.match(char) else unicodedata.normalize("NFKC", char)
+        for part in piece:
+            out.append(part)
+            starts.append(i)
+        i += 1
+    return "".join(out), starts
+
+
+def _width_at(text: str, i: int) -> int:
+    """How many characters of `text` the one decoded character starting at i took: 3 for %XX, an entity's length,
+    else 1."""
+    if text.startswith("%", i) and _PERCENT.match(text, i) and 0x20 <= int(text[i + 1:i + 3], 16) < 0x7f:
+        return 3
+    entity = _ENTITY.match(text, i) if text.startswith("&", i) else None
+    return entity.end() - i if entity else 1
 
 
 def canary(mapper: Mapper, body: bytes) -> list[str]:

@@ -40,6 +40,30 @@ param(
 $script:AppFolder = if ($AppFolder) { $AppFolder } elseif (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
 
 Set-StrictMode -Version Latest
+
+function Get-AiCleanerApiHeader {
+    <#
+    .SYNOPSIS
+        The header that carries this install's API key (H2, AI Cleaner 1.1): a change through the API from this machine
+        is refused without it. Read from the DPAPI-protected file AI Cleaner makes at its first start; none yet (an
+        older AI Cleaner) gives no header, as before.
+    #>
+    [OutputType([hashtable])]
+    param([string]$StateFolder = (Join-Path $env:USERPROFILE '.aicleaner'))
+    # Given outright (a test, or a script started by AI Cleaner itself): whoever sets this already has the key.
+    if ($env:AICLEANER_API_KEY) { return @{ 'X-AI-Cleaner-Key' = [string]$env:AICLEANER_API_KEY } }
+    $file = Join-Path $StateFolder 'secrets\api-key.dpapi'
+    if (-not (Test-Path -LiteralPath $file)) { return @{} }
+    try {
+        Add-Type -AssemblyName System.Security
+        $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($file), $null, 'CurrentUser')
+        try { return @{ 'X-AI-Cleaner-Key' = [Text.Encoding]::UTF8.GetString($bytes).Trim() } }
+        finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+    } catch {
+        Write-Verbose "The API key could not be read: $($_.Exception.Message)"
+        return @{}
+    }
+}
 $ErrorActionPreference = 'Stop'
 
 # --- Contact attribution (inlined per script so each script stays self-contained) ---------
@@ -196,7 +220,7 @@ function Stop-HiddenListener {
     if (-not $PSCmdlet.ShouldProcess("AI Cleaner on port $ProxyPort (owner not visible)", 'Stop AI Cleaner proxy')) { return 0 }
     if ($health.PSObject.Properties['service'] -and [string]$health.service) {
         try {
-            Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$ProxyPort/api/restart" -ContentType 'application/json' `
+            Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Method Post -Uri "http://127.0.0.1:$ProxyPort/api/restart" -ContentType 'application/json' `
                 -Body '{}' -TimeoutSec 10 -ErrorAction Stop | Out-Null
         } catch {
             Write-Warning "AI Cleaner did not take the request to stop: $($_.Exception.Message)"
@@ -258,7 +282,7 @@ try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -Timeout
 if ($health -and $health.PSObject.Properties['service'] -and [string]$health.service) {
     if ($PSCmdlet.ShouldProcess("pid $($proc.Id) (started with the computer)", 'Ask AI Cleaner to stop')) {
         try {
-            Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$Port/api/restart" -ContentType 'application/json' `
+            Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Method Post -Uri "http://127.0.0.1:$Port/api/restart" -ContentType 'application/json' `
                 -Body '{}' -TimeoutSec 10 -ErrorAction Stop | Out-Null
         } catch {
             Write-Warning "AI Cleaner did not take the request to stop: $($_.Exception.Message)"

@@ -64,7 +64,7 @@ class UserSecrets:
         if not label or not value:
             raise ValueError("label and value are both required")
         if len(value) < 8:
-            raise ValueError("value is too short to be a credential (8 characters minimum)")
+            raise ValueError("value is too short to be a secret (8 characters minimum)")
         if any(e["label"] == label for e in self._entries):
             raise ValueError(f"label {label!r} already exists; remove it first to replace the value")
         self._entries.append({"label": label, "value": value,

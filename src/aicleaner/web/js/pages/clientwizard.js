@@ -13,7 +13,7 @@ import { folderPicker } from '../picker.js';
 import { arrangeSheet } from '../sheet.js';
 
 export const SKIP_KEY = 'aicleaner.clientWizard';
-const PAGES = ['Intro', 'Client name', 'Alternate names', 'Domains', 'Email domains', 'Other identifiers', 'Scan a repository', 'Finish'];
+const PAGES = ['Intro', 'Topic name', 'Alternate names', 'Domains', 'Email domains', 'Other identifiers', 'Scan a repository', 'Finish'];
 const ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9_]|-){0,63}$/;
 
 export function wizardSkipped() {
@@ -69,7 +69,7 @@ export function openClientWizard(onCreated) {
     const at = pages.indexOf(wiz.page);
     const next = pages[Math.max(0, Math.min(pages.length - 1, at + step))];
     if (wiz.page === 1 && step > 0 && !ID_PATTERN.test(wiz.draft.client_id)) {
-      say('Give the client an id first: letters, digits, hyphens and underscores.', 'warn');
+      say('Give the topic an id first: letters, digits, hyphens and underscores.', 'warn');
       return;
     }
     wiz.page = next;
@@ -101,7 +101,7 @@ function listEditor(values, { placeholder = '', normalise = (v) => v.trim(), fix
   const rows = h('div', { class: 'wizard-list' });
   const paintRows = () => {
     setChildren(rows,
-      ...fixed.filter(Boolean).map((value) => h('div', { class: 'wizard-row fixed' }, h('span', { class: 'mono' }, value), h('span', { class: 'hint' }, ' (from the client name)'))),
+      ...fixed.filter(Boolean).map((value) => h('div', { class: 'wizard-row fixed' }, h('span', { class: 'mono' }, value), h('span', { class: 'hint' }, ' (from the topic name)'))),
       ...values.map((value, i) => {
         const input = h('input', { type: 'text', value, 'aria-label': placeholder || 'value', 'data-unsaved-ignore': '' });
         input.addEventListener('change', () => {
@@ -135,7 +135,7 @@ function listEditor(values, { placeholder = '', normalise = (v) => v.trim(), fix
 }
 
 function intro(wiz, { go, paint }) {
-  const start = h('button', { type: 'button', class: 'primary wizard-start-client' }, 'Enter Client Name');
+  const start = h('button', { type: 'button', class: 'primary wizard-start-client' }, 'Enter Topic Name');
   const global = h('button', { type: 'button', class: 'wizard-start-global' }, 'Add Global Info');
   start.addEventListener('click', () => { wiz.draft = blank(); go(1); });
   global.addEventListener('click', () => { wiz.draft = { ...blank(), mode: 'global' }; wiz.page = 2; paint(); });
@@ -157,14 +157,14 @@ function intro(wiz, { go, paint }) {
           try { await postJSON(`/api/client-drafts/${d.id}/delete`, {}); paint(); } catch (error) { sayError(error); }
         });
         return h('div', { class: 'wizard-draft' },
-          h('span', {}, d.mode === 'global' ? 'Global info' : (d.label || d.client_id || 'unnamed client')), resume, remove);
+          h('span', {}, d.mode === 'global' ? 'Global info' : (d.label || d.client_id || 'unnamed topic')), resume, remove);
       }));
   }).catch(() => {});
   return [
-    h('h2', {}, 'Add a client'),
-    h('p', {}, 'A client is one engagement. Over the next few pages you tell AI Cleaner the names, domains and other '
-      + 'identifiers that would show who the client is; from then on they are replaced with stand-ins before anything '
-      + 'reaches the AI service. What you type is kept as a draft as you go, and nothing becomes a client until you '
+    h('h2', {}, 'Add a topic'),
+    h('p', {}, 'A topic is anything whose names you keep out of AI services: a client, a product, a person. Over the next few pages you tell AI Cleaner the names, domains and other '
+      + 'identifiers that would show who or what it is; from then on they are replaced with tokens before anything '
+      + 'reaches the AI service. What you type is kept as a draft as you go, and nothing becomes a topic until you '
       + 'Save on the last page.'),
     h('p', { class: 'hint' }, 'Global info is the same pages for things to hide whoever you work for - your own company and domains.'),
     h('div', { class: 'form-row' }, start, global), list];
@@ -179,12 +179,12 @@ function clientName(wiz, { changed, go }) {
   id.addEventListener('input', () => { d.client_id = id.value.trim(); label.placeholder = hintFor(); changed(); });
   label.addEventListener('input', () => { d.label = label.value.trim(); changed(); });
   return [
-    h('h2', {}, 'Client name'),
-    h('label', { class: 'field wide' }, 'Client ID', id,
-      h('span', { class: 'hint' }, 'Names the client\'s file and keys the mapping. Letters, digits, hyphens and underscores.')),
+    h('h2', {}, 'Topic name'),
+    h('label', { class: 'field wide' }, 'Topic ID', id,
+      h('span', { class: 'hint' }, 'Names the topic file and keys the mapping. Letters, digits, hyphens and underscores.')),
     h('label', { class: 'field wide' }, 'Display name', label,
       h('span', { class: 'hint' }, 'What you read, everywhere in here.')),
-    h('p', { class: 'hint' }, 'The number inside the stand-ins (Client07, client07.invalid) is worked out from the id; it is shown on the last page.'),
+    h('p', { class: 'hint' }, 'The number inside the tokens (Client07, client07.invalid) is worked out from the id; it is shown on the last page.'),
     nextButton(go)];
 }
 
@@ -196,7 +196,7 @@ function altNames(wiz, { changed, go }) {
     h('h2', {}, d.mode === 'global' ? 'Your own names' : 'Alternate names'),
     h('p', {}, d.mode === 'global'
       ? 'Names to hide whoever the work is for: your company, your brands.'
-      : 'Any other name that makes it obvious which company it is. Just the common ones: what you call this client, '
+      : 'Any other name that makes it obvious which company it is. Just the common ones: what you call this topic, '
         + 'brands the company owns or trades under, acronyms and what they stand for.'),
     h('p', { class: 'hint' }, `For example: ${display ? `${display} Pty Ltd, ` : ''}ACME, ACME Inc, A Company Making Everything.`),
     listEditor(d.names, { placeholder: 'Another name', fixed, onChange: changed }),
@@ -245,7 +245,7 @@ function emails(wiz, { changed, go }) {
   changed();
   return [
     h('h2', {}, 'Email domains'),
-    h('p', {}, 'Every address at these domains is the client\'s: it is replaced whoever it belongs to. The domains '
+    h('p', {}, 'Every address at these domains is the topic\'s: it is replaced whoever it belongs to. The domains '
       + 'from the last page are here already; add any email domain that is not among them.'),
     listEditor(d.emails, { placeholder: '*@acme-mail.com', normalise: (v) => { const x = stripScheme(String(v).replace(/^\*?@/, '')); return x ? `*@${x}` : ''; }, onChange: changed }),
     nextButton(go)];
@@ -293,7 +293,7 @@ function others(wiz, { changed, go, paint }) {
     suggestions.length > 1 ? selectAll(boxes) : null, ...rows) : null;
   return [
     h('h2', {}, 'Other identifiers'),
-    h('p', {}, 'Anything else that points at this client alone: the Azure DevOps organisation (dev.azure.com/<org>), '
+    h('p', {}, 'Anything else that points at this topic alone: the Azure DevOps organisation (dev.azure.com/<org>), '
       + 'the SharePoint address (its -my and -admin twins are added for you), other Microsoft endpoints, GitHub '
       + 'organisations or repositories, AWS account aliases or Google Cloud projects.'),
     ticks,
@@ -340,7 +340,7 @@ function scan(wiz, { changed, go, paint }) {
   show();
   return [
     h('h2', {}, 'Scan a repository (optional)'),
-    h('p', {}, 'If you have a local copy of a git repository with this client\'s work in it, AI Cleaner can read it for '
+    h('p', {}, 'If you have a local copy of a git repository with this topic\'s work in it, AI Cleaner can read it for '
       + 'more of their identifiers. Tick the ones that are theirs; nothing goes to Review. Skip this if you have none.'),
     h('div', { class: 'form-row' }, folder, folderPicker(folder, { title: 'A repository to scan' }), run),
     results,
@@ -356,7 +356,7 @@ function finish(wiz, { dialog }) {
   skip.addEventListener('change', () => setWizardSkipped(skip.checked));
   const saveButton = h('button', { type: 'button', class: 'primary wizard-save' }, 'Save');
   const cancel = h('button', { type: 'button', class: 'wizard-cancel' }, 'Cancel');
-  cancel.addEventListener('click', () => { if (d.id) say('Kept as a draft: open Add client to resume it.', 'info'); dialog.close(); });
+  cancel.addEventListener('click', () => { if (d.id) say('Kept as a draft: open Add topic to resume it.', 'info'); dialog.close(); });
   const load = async () => {
     await new Promise((resolve) => { setTimeout(resolve, 450); });
     if (!d.id) { setChildren(summary, h('p', { class: 'hint' }, 'Nothing entered yet.')); return; }
@@ -364,9 +364,9 @@ function finish(wiz, { dialog }) {
       const s = await getJSON(`/api/client-drafts/${d.id}/summary`);
       setChildren(summary,
         h('dl', { class: 'setup-facts' },
-          h('dt', {}, d.mode === 'global' ? 'Adding to' : 'Client'), h('dd', {}, d.mode === 'global' ? 'Global' : `${d.label || d.client_id} (${d.client_id})`),
+          h('dt', {}, d.mode === 'global' ? 'Adding to' : 'Topic'), h('dd', {}, d.mode === 'global' ? 'Global' : `${d.label || d.client_id} (${d.client_id})`),
           d.mode === 'global' ? null : h('dt', {}, 'Index'), d.mode === 'global' ? null : h('dd', {}, String(s.index)),
-          h('dt', {}, 'Entries'), h('dd', {}, String(s.entries))),
+          h('dt', {}, 'Terms'), h('dd', {}, String(s.entries))),
         h('ul', { class: 'wizard-counts' }, ...Object.entries(s.kinds).map(([kind, n]) => h('li', {}, `${kindLabel(kind)}: ${n}`))),
         s.email_rules.length ? h('p', {}, `Every address at ${s.email_rules.join(', ')} counts as theirs.`) : null);
     } catch (error) { sayError(error); }
@@ -377,7 +377,7 @@ function finish(wiz, { dialog }) {
     try {
       const done = await postJSON(`/api/client-drafts/${d.id}/finish`, {});
       await refreshStatus();
-      say(`Saved ${d.mode === 'global' ? 'to Global' : (d.label || d.client_id)}: ${done.added} entr${done.added === 1 ? 'y' : 'ies'}.`, 'ok');
+      say(`Saved ${d.mode === 'global' ? 'to Global' : (d.label || d.client_id)}: ${done.added} term${done.added === 1 ? '' : 's'}.`, 'ok');
       dialog.close();
       if (wiz.onCreated) wiz.onCreated(done.client);
       else window.location.hash = `#/clients/${encodeURIComponent(done.client)}`;
@@ -385,8 +385,8 @@ function finish(wiz, { dialog }) {
   });
   return [
     h('h2', {}, 'Finish'),
-    h('p', {}, 'This is what will be added. Save makes it a client; Cancel keeps it as a draft to come back to.'),
+    h('p', {}, 'This is what will be added. Save makes it a topic; Cancel keeps it as a draft to come back to.'),
     summary,
-    h('label', { class: 'check' }, skip, ' Skip the wizard next time (Add client opens the short form instead)'),
+    h('label', { class: 'check' }, skip, ' Skip the wizard next time (Add topic opens the short form instead)'),
     h('div', { class: 'form-row wizard-nav' }, saveButton, cancel)];
 }

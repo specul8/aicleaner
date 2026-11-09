@@ -17,7 +17,9 @@ let monaco = null;
 
 // Feature 143: code suggested as you pause, by Claude Haiku through AI Cleaner. After this long with no typing the
 // editor asks; the answer (a second or two later) shows as grey text if the cursor has not moved on.
-const PAUSE_MS = 600;
+// f167: the service answering says how long its pause is (each answer carries `pause_ms`) - 150 ms for Copilot's own
+// fast completions, which answer in about a quarter of a second; 600 until one has said.
+let pauseMs = 600;
 let autoSuggest = false;
 const boxes = new Map();           // model uri -> the MonacoBox showing it (its file name, for the prompt)
 
@@ -99,18 +101,25 @@ async function suggestOnPause(m, model, position, token) {
   const box = boxes.get(model.uri.toString());
   if (!autoSuggest || !box || !box.alive) return null;
   if (!box.editor.getSelection().isEmpty() || box.editor.getOption(m.editor.EditorOption.readOnly)) return null;
-  await sleep(PAUSE_MS);
+  await sleep(pauseMs);
   if (token.isCancellationRequested || model.isDisposed()) return null;
   const version = model.getVersionId();
   const at = model.getOffsetAt(position);
   const text = model.getValue();
   let answer;
+  // D230 item 4: when Monaco gives up on this suggestion (typing on, moving away) the request is cancelled too, so
+  // the server is not left working on text that is gone.
+  const stop = new AbortController();
+  const listening = token.onCancellationRequested(() => stop.abort());
   try {
     answer = await postJSON('/api/editor/complete', { path: box.name, language: model.getLanguageId(),
-      before: text.slice(0, at), after: text.slice(at) });
+      before: text.slice(0, at), after: text.slice(at) }, { signal: stop.signal });
   } catch {
-    return null;                   // a suggestion that fails is simply not shown
+    return null;                   // a suggestion that fails, or was cancelled, is simply not shown
+  } finally {
+    listening.dispose();
   }
+  if (Number.isFinite(answer.pause_ms) && answer.pause_ms >= 50) pauseMs = answer.pause_ms;
   if (token.isCancellationRequested || model.isDisposed() || model.getVersionId() !== version || !answer.text) return null;
   return answer.text;
 }

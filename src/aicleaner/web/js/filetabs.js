@@ -390,6 +390,26 @@ export function fileTabs(ctx) {
     persist(session);
   }
 
+  // A review notice clicked (Brad, 2026-11-06): the file's tab, in Preview, brought to the front - the one time a review
+  // file comes forward, because the person asked for it.
+  async function showReview(session, key) {
+    const at = key.indexOf('|');
+    if (!session || at < 0) return false;
+    const root = key.slice(0, at);
+    const path = key.slice(at + 1);
+    await openForReview(session, root, path, path.split('/').pop());
+    const s = bySession.get(session);
+    const tab = s && s.tabs.find((t) => t.key === key);
+    if (!tab) return false;
+    s.active = key;
+    if (session === ctx.name()) {
+      paint();
+      shown(session, tab);
+    }
+    persist(session);
+    return true;
+  }
+
   async function close(key) {
     const s = state();
     const tab = s.tabs.find((t) => t.key === key);
@@ -567,6 +587,7 @@ export function fileTabs(ctx) {
   return {
     open,
     openForReview,
+    showReview,
     paint,
     check,
     active: activeTab,

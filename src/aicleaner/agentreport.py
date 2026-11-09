@@ -65,7 +65,7 @@ def _last_word(path: Path) -> tuple[str, bool]:
 def report(projects: Iterable[str], tool_id: str, root: Path, prefer: str = "") -> dict[str, Any]:
     meta = find_meta(projects, tool_id, root, prefer)
     if meta is None:
-        return {"found": False, "reason": "no report for this agent was found in this profile's folders"}
+        return {"found": False, "reason": "no report for this agent was found in this project session's folders"}
     try:
         about = json.loads(meta.read_text(encoding="utf-8"))
     except (OSError, ValueError):

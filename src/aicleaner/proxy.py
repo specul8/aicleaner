@@ -51,7 +51,7 @@ from .detect import (STATELESS_KINDS, CandidateStore, SeenContext,
                      carries_client_real, client_resources, find_candidates, make_placeholder, near_miss_words,
                      owned_emails, owned_values, request_project, token_names)
 from .dialects import get_stream_rewriter
-from .evidence import EvidenceLog, SubCounter
+from .evidence import CANARY_REFUSED_NOTE, EvidenceLog, SubCounter
 from .mapping import (ORIGIN_AUTO, PENDING_PREFIX, GLOBAL_ID, SOURCE_AUTO, Form, Mapper,
                       MapperHandle, MappingError, email_rule_for)
 from .notify import Notifier, strip_footers_from_history
@@ -345,6 +345,8 @@ class Proxy:
         self.claudeai_error = ""
         # Feature 143: the file editor's suggestions, a warm Claude Code worker started on the first one.
         self._completions: Any = None
+        self._copilot_ls: Any = None          # f167: GitHub's Copilot language server, warm, always filtered
+        self._copilot_ls_idle: asyncio.Task[None] | None = None
         # Readers a Project session's agent needs (item K), started on demand: {"copilot"}.
         self.agent_readers: set[str] = set()
         # Candidates are per host: the folder may be OneDrive-synced between machines.
@@ -493,7 +495,7 @@ class Proxy:
             if unknown:
                 missing = ", ".join(unknown)
                 problem = (f"{problem} " if problem else "") + (
-                    f"no client called {missing} is in the mapping, so the profiles naming it "
+                    f"no topic called {missing} is in the mapping, so the project sessions naming it "
                     "filter for Global only")
         self.profile_problem = problem
         return entries
@@ -840,7 +842,7 @@ class Proxy:
             what, link = "The global filter mapping is invalid.", f"{base}/#/global"
         else:
             what, link = f"The filter mapping is invalid for {cid}.", f"{base}/#/clients/{cid}"
-        return (f"Client-identity data filtering: Stopped. {what} AI communication stopped until resolved. "
+        return (f"Real-name filtering: Stopped. {what} AI communication stopped until resolved. "
                 f"Show the error: {link}")
 
     # ---- lifecycle --------------------------------------------------------
@@ -848,7 +850,7 @@ class Proxy:
     def build_app(self) -> web.Application:
         app = web.Application(client_max_size=self.cfg.client_max_mb * 1024 * 1024,
                               middlewares=[make_guard(self.cfg.listen, self.cfg.remote_hostname,
-                                                      self._access_verifier()),
+                                                      self._access_verifier(), api_key=self.cfg.api_key),
                                            # after the guard, which decides what is remote (feature 21)
                                            make_tunnel_gate(self), self._audit(), self._timing()])
         app.router.add_get("/healthz", self.healthz)
@@ -933,6 +935,11 @@ class Proxy:
         if request.method == "POST":
             dialect = COPILOT_READ.get(request.path) or (
                 "openai_completions" if COMPLETIONS.match(request.path) else None)
+        # D230 item 1 (fail closed, as the OpenAI router since v0.9.290): any other request with a body goes through
+        # the whole filter as generic JSON - a path Copilot adds tomorrow is read, not passed on unread; a body that
+        # cannot be read as JSON is refused. Only a request with no body (model lists, token checks) goes untouched.
+        if not dialect and (request.can_read_body or request.method in ("POST", "PUT", "PATCH")):
+            dialect = "openai"
         if dialect:
             host = request.host.split(":")[0].lower()
             request[COPILOT] = forwarder.upstream or f"https://{host}"
@@ -1026,7 +1033,7 @@ class Proxy:
             request[_REQ] = {"id": uuid.uuid4().hex[:12], "who": driver, "project": "", "held": None,
                              "unprotected": [], "declined": [], "canary": []}
             return self._refuse("openai_responses", request, started, SubCounter(),
-                                f"a client name is in the URL or a header (clients: {', '.join(found)})")
+                                f"a real name is in the URL or a header (topics: {', '.join(found)})")
         headers = {k: v for k, v in request.headers.items() if k.lower() not in WS_SKIP}
         protocols = [p.strip() for p in request.headers.get("Sec-WebSocket-Protocol", "").split(",") if p.strip()]
         headers.pop("Sec-WebSocket-Protocol", None)
@@ -1253,7 +1260,61 @@ class Proxy:
                                  "filtered": True, "cost": "as unfiltered; may stop working when Copilot changes"},
             "codex": {"available": codex, "label": "Codex (ChatGPT)", "filtered": True,
                       "cost": "a turn on your ChatGPT plan; a few seconds"},
+            "copilot_fast": self.copilot_fast_view(),
         }
+
+    def copilot_fast_view(self) -> dict[str, Any]:
+        """f167: GitHub's Copilot language server - installed here, signed in (its last answer, else its own store)."""
+        from . import copilotls
+        state = Path(self.cfg.state_dir)
+        server = self._copilot_ls
+        signed = server.signed_in if server is not None and server.signed_in is not None else copilotls.store_exists()
+        return {"available": copilotls.installed(state) and bool(signed), "label": "GitHub Copilot - fast, filtered",
+                "filtered": True, "installed": copilotls.installed(state), "signed_in": bool(signed),
+                "cost": "Copilot's own inline completions on your Copilot plan; about a quarter of a second",
+                "pause_ms": 150, **({"server": server.summary()} if server is not None else {})}
+
+    async def copilot_language_server(self) -> Any:
+        """The warm language server, started with the forward proxy and the Copilot certificate (prepare_agent): its
+        traffic is filtered or it is not started (fail closed). None when it cannot be."""
+        from . import copilotls
+        from .agents import COPILOT
+        if self._copilot_ls is None:
+            state = Path(self.cfg.state_dir)
+            if not copilotls.installed(state):
+                return None
+            try:
+                env = await self.prepare_agent(COPILOT)
+            except Exception as exc:  # noqa: BLE001 - not filtered, so not started
+                log.warning("fast Copilot suggestions cannot be filtered (%s): not started", exc)
+                return None
+            node = shutil.which("node") or "node"
+            self._copilot_ls = copilotls.LanguageServer([node, str(copilotls.script(state))], env=env)
+        return self._copilot_ls
+
+    def _copilot_ls_used(self) -> None:
+        """Stopped when unused for its idle time; each use puts that off."""
+        if self._copilot_ls_idle is not None:
+            self._copilot_ls_idle.cancel()
+
+        async def later() -> None:
+            await asyncio.sleep(self._copilot_ls.idle_s + 1)
+            await self._copilot_ls.stop_if_idle()
+
+        self._copilot_ls_idle = asyncio.create_task(later())
+
+    async def copilot_fast_complete(self, path: str, language: str, before: str, after: str) -> str:
+        server = await self.copilot_language_server()
+        if server is None:
+            return ""
+        try:
+            return await server.complete(path, language, before, after)
+        except Exception as exc:  # noqa: BLE001 - a suggestion that fails is no suggestion
+            server.last_error = str(exc)
+            log.warning("fast Copilot suggestion failed: %s", exc)
+            return ""
+        finally:
+            self._copilot_ls_used()
 
     def editor_service(self, services: dict[str, dict[str, Any]] | None = None) -> str:
         """The service the editor asks now: '' when off or none can answer."""
@@ -1272,7 +1333,7 @@ class Proxy:
         from .completion import Completions
         from .session import resolve_cli
         service = self.editor_service()
-        if not service:
+        if not service or service == "copilot_fast":         # f167 answers through copilot_fast_complete
             return None
         if self._completions is not None and self._completions.service != service:
             await self._completions.close()
@@ -1513,9 +1574,9 @@ class Proxy:
         self.collapsed = {k: v for k, v in self.collapsed.items() if now - v[0] < self.COLLAPSE_KEEP_S}
         pairs = "; ".join(" and ".join(f"'{s}'" for s in spellings) for spellings, _real in found)
         reason = ("AI Cleaner stopped this call before it ran: " + pairs + " are different strings to you, "
-                  "but on this machine they are written as the same client name, so this command would treat "
+                  "but on this machine they are written as the same real name, so this command would treat "
                   "them as one - a rename between them overwrites the file and then deletes it. Write the "
-                  "name the same way each time, or use a name without the client's name in it.")
+                  "name the same way each time, or use a name without the real name in it.")
         self.collapsed[call_id] = (now, reason)
         log.warning("tool call %s holds spellings that become one name (%s): it will be stopped", call_id, pairs)
 
@@ -1584,6 +1645,16 @@ class Proxy:
                 log.info(said)
         except bashguard.GuardError as exc:
             log.warning("bash guard not applied: %s", exc)
+        # The settings guard (feature 70): always on, at every start, pointing at this install's config and state.
+        # Only for an installed proxy - the install folder is the config file's.
+        try:
+            from . import settingsguard
+            said = await asyncio.to_thread(settingsguard.apply, True, Path(self.cfg.path).parent,
+                                           Path(self.cfg.state_dir)) if writes_settings and self.cfg.path else ""
+            if said:
+                log.info(said)
+        except settingsguard.SettingsGuardError as exc:
+            log.warning("settings guard not applied: %s", exc)
         # Name tokens minted with a space before their hash suffix get it joined with underscores
         # (2026-10-15): "Client05 1a2b" was read as a name and a qualifier, and the suffix went out on
         # its own. Once per start; nothing to do after the first.
@@ -1802,10 +1873,10 @@ class Proxy:
         from . import casual
 
         if not self.cfg.folder_roots:
-            raise casual.CasualError("no root folders are set yet - add one under Settings > Remote access, "
+            raise casual.CasualError("no project folders are set yet - add one under Settings > Remote access, "
                                      "\"Folders the pages can open\", then choose a folder inside it")
         if not casual.inside(Path(folder.strip().strip('"')), list(self.cfg.folder_roots)):
-            raise casual.CasualError(f"{folder} is not inside a root folder - choose one inside them, or add its "
+            raise casual.CasualError(f"{folder} is not inside a project folder - choose one inside them, or add its "
                                      "location under Settings > Remote access, \"Folders the pages can open\"")
         path = casual.prepare(folder)
         self.cfg.update_settings({"session.casual_folder": str(path)})
@@ -1871,6 +1942,8 @@ class Proxy:
         await self.claudeai.close()
         if self._completions is not None:
             await self._completions.close()
+        if self._copilot_ls is not None:
+            await self._copilot_ls.close()
         if self.session is not None:
             # A session lives in its own broker (DECISIONS 49): this proxy lets go and the next one
             # re-attaches. Its model requests fail while no proxy answers, and Claude Code retries.
@@ -2065,7 +2138,7 @@ class Proxy:
                     fams = find_families(detection_text(obj))
                     if fams:
                         return self._refuse(dialect, request, started, outbound,
-                                            f"credential material present ({', '.join(fams)}); remove it and retry")
+                                            f"secrets present ({', '.join(fams)}); remove it and retry")
                 elif self.cfg.secrets_mode == "redact":
                     if self.user_secrets is not None:
                         self.user_secrets.maybe_reload()
@@ -2128,17 +2201,17 @@ class Proxy:
                 elif leaked:
                     self._record(
                         request,
-                        dialect=dialect, method=request.method, path="/" + tail, status=403,
+                        dialect=dialect, method=request.method, path="/" + tail, status=REFUSED_STATUS,
                         outbound=outbound, inbound=inbound, canary=leaked, streamed=False,
-                        started=started, note="canary refused request",
+                        started=started, note=CANARY_REFUSED_NOTE,
                         session=session_name, session_client=session_client,
                     )
                     return web.json_response(
                         {"type": "error", "error": {"type": "aicleaner_canary",
-                         "message": "AI Cleaner refused to send this request: a real client "
-                                    f"identifier survived tokenisation (clients: {', '.join(leaked)}). "
+                         "message": "AI Cleaner refused this request: a real name "
+                                    f"survived tokenisation (topics: {', '.join(leaked)}). "
                                     "The Log page (Refused by the canary) shows what matched and offers a fix."}},
-                        status=403,
+                        status=REFUSED_STATUS,
                     )
             elif "/" + tail not in self.cfg.allow_non_json_paths:
                 return self._refuse(
@@ -2216,7 +2289,7 @@ class Proxy:
             log.warning("canary: a client name in the URL or headers of %s /%s (clients: %s)",
                         request.method, tail, ", ".join(found))
             return self._refuse(dialect, request, started, SubCounter(),
-                                f"a client name is in the URL or a header (clients: {', '.join(found)}); "
+                                f"a real name is in the URL or a header (topics: {', '.join(found)}); "
                                 "those are sent as written, so the request was not sent")
         outbound: Counter[str] = SubCounter()
         inbound: Counter[str] = SubCounter()
@@ -2497,15 +2570,23 @@ class Proxy:
         session_name, session_client = self._session_of(request)
         self._record(
             request,
-            dialect=dialect, method=request.method, path=request.path, status=403,
+            dialect=dialect, method=request.method, path=request.path, status=REFUSED_STATUS,
             outbound=outbound, inbound=Counter(), canary=[], streamed=False,
             started=started, note=f"refused: {reason}",
             session=session_name, session_client=session_client,
         )
         return web.json_response(
-            {"type": "error", "error": {"type": "aicleaner_refused", "message": f"aicleaner: {reason}"}},
-            status=403,
+            {"type": "error", "error": {"type": "aicleaner_refused",
+                                        "message": f"AI Cleaner refused this request: {reason}"}},
+            status=REFUSED_STATUS,
         )
+
+
+# D231 (2026-11-08): a model request AI Cleaner refuses answers 400. Claude Code showed the 403 it used to be as
+# "Failed to authenticate", which sent the reader looking at their sign-in. 400 is the one status the Anthropic and
+# OpenAI clients neither retry (they retry 408, 409, 429 and 5xx) nor read as a sign-in problem; the message says
+# it is AI Cleaner's.
+REFUSED_STATUS = 400
 
 
 # The exit code of a start that found its port already taken: "another copy has it", not a crash. Start-AiCleaner
@@ -2565,6 +2646,10 @@ def run(cfg: Config) -> None:
         log.warning("client files with no usable copy (model traffic refused until fixed): %s", ", ".join(handle.broken))
     evidence = EvidenceLog(cfg.log_dir, detail=cfg.detail_log, detail_retention_days=cfg.detail_retention_days,
                            every_request=cfg.detail_every_request)
+    # H2 (1.1): changing calls from this machine need this install's key; made at the first start.
+    from .apikey import ensure
+    cfg.api_key = ensure(cfg.state_dir)
+    cfg.desktop_confirm = True       # part B: turning a protection off from here waits for a Yes (desktopconfirm.py)
     proxy = Proxy(cfg, handle, evidence)
     proxy.ps_commands.start()        # in the background; the proxy does not wait for it (feature 80)
     mapper = handle.mapper

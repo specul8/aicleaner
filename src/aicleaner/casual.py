@@ -91,5 +91,5 @@ def inside(path: Path, roots: list[str]) -> bool:
 def profile_entry(folder: Path) -> dict[str, Any]:
     """The Casual chats project session: no client, its one folder the casual-chats folder."""
     return {"name": PROFILE, "client": "", "projects": [str(folder)], "workspaces": [],
-            "brief": "Casual chats: conversations that belong to no client or project. Files made here are "
+            "brief": "Casual chats: conversations that belong to no topic or project. Files made here are "
                      "saved in this folder."}

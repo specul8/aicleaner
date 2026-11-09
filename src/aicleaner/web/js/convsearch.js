@@ -78,7 +78,7 @@ export function openConversationSearch(opts) {
   const input = h('input', { type: 'search', class: 'conv-query', placeholder: 'What was it about? e.g. code signing certificates',
     'aria-label': 'Search conversations', autocomplete: 'off' });
   const scope = h('select', { class: 'conv-scope', 'aria-label': 'Where to search' },
-    h('option', { value: 'profile' }, 'This project profile'), h('option', { value: 'all' }, 'All my profiles'));
+    h('option', { value: 'profile' }, 'This project session'), h('option', { value: 'all' }, 'All my project sessions'));
   const ai = h('label', { class: 'check conv-ai', title: 'The top matches go to the AI service, filtered like every request, to put the best first and say why' },
     h('input', { type: 'checkbox', checked: remembered() ? true : null }), ' Let AI rank these');
   const status = h('p', { class: 'hint conv-status' }, 'Type what the conversation was about.');

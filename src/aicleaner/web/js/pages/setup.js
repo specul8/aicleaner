@@ -10,7 +10,7 @@ import { h, setChildren } from '../dom.js';
 import { aiToolsTable } from '../aitools.js';
 import { casualFolderField } from '../chatnow.js';
 
-const STEPS = ['What happens', 'Your first client', 'Remote access', 'Your AI tools', 'Casual chats', 'Done'];
+const STEPS = ['What happens', 'Your first topic', 'Remote access', 'Your AI tools', 'Casual chats', 'Done'];
 const view = { step: 0, main: null, ctx: null, dns: null, remote: null };
 
 export async function render(main, ctx) {
@@ -81,10 +81,10 @@ function welcome() {
   return [
     h('h2', {}, 'What happens'),
     h('p', {}, 'AI Cleaner sits between your AI tools and the AI service, on this machine. Before anything leaves, '
-      + 'each client\'s names, domains, tenants, addresses and resource names are swapped for neutral stand-ins; '
-      + 'when the reply comes back, the real names are put back. Nothing about your clients leaves this machine '
-      + 'except as a stand-in.'),
-    h('p', {}, 'The next steps: tell AI Cleaner your first client, set up remote access - only if you want to use it from '
+      + 'each topic\'s names, domains, tenants, addresses and resource names are swapped for neutral tokens; '
+      + 'when the reply comes back, the real names are put back. Nothing about your topics leaves this machine '
+      + 'except as a token.'),
+    h('p', {}, 'The next steps: tell AI Cleaner your first topic, set up remote access - only if you want to use it from '
       + 'another device - and then point your AI tools at AI Cleaner, last, once it knows who to protect. Every step can be '
       + 'skipped and done later from Settings.'),
   ];
@@ -121,17 +121,17 @@ function tools() {
 
 function firstClient(status) {
   const clients = (status.clients || []).filter((c) => c !== 'global');
-  const add = h('button', { type: 'button', class: 'primary setup-add-client' }, clients.length ? 'Add another client' : 'Add your first client');
+  const add = h('button', { type: 'button', class: 'primary setup-add-client' }, clients.length ? 'Add another topic' : 'Add your first topic');
   add.addEventListener('click', async () => {
     const { askForNewClient } = await import('./newclient.js');
     askForNewClient();
   });
   return [
-    h('h2', {}, 'Your first client'),
-    h('p', {}, 'Tell AI Cleaner who your client is: their name, and the domains and Microsoft tenant they use. Everything else '
+    h('h2', {}, 'Your first topic'),
+    h('p', {}, 'Tell AI Cleaner about your first topic - a client, a product, a person: its name, and the domains and Microsoft tenant it uses. Everything else '
       + 'it learns as you work - new names it finds wait for you in Review.'),
-    clients.length ? h('p', { class: 'callout ok' }, `You have ${clients.length} client${clients.length === 1 ? '' : 's'} set up: `,
-      h('a', { href: '#/clients' }, 'see them on Client Filters'), '.') : null,
+    clients.length ? h('p', { class: 'callout ok' }, `You have ${clients.length} topic${clients.length === 1 ? '' : 's'} set up: `,
+      h('a', { href: '#/clients' }, 'see them on Topics'), '.') : null,
     h('div', { class: 'form-row' }, add),
   ];
 }
@@ -454,7 +454,7 @@ function casualChats() {
   const field = casualFolderField(null);
   return [
     h('h2', {}, 'Casual chats'),
-    h('p', {}, 'Not every chat belongs to a client or a project. Choose a folder for the ones that do not: Chat now in the '
+    h('p', {}, 'Not every conversation belongs to a topic or a project. Choose a folder for the ones that do not: Chat now in the '
       + 'menu starts a new conversation there, and anything it makes is kept in that folder. A OneDrive or Google Drive '
       + 'folder is synced to your other devices.'),
     field.element,
@@ -467,9 +467,9 @@ function done(status) {
   return [
     h('h2', {}, 'Done'),
     h('ul', {},
-      h('li', {}, clients ? `${clients} client${clients === 1 ? '' : 's'} set up.` : 'No client yet - step 2 adds one.'),
+      h('li', {}, clients ? `${clients} topic${clients === 1 ? '' : 's'} set up.` : 'No topic yet - step 2 adds one.'),
       h('li', {}, routed ? 'Your AI tools go through AI Cleaner.' : 'Your AI tools are not routed yet - step 4 does it.')),
-    h('p', {}, 'Try it: ask Claude something that names your client, then open the Log to see what was replaced. '
+    h('p', {}, 'Try it: ask Claude something that names your topic, then open the Log to see what was replaced. '
       + 'New names it finds wait in Review. '),
     h('p', {}, h('a', { href: '#/wiki/Getting-started' }, 'Getting started'), ' · ', h('a', { href: '#/wiki/How-it-works' }, 'How it works'),
       ' · ', h('a', { href: '#/wiki' }, 'All wiki pages')),

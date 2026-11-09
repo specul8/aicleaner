@@ -107,8 +107,8 @@ def blocked_reason(path: str | Path) -> str:
     for blocked in blocked_roots():
         for candidate in candidates:
             if _within(candidate, blocked) or str(candidate).rstrip("\\/").lower() == str(blocked).rstrip("\\/").lower():
-                return (f"{blocked} is a system folder. Client work is never in there, and a root "
-                        f"there would put every file under it behind the picker.")
+                return (f"{blocked} is a system folder. Your project work is never in there, and a project "
+                        f"folder there would put every file under it behind the picker.")
     return ""
 
 

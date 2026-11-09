@@ -18,8 +18,8 @@ function heldList(label, values) {
 }
 
 const WHY = {
-  unsigned: 'it was changed without the client key',
-  altered: 'it was changed after it was signed, without the client key',
+  unsigned: 'it was changed without the topic key',
+  altered: 'it was changed after it was signed, without the topic key',
   'other-key': 'it was signed with a different key - a rotated one, or someone else\'s',
 };
 
@@ -38,7 +38,7 @@ export function heldCallout(row, reload) {
   accept.addEventListener('click', act(true));
   reject.addEventListener('click', act(false));
   return h('div', { class: 'callout held' },
-    h('b', {}, `A change to this client is waiting for review: ${WHY[held.why] || held.why}. `),
+    h('b', {}, `A change to this topic is waiting for review: ${WHY[held.why] || held.why}. `),
     row.state.includes('broken') ? 'There is no earlier version on this machine, so AI traffic for it is stopped.'
       : 'The last good version is in use until you decide.',
     heldList('Added', held.added || []), heldList('Taken out', held.removed || []),
@@ -51,7 +51,7 @@ function shownOnce(key) {
     navigator.clipboard.writeText(key).then(() => say('Key copied.', 'ok'), sayError);
   });
   return h('div', { class: 'callout key-shown' },
-    h('b', {}, 'The client key - shown this once. '),
+    h('b', {}, 'The topic key - shown this once. '),
     'Send it to the others on this engagement by Teams chat or a password manager, never in the shared folder. ',
     h('code', { class: 'client-key' }, key), ' ', copy);
 }
@@ -65,7 +65,7 @@ async function keyAction(cid, payload, after) {
 
 // The Client key section: generate (first person) or enter (everyone else); then rotate.
 export async function keySection(cid, reload) {
-  const sec = h('section', { class: 'client-key-section' }, h('h3', {}, 'Client key'));
+  const sec = h('section', { class: 'client-key-section' }, h('h3', {}, 'Topic key'));
   let state;
   try {
     state = await getJSON(`/api/clients/${enc(cid)}/key`);
@@ -85,7 +85,7 @@ export async function keySection(cid, reload) {
       rotate, slot);
     return sec;
   }
-  const paste = h('input', { type: 'password', class: 'key-paste', 'aria-label': 'Client key', autocomplete: 'off' });
+  const paste = h('input', { type: 'password', class: 'key-paste', 'aria-label': 'Topic key', autocomplete: 'off' });
   const enter = h('button', { type: 'button', class: 'key-enter' }, 'Enter key');
   const make = h('button', { type: 'button', class: 'key-generate' }, 'Generate key (first on this engagement)');
   enter.addEventListener('click', () => keyAction(cid, { action: 'enter', key: paste.value }, async () => {
@@ -96,7 +96,7 @@ export async function keySection(cid, reload) {
     show(answer);
     make.disabled = true;
   }));
-  sec.append(h('p', { class: 'hint' }, 'No key on this machine: changes to this client\'s shared file are used as they arrive.'),
+  sec.append(h('p', { class: 'hint' }, 'No key on this machine: changes to this topic\'s shared file are used as they arrive.'),
     h('div', { class: 'form-row' }, paste, enter), h('div', { class: 'form-row' }, make), slot);
   return sec;
 }

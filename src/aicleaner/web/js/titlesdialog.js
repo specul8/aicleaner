@@ -25,7 +25,7 @@ export async function openSuggestTitles(name, onTitle) {
     rows = (answer.projects || []).filter((group) => !group.outside).flatMap((group) => group.sessions || []);
   } catch (error) { sayError(error); return; }
   rows.sort((a, b) => (b.updated || 0) - (a.updated || 0));
-  if (!rows.length) { say('No conversations to title in this profile yet.', 'warn'); return; }
+  if (!rows.length) { say('No conversations to title in this project session yet.', 'warn'); return; }
 
   const unnamed = (row) => !String(row.label || '').trim();
   const allTick = h('input', { type: 'checkbox', class: 'titles-all row-tick' });

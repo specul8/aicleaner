@@ -184,7 +184,7 @@ def _clean_external_names(mapping: Any) -> dict[str, str]:
             raise MappingError(f"the name for {system} is up to {EXTERNAL_NAME_MAX} characters with no "
                                "control characters")
         if any(k.lower() == system.lower() for k in clean):
-            raise MappingError(f"{system} is listed twice; a client has one name in each system")
+            raise MappingError(f"{system} is listed twice; a topic has one name in each system")
         clean[system] = name
     return dict(sorted(clean.items(), key=lambda kv: kv[0].lower()))
 
@@ -215,7 +215,7 @@ def _client_shape_error(doc: Any) -> dict[str, Any] | None:
     the whole set.
     """
     if not isinstance(doc, dict) or not isinstance(doc.get("forms", []), list):
-        return {"kind": "rule", "message": "not a client document: needs an object with a forms list"}
+        return {"kind": "rule", "message": "not a topic file: needs an object with a forms list"}
     schema = doc.get("schema", 1)
     if not isinstance(schema, int) or schema > SCHEMA:
         # First, before anything else is judged: a newer file may hold what this build cannot read,
@@ -224,7 +224,7 @@ def _client_shape_error(doc: Any) -> dict[str, Any] | None:
                                             f"{SCHEMA}): update AI Cleaner to use it"}
     cid = str(doc.get("id", ""))
     if cid != GLOBAL_ID and not CLIENT_ID_RE.match(cid):
-        return {"kind": "rule", "message": f"client id {cid!r} is not valid"}
+        return {"kind": "rule", "message": f"topic id {cid!r} is not valid"}
     if "label" in doc:
         try:
             _check_label(doc["label"])
@@ -232,11 +232,11 @@ def _client_shape_error(doc: Any) -> dict[str, Any] | None:
             return {"kind": "rule", "message": str(exc)}
     for i, f in enumerate(doc.get("forms", [])):
         if not isinstance(f, dict) or not isinstance(f.get("real"), str):
-            return {"kind": "rule", "message": "each form needs a real string", "index": i}
+            return {"kind": "rule", "message": "each term needs a real string", "index": i}
         bad = shell_text(f["real"])
         if bad:
             return {"kind": "rule", "index": i, "real": f["real"],
-                    "message": f"form {i} carries shell text ({bad}): a real is typed into the "
+                    "message": f"term {i} carries shell text ({bad}): a real is typed into the "
                                f"commands Claude runs, so it may not hold {SHELL_SHOWN}"}
     return None
 
@@ -540,7 +540,7 @@ class MappingStore:
         """Refuse any id that is not a plain file-name-safe token; returns the stripped id."""
         cid = str(cid).strip()
         if cid != GLOBAL_ID and not CLIENT_ID_RE.match(cid):
-            raise MappingError(f"client id {cid!r} must be 1-64 letters, digits, '-' or '_', "
+            raise MappingError(f"topic id {cid!r} must be 1-64 letters, digits, '-' or '_', "
                                "starting with a letter or digit")
         return cid
 
@@ -563,7 +563,7 @@ class MappingStore:
             p.parent.mkdir(parents=True, exist_ok=True)
             self._register(GLOBAL_ID, 0)
             _write_client(p, {"id": GLOBAL_ID, "index": 0, "expand_case": True, "forms": [], "ignore": [],
-                       "_comment": "Global: your own filters (your employer, vendors you use). Applies to every client on this machine and is never shared. Tokens are Org00...; ignores here apply everywhere."})
+                       "_comment": "Global: your own filters (your employer, vendors you use). Applies to every topic on this machine and is never shared. Tokens are Org00...; ignores here apply everywhere."})
         return p
 
     def signature(self) -> tuple:
@@ -595,7 +595,7 @@ class MappingStore:
             cid = c.get("id") or p.stem
             c["id"] = cid
             if cid in sources:
-                raise MappingError(f"client {cid} defined in both {sources[cid].name} and {p.name}")
+                raise MappingError(f"topic {cid} defined in both {sources[cid].name} and {p.name}")
             clients.append(c)
             sources[cid] = p
             ignore.update(str(v).lower() for v in c.get("ignore", []) or [])
@@ -907,7 +907,7 @@ class MappingStore:
         once if it is exactly the copy this PC already trusts; otherwise it waits for review."""
         cid = self._check_id(cid)
         if self.keys is None:
-            raise MappingError("this install has no place to keep client keys")
+            raise MappingError("this install has no place to keep topic keys")
         key = self.keys.set(cid, key)
         self._sign_if_trusted(cid, key)
         return key
@@ -1005,7 +1005,7 @@ class MappingStore:
         cid = self._check_id(cid)
         p = self._file_for(cid)
         if not p.exists():
-            raise MappingError(f"unknown client {cid}")
+            raise MappingError(f"unknown topic {cid}")
         if self.state_dir is None:
             raise MappingError(
                 "salvage needs somewhere to keep the broken file and this store has no state "
@@ -1018,7 +1018,7 @@ class MappingStore:
         if parse_error is None:
             raise MappingError(f"{p.name} is valid JSON; there is nothing to salvage",
                                why="Salvage reads a file that will not parse. This one parses, "
-                                   "so every entry in it is already in front of you.")
+                                   "so every term in it is already in front of you.")
 
         found = [f for f in _recover_objects(text) if isinstance(f.get("real"), str)]
         rebuilt: dict[str, Any] = {"id": cid, "forms": found}
@@ -1073,7 +1073,7 @@ class MappingStore:
             elif cid == GLOBAL_ID:
                 doc, source = {"id": GLOBAL_ID, "index": 0, "forms": [], "ignore": []}, "none"
             else:
-                raise MappingError(f"unknown client {cid}")
+                raise MappingError(f"unknown topic {cid}")
         try:
             idx: int | None = client_index(cid, doc.get("index"))
         except MappingError:
@@ -1129,7 +1129,7 @@ class MappingStore:
         """The client file as text plus its error, for the syntax-error view."""
         p = self._file_for(cid)
         if not p.exists():
-            raise MappingError(f"unknown client {cid}")
+            raise MappingError(f"unknown topic {cid}")
         doc, err = _parse(p)
         if err is None:
             err = _validate_client({**doc, "id": doc.get("id") or cid} if isinstance(doc, dict) else doc)
@@ -1174,7 +1174,7 @@ class MappingStore:
             for c in doc.get("clients", []):
                 if c.get("id") == cid:
                     return self.mapping_path, doc, c
-        raise MappingError(f"unknown client {cid}")
+        raise MappingError(f"unknown topic {cid}")
 
     def _validate_then_write(self, path: Path, doc: dict[str, Any]) -> None:
         """Validate, then write. The document is checked on its own and against every other client
@@ -1214,8 +1214,8 @@ class MappingStore:
         docs = [(p, _parse(p)[0]) for p in files]
         docs = [(p, d) for p, d in docs if isinstance(d, dict) and d.get("id")]
         if len(docs) != 1:
-            raise MappingError(f"{source} does not hold exactly one client file - choose the folder that was shared, "
-                               "the one named after the client")
+            raise MappingError(f"{source} does not hold exactly one topic file - choose the folder that was shared, "
+                               "the one named after the topic")
         path, doc = docs[0]
         cid = self._check_id(str(doc["id"]))
         if cid == GLOBAL_ID:
@@ -1227,7 +1227,7 @@ class MappingStore:
                     return cid                        # already joined
             except OSError:
                 pass
-            raise MappingError(f"a client called {cid} already exists here, so the shared one cannot be added beside it")
+            raise MappingError(f"a topic called {cid} already exists here, so the shared one cannot be added beside it")
         # An index only seeds new tokens; what matters is whether the tokens themselves clash with a
         # client here. Asked before anything is linked, with the same answer the loader gives.
         current = [c for c in self.load_tolerant(record=False)[0].data["clients"] if c.get("id") != cid]
@@ -1269,7 +1269,7 @@ class MappingStore:
         cid = self._check_id(cid)
         label = _check_label(label)
         if cid in self.load_tolerant(record=False)[0].sources or (cid != GLOBAL_ID and self._file_for(cid).exists()):
-            raise MappingError(f"client {cid} already exists")
+            raise MappingError(f"topic {cid} already exists")
         if cid == GLOBAL_ID:
             self.ensure_global()
             return 0
@@ -1298,7 +1298,7 @@ class MappingStore:
             return 0, self.add_forms(GLOBAL_ID, wanted, source=source)
         label = _check_label(label)
         if cid in self.load_tolerant(record=False)[0].sources or self._file_for(cid).exists():
-            raise MappingError(f"client {cid} already exists")
+            raise MappingError(f"topic {cid} already exists")
         if not self._dir_mode():
             idx = self.add_client(cid, index, True, label)
             return idx, self.add_forms(cid, wanted, source=source)
@@ -1390,8 +1390,8 @@ class MappingStore:
         real = real.strip()
         if any(f.get("real") == real for f in client.setdefault("forms", [])):
             raise MappingError(
-                f"{real!r} is already a form of {cid}",
-                why=f"{cid} already has this entry with a token of its own. Adding it twice "
+                f"{real!r} is already a term of {cid}",
+                why=f"{cid} already has this term with a token of its own. Adding it twice "
                     f"would give the same value two tokens, and which one the proxy emitted "
                     f"would depend on which it read first.",
                 offer={"action": "find", "label": "Show me the one that is there", "value": real},
@@ -1412,7 +1412,7 @@ class MappingStore:
         The domain must be one of the client's own domain or tenant entries: the rule rests on that
         proof of ownership."""
         if cid == GLOBAL_ID:
-            raise MappingError("email rules are for a client's own domains, not Global")
+            raise MappingError("email rules are for a topic's own domains, not Global")
         wanted = str(domain or "").strip().lower().lstrip("*").lstrip("@")
         path, doc, client = self._client_doc(cid)
         owned = {str(f.get("real", "")).lower() for f in client.get("forms", []) or []
@@ -1421,9 +1421,9 @@ class MappingStore:
         if on:
             if wanted not in owned:
                 raise MappingError(f"{wanted} is not one of {cid}'s domains",
-                                   why="A rule says every address at a domain is this client's; that "
-                                       "holds only for a domain the client is known to own. Add the "
-                                       "domain as an entry first.")
+                                   why="A rule says every address at a domain is this topic's; that "
+                                       "holds only for a domain the topic is known to own. Add the "
+                                       "domain as a term first.")
             if wanted not in rules:
                 rules.append(wanted)
         else:
@@ -1571,8 +1571,8 @@ class MappingStore:
         if real.lower() in (global_reals if global_reals is not None else self._global_reals()):
             raise MappingError(
                 f"{real} is also in Global; remove it from Global to change it here",
-                why="Global wins, so this row is not what the proxy is actually using - the "
-                    "Global entry is. Changing the copy here would rewrite a client file that "
+                why="Global wins, so this term is not what the proxy is actually using - the "
+                    "Global term is. Changing the copy here would rewrite a topic file that "
                     "gets shared while nothing at all changed on this machine.",
                 offer={"action": "open_global", "label": "Open Global", "value": real},
             )
@@ -1584,7 +1584,7 @@ class MappingStore:
             raise MappingError(f"{real} is already in Global")
         _path, _doc, client = self._client_doc(cid)
         if not any(f.get("real") == real for f in client.get("forms", [])):
-            raise MappingError(f"{real!r} is not a form of {cid}")
+            raise MappingError(f"{real!r} is not a term of {cid}")
         if real.lower() in self._global_reals():
             raise MappingError(f"{real} is already in Global")
         self.ensure_global()
@@ -1671,7 +1671,7 @@ class MappingStore:
         """
         to_cid = self._check_id(to_cid)
         if to_cid == GLOBAL_ID:
-            raise MappingError("that is Global; name the client to give it to")
+            raise MappingError("that is Global; name the topic to give it to")
         if real.lower() not in self._global_reals():
             raise MappingError(f"{real!r} is not in Global")
         _p, _d, client = self._client_doc(to_cid)
@@ -1759,9 +1759,9 @@ class MappingStore:
         if name and not self.PRIMARY_REPO_RE.match(name):
             raise MappingError(
                 f"{name!r} is not a repository name",
-                why="This is the repo's NAME, not its path - it goes in the client file, which "
+                why="This is the repo's NAME, not its path - it goes in the topic file, which "
                     "is shared, and a path on your disk is not a path on a colleague's. It is "
-                    "matched against the folder names in the profile.",
+                    "matched against the folder names in the project session.",
             )
         path, doc, client = self._client_doc(cid)
         if name:
@@ -1805,8 +1805,8 @@ class MappingStore:
         already tokenised, and a copy here would only be a locked duplicate."""
         cid = self._check_id(cid)
         if cid == GLOBAL_ID:
-            raise MappingError("Global is not a client anyone else knows by name; names in other "
-                               "systems belong on a client")
+            raise MappingError("Global is not a topic anyone else knows by name; names in other "
+                               "systems belong on a topic")
         clean = _clean_external_names(mapping)
         path, doc, client = self._client_doc(cid)
         if clean:
@@ -1849,12 +1849,12 @@ class MappingStore:
         forms = client.setdefault("forms", [])
         form = next((f for f in forms if f.get("real") == real), None)
         if form is None:
-            raise MappingError(f"{real!r} is not a form of {cid}")
+            raise MappingError(f"{real!r} is not a term of {cid}")
         target = (new_real if new_real is not None else real).strip()
         if not target:
-            raise MappingError("the real identifier is empty")
+            raise MappingError("the real term is empty")
         if target != real and any(f.get("real") == target for f in forms):
-            raise MappingError(f"{target!r} is already a form of {cid}")
+            raise MappingError(f"{target!r} is already a term of {cid}")
         had_token = "token" in form
         form["real"] = target
         shape = (new_kind or "").strip().lower()
@@ -1901,7 +1901,7 @@ class MappingStore:
             return real
         same = [r for r in reals if r.lower() == real.lower()]
         if not same:
-            raise MappingError(f"{real!r} is not a form of {cid}")
+            raise MappingError(f"{real!r} is not a term of {cid}")
         return same[0]
 
     def set_whole_word(self, cid: str, real: str, on: bool) -> str:
@@ -1935,7 +1935,7 @@ class MappingStore:
         forms = client.setdefault("forms", [])
         form = next((f for f in forms if f.get("real") == real), None)
         if form is None:
-            raise MappingError(f"{real!r} is not a form of {cid}")
+            raise MappingError(f"{real!r} is not a term of {cid}")
         before = form.get("token", "")
         form.pop("token", None)
         # Derived against the other forms as they stand, so it avoids the tokens they hold - the
@@ -1955,7 +1955,7 @@ class MappingStore:
         _p, _d, src = self._client_doc(from_cid)
         form = next((f for f in src.get("forms", []) if f.get("real") == real), None)
         if form is None:
-            raise MappingError(f"{real!r} is not a form of {from_cid}")
+            raise MappingError(f"{real!r} is not a term of {from_cid}")
         self.delete_form(from_cid, real)
         try:
             return self.add_form(to_cid, real, None)
@@ -2012,9 +2012,9 @@ class MappingStore:
         forms = client.get("forms", [])
         if not any(f.get("real") == real for f in forms):
             raise MappingError(
-                f"{real!r} is not a form of {cid}",
-                why=f"{cid}'s token list does not have this entry, so there is nothing here to "
-                    f"remove. Usually the table is showing a row another window already deleted.",
+                f"{real!r} is not a term of {cid}",
+                why=f"{cid}'s token list does not have this term, so there is nothing here to "
+                    f"remove. Usually the table is showing a term another window already deleted.",
                 offer={"action": "reload", "label": "Reload the list"},
             )
         client["forms"] = [f for f in forms if f.get("real") != real]
@@ -2081,7 +2081,7 @@ class MappingStore:
         global_reals = self._global_reals() if cid != GLOBAL_ID else set()     # once, not per entry
         for real in reals:
             if real not in present:
-                refused.append((real, f"{real!r} is not a form of {cid}"))
+                refused.append((real, f"{real!r} is not a term of {cid}"))
                 continue
             try:
                 self._check_unlocked(cid, real, global_reals)
@@ -2267,7 +2267,7 @@ class MappingStore:
             return
         path, doc, client = self._client_doc(scope)
         if path != self._file_for(scope):
-            raise MappingError(f"per-client ignores need {scope} in {self.clients_dir.name}/; run `AI Cleaner split` first")
+            raise MappingError(f"per-topic ignores need {scope} in {self.clients_dir.name}/; run `AI Cleaner split` first")
         lst = list(client.get("ignore", []) or [])
         lst.extend(v for v in values if v not in lst)
         client["ignore"] = sorted(lst)
@@ -2344,7 +2344,7 @@ class MappingStore:
         replace back the existing file up first.
         """
         if not isinstance(doc, dict) or not doc.get("id") or not isinstance(doc.get("forms", []), list):
-            raise MappingError("not a client document: needs id and forms[]")
+            raise MappingError("not a topic file: needs id and forms[]")
         cid = self._check_id(doc["id"])
         idx = client_index(cid, doc.get("index"))
         loaded, _reports = self.load_tolerant(record=False)
@@ -2371,7 +2371,7 @@ class MappingStore:
             if all((f["real"], f["token"]) in held if f.get("token") else f["real"] in held_reals
                    for f in imported["forms"]):
                 return {"id": cid, "index": idx, "mode": "skipped", "added": 0, "conflicts": []}
-            raise MappingError(f"client {cid} already exists and differs; choose merge or replace to import into it")
+            raise MappingError(f"topic {cid} already exists and differs; choose merge or replace to import into it")
         report: dict[str, Any] = {"id": cid, "index": idx, "mode": mode if exists else "new",
                                   "added": len(imported["forms"]), "conflicts": []}
         entry = imported

@@ -33,13 +33,13 @@ def decode(key: str) -> bytes:
     picks up are ignored."""
     text = re.sub(r"\s+", "", str(key or ""))
     if not re.fullmatch(r"[A-Za-z0-9_-]+", text):
-        raise KeyError_("that is not a client key: it should be 43 letters, digits, - and _")
+        raise KeyError_("that is not a topic key: it should be 43 letters, digits, - and _")
     try:
         raw = base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
     except ValueError as exc:
-        raise KeyError_("that is not a client key") from exc
+        raise KeyError_("that is not a topic key") from exc
     if len(raw) != KEY_BYTES:
-        raise KeyError_("that is not a whole client key - was part of it missed when copying?")
+        raise KeyError_("that is not a whole topic key - was part of it missed when copying?")
     return raw
 
 
@@ -61,7 +61,7 @@ class KeyStore:
 
     def _path(self, cid: str) -> Path:
         if not _ID.match(str(cid)):
-            raise KeyError_(f"{cid!r} is not a client id")
+            raise KeyError_(f"{cid!r} is not a topic id")
         return self.folder / f"{cid}.key"
 
     def get(self, cid: str) -> str | None:

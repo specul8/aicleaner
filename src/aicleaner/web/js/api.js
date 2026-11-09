@@ -1,6 +1,25 @@
 // Fetch wrapper for the AI Cleaner API. JSON in and out; every failure becomes an ApiError with
 // the server's message, and say() shows it in the single message area.
 
+// H2 (1.1): on this machine, every change carries the install's API key, which the page is given as it loads (a meta
+// tag the server adds only for a page opened here, never through remote access). Added to the page's own fetch once,
+// so every call - this module's and the rest - carries it, and only to AI Cleaner's own /api/.
+const API_KEY = (document.querySelector('meta[name="aicleaner-api-key"]') || {}).content || '';
+if (API_KEY && !window.__aicleanerKeyed) {
+  window.__aicleanerKeyed = true;
+  const original = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const url = new URL(typeof input === 'string' ? input : input.url, window.location.href);
+    const method = String(init.method || (typeof input === 'string' ? 'GET' : input.method) || 'GET').toUpperCase();
+    if (url.origin === window.location.origin && url.pathname.startsWith('/api/') && method !== 'GET' && method !== 'HEAD') {
+      const headers = new Headers(init.headers || (typeof input === 'string' ? undefined : input.headers));
+      headers.set('X-AI-Cleaner-Key', API_KEY);
+      return original(input, { ...init, headers });
+    }
+    return original(input, init);
+  };
+}
+
 export class ApiError extends Error {
   constructor(message, status, suggest, why, offer) {
     super(message);
@@ -102,6 +121,7 @@ async function watched(url, init) {
     response = await fetch(url, { ...init, redirect: 'manual', headers: { ...(init.headers || {}), ...AJAX } });
   } catch (error) {
     if (error && error.signedOut) { signOut(); throw error; }
+    if (error && error.name === 'AbortError') throw error;      // cancelled on purpose (D230 item 4): not a lost link
     linkDown();
     throw new Unreachable(0);
   }
@@ -130,11 +150,12 @@ export async function getJSON(url) {
   return parse(await watched(url, { headers: { Accept: 'application/json' } }));
 }
 
-export async function postJSON(url, body) {
+export async function postJSON(url, body, options = {}) {
   return parse(await watched(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(body || {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   }));
 }
 

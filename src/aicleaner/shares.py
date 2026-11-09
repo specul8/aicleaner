@@ -129,7 +129,7 @@ def folder_name(label: str) -> str:
     """A client's label as a folder name: the characters Windows refuses become a dash."""
     cleaned = _UNSAFE.sub("-", label).strip(" .")
     if not cleaned:
-        raise ShareError("that client has no name that can be used for a folder")
+        raise ShareError("that topic has no name that can be used for a folder")
     return cleaned
 
 
@@ -141,7 +141,7 @@ def check(path: str) -> Path:
     # Judged on the text, before resolve() reaches out to the host (H27). The OneDrive folder is a
     # local path; a share given as \\server\... would also be read by every session.
     if fileio.network_path(text):
-        raise ShareError("a network path cannot be a share folder; use the OneDrive folder on this machine")
+        raise ShareError("a network path cannot be a project assets folder; use the OneDrive folder on this machine")
     folder = Path(text).expanduser()
     if not folder.is_absolute():
         raise ShareError(f"{text} is not a full path; give one that starts with a drive or a share")
@@ -149,7 +149,7 @@ def check(path: str) -> Path:
     if folder == Path(folder.anchor):
         # Not a trust boundary: a share of C:\ is always a typo, and it would hand the whole disk
         # to the file tree and to the session.
-        raise ShareError(f"{folder} is a whole drive; pick the client's own folder")
+        raise ShareError(f"{folder} is a whole drive; pick the topic's own folder")
     if not folder.exists():
         raise ShareError(f"{folder} does not exist; make it first, or use Create")
     if not folder.is_dir():
@@ -191,7 +191,7 @@ class ShareStore:
     def set(self, client: str, path: str) -> str:
         """Point a client at an existing folder. Nothing is written unless the folder checks out."""
         if not client:
-            raise ShareError("say which client")
+            raise ShareError("say which topic")
         folder = str(check(path))
         shares = {cid: f for cid, f in self.load().items() if cid.lower() != client.lower()}
         shares[client] = folder

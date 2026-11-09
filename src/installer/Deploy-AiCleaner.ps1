@@ -214,6 +214,30 @@ param(
 )
 
 Set-StrictMode -Version Latest
+
+function Get-AiCleanerApiHeader {
+    <#
+    .SYNOPSIS
+        The header that carries this install's API key (H2, AI Cleaner 1.1): a change through the API from this machine
+        is refused without it. Read from the DPAPI-protected file AI Cleaner makes at its first start; none yet (an
+        older AI Cleaner) gives no header, as before.
+    #>
+    [OutputType([hashtable])]
+    param([string]$StateFolder = (Join-Path $env:USERPROFILE '.aicleaner'))
+    # Given outright (a test, or a script started by AI Cleaner itself): whoever sets this already has the key.
+    if ($env:AICLEANER_API_KEY) { return @{ 'X-AI-Cleaner-Key' = [string]$env:AICLEANER_API_KEY } }
+    $file = Join-Path $StateFolder 'secrets\api-key.dpapi'
+    if (-not (Test-Path -LiteralPath $file)) { return @{} }
+    try {
+        Add-Type -AssemblyName System.Security
+        $bytes = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($file), $null, 'CurrentUser')
+        try { return @{ 'X-AI-Cleaner-Key' = [Text.Encoding]::UTF8.GetString($bytes).Trim() } }
+        finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+    } catch {
+        Write-Verbose "The API key could not be read: $($_.Exception.Message)"
+        return @{}
+    }
+}
 $ErrorActionPreference = 'Stop'
 
 $script:RecordPath = Join-Path $StateRoot 'deployment.json'
@@ -2110,7 +2134,7 @@ function Set-CodeTab {
     }
     $body = @{ settings = @{ 'codetab.enabled' = ($State -eq 'On') } } | ConvertTo-Json -Compress
     try {
-        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' -Body $body -TimeoutSec 60 -ErrorAction Stop
+        $answer = Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' -Body $body -TimeoutSec 60 -ErrorAction Stop
         $said = [string]$answer.rules
         if ($said -like 'the setting was saved, but*') { Write-Status $said -Level Warn }
         elseif ($said) { Write-Status $said -Level Done }
@@ -2148,7 +2172,7 @@ function Set-Copilot {
     $body = @{ settings = @{ 'copilot.enabled' = ($State -eq 'On') } } | ConvertTo-Json -Compress
     try {
         # Long enough for the person to answer Windows' confirmation (the proxy waits up to 300 s).
-        $answer = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' -Body $body -TimeoutSec 330 -ErrorAction Stop
+        $answer = Invoke-RestMethod -Headers (Get-AiCleanerApiHeader) -Method Post -Uri "http://127.0.0.1:$port/api/config" -ContentType 'application/json' -Body $body -TimeoutSec 330 -ErrorAction Stop
         $said = [string]$answer.rules
         if ($said -like 'the setting was saved, but*' -or $said -like 'Copilot: *') { Write-Status $said -Level Warn }
         elseif ($said) { Write-Status "$said - reload VS Code" -Level Done }

@@ -236,8 +236,8 @@ class ClaudeAI:
         request[_REQ]["canary"] = [{"path": request.path, "where": "raw body", "client": c} for c in leaked]
         log.warning("canary: a real name survived in a claude.ai request %s (clients: %s)", request.path,
                     ", ".join(leaked))
-        return (f"AI Cleaner refused to send this: a real client identifier survived filtering (clients: "
-                f"{', '.join(leaked)}). Check the mapping forms.")
+        return (f"AI Cleaner refused to send this: a real name survived filtering (topics: "
+                f"{', '.join(leaked)}). Check the topic's terms.")
 
     async def _filter_texts(self, request: web.Request, texts: list[Any], started: float) -> tuple[Any, list[Any] | None]:
         """`texts` (strings or attachment blocks) through the proxy's whole filter as one JSON document. Returns
@@ -269,7 +269,7 @@ class ClaudeAI:
             return await self._passthrough(request, started)
         found = self.proxy.mapper.find_real(_outside_body(request, path.lstrip("/")))
         if found:
-            return self._refusal(request, f"aicleaner: a client name is in the address of this request (clients: "
+            return self._refusal(request, f"aicleaner: a real name is in the address of this request (topics: "
                                           f"{', '.join(found)}), so it was not sent")
         body = await request.read()
         media = request.headers.get("Content-Type", "").split(";")[0].strip().lower()
@@ -290,7 +290,7 @@ class ClaudeAI:
             return await self._multipart(request, body, started)
         log.warning("claude.ai: refused %s %s - a %s body cannot be read", request.method, path, media or "untyped")
         return self._refusal(request, f"aicleaner: this request's body ({media or 'no type'}) cannot be checked for "
-                                      "client names, so it was not sent")
+                                      "real names, so it was not sent")
 
     # ---- the routes ----------------------------------------------------------------------------------------------
 

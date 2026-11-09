@@ -41,7 +41,7 @@ export function mcpCard(status, after) {
   return h('section', { class: 'card', id: 'mcp-servers' },
     h('h2', {}, 'MCP servers'),
     h('p', { class: 'hint' }, 'Checked when AI Cleaner and each session start. A server reached over the '
-      + 'internet gets tokens, not client names, until you allow it here.'),
+      + 'internet gets tokens, not real names, until you allow it here.'),
     h('table', { class: 'mcp-table' },
       h('thead', {}, h('tr', {}, h('th', {}, 'Tools'), h('th', {}, 'What it is'), h('th', {}, 'Gets'), h('th', {}, ''))),
       h('tbody', {}, ...servers.map((s) => row(s, Boolean(status.remote), after)))));

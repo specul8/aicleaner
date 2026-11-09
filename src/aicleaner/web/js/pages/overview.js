@@ -31,16 +31,16 @@ function bannerContent(status) {
   // Bypass on: nothing is filtered, whatever else is true (D148).
   if (status.bypass) {
     return {
-      level: 'red', symbol: 'cross', headline: 'Client-identity data filtering: OFF (bypass)',
-      detail: ['Every request is forwarded untouched - client names reach the AI service as they are. ',
-        h('a', { href: '#/settings/bypass' }, 'Turn bypass off')],
+      level: 'red', symbol: 'cross', headline: 'Real-name filtering: OFF (Send everything unfiltered)',
+      detail: ['Every request is forwarded untouched - real names reach the AI service as they are. ',
+        h('a', { href: '#/settings/bypass' }, 'Turn off Send everything unfiltered')],
     };
   }
   const routing = status.routing || {};
   if (routing.state === 'bypassed') {
     const who = (routing.bypassed || []).join(' and ') || 'Your AI client';
     return {
-      level: 'red', symbol: 'cross', headline: 'Client-identity data filtering: Not in use',
+      level: 'red', symbol: 'cross', headline: 'Real-name filtering: Not in use',
       detail: [`${who} ${(routing.bypassed || []).length === 1 ? 'is' : 'are'} sending directly to the AI service, `
         + 'so nothing is being filtered. ', h('a', { href: '#/settings' }, 'See what each client is pointed at')],
     };
@@ -52,7 +52,7 @@ function bannerContent(status) {
       ? 'The global filter mapping is invalid.'
       : `The filter mapping is invalid for ${displayName(row)}.`;
     return {
-      level: 'red', symbol: 'cross', headline: 'Client-identity data filtering: Stopped',
+      level: 'red', symbol: 'cross', headline: 'Real-name filtering: Stopped',
       detail: [`${what} AI communication stopped until resolved. `, h('a', { href: clientHref(row.id) }, 'Show the error')],
     };
   }
@@ -63,7 +63,7 @@ function bannerContent(status) {
     return {
       level: 'red', symbol: 'cross',
       headline: `${n} ${n === 1 ? 'identifier was' : 'identifiers were'} sent without being replaced`,
-      detail: [`The filter had no placeholder left to use, so ${n === 1 ? 'it' : 'they'} went out as `
+      detail: [`The filter had no token left to use, so ${n === 1 ? 'it' : 'they'} went out as `
         + 'written. Mapping or ignoring them clears the backlog and stops it recurring. ',
         h('a', { href: '#/review' }, 'Review them')],
     };
@@ -73,10 +73,10 @@ function bannerContent(status) {
     const held = status.held_back || 0;
     const asIs = status.sent_as_is !== undefined ? status.sent_as_is : n - held;
     const parts = [];
-    if (held) parts.push(`${held} held back as ${held === 1 ? 'a placeholder' : 'placeholders'}`);
-    if (asIs) parts.push(`${asIs} sent as-is and may contain client-specific information`);
+    if (held) parts.push(`${held} held back as ${held === 1 ? 'a token' : 'tokens'}`);
+    if (asIs) parts.push(`${asIs} sent as-is and may contain real names`);
     return {
-      level: 'amber', symbol: 'alert', headline: 'Unrecognised client-identity data needs review',
+      level: 'amber', symbol: 'alert', headline: 'Unrecognised real names need review',
       detail: [`${parts.join('; ')}. `, h('a', { href: '#/review' }, `Review ${n} ${n === 1 ? 'item' : 'items'}`)],
     };
   }
@@ -84,14 +84,14 @@ function bannerContent(status) {
   // what a misconfigured client looks like before anyone tries to use it.
   if (status.routing && status.routing.state === 'idle') {
     return {
-      level: 'green', symbol: 'check', headline: 'Client-identity data filtering: Ready',
+      level: 'green', symbol: 'check', headline: 'Real-name filtering: Ready',
       detail: ['Set up and waiting. Nothing has come through since the proxy started, so there is '
         + 'nothing to report yet - the first request will be filtered.'],
     };
   }
   return {
-    level: 'green', symbol: 'check', headline: 'Client-identity data filtering: On',
-    detail: ['Anything that could identify a client is filtered out before it leaves this machine, and swapped back in when the AI service replies.'],
+    level: 'green', symbol: 'check', headline: 'Real-name filtering: On',
+    detail: ['Anything that could identify a topic is filtered out before it leaves this machine, and swapped back in when the AI service replies.'],
   };
 }
 
@@ -142,8 +142,8 @@ function paintTiles(status) {
   view.tiles.replaceChildren(
     tile('review', 'To review', String(status.pending),
       status.pending ? h('a', { href: '#/review' }, 'Review now') : 'Nothing waiting', status.pending > 0),
-    tile('clients', 'Clients', String(status.clients.length), `${entries} entries, ${globalEntries} global`),
-    tile('credentials', 'Credentials', status.secrets_mode.charAt(0).toUpperCase() + status.secrets_mode.slice(1),
+    tile('clients', 'Topics', String(status.clients.length), `${entries} terms, ${globalEntries} global`),
+    tile('credentials', 'Secrets', status.secrets_mode.charAt(0).toUpperCase() + status.secrets_mode.slice(1),
       `${view.secrets} saved ${view.secrets === 1 ? 'secret' : 'secrets'}`),
     tile('last', 'Last request', last ? timeAgo(last.ts) : 'None yet',
       last ? `${last.outbound} filtered, ${last.inbound} restored` : 'No model traffic since the logs began'));
@@ -153,7 +153,7 @@ function resultText(line) {
   if (line.note && line.note.startsWith('refused')) return { text: line.note, cls: 'bad' };
   if (line.canary === 'leak') return { text: 'refused: a real name was still present', cls: 'bad' };
   if (line.note) return { text: line.note, cls: 'warn' };
-  if (line.status >= 400) return { text: `upstream error ${line.status}`, cls: 'warn' };
+  if (line.status >= 400) return { text: `AI service error ${line.status}`, cls: 'warn' };
   return { text: 'sent', cls: 'ok' };
 }
 
@@ -212,8 +212,8 @@ const DIAGRAM = [
   ' 1 tokenise   Fabrikam Inc, fabrikam.com ------->   Client4821 Pty, client4821.invalid',
   ' 2 redact     AccountKey=..., PATs, SAS, JWTs -->   [REDACTED-azure-account-key]',
   ' 3 learn      identifier-shaped leftovers ......   (queued locally for review)',
-  ' 4 canary     a real form still present? ......   refused: nothing sent',
-  ' 5 credential local gateway token ............>   real API key  ---->  model provider',
+  ' 4 canary     a real term still present? ......   refused: nothing sent',
+  ' 5 credential local gateway token ............>   real API key  ---->  AI service',
   ' 6 rehydrate  Fabrikam Inc  <------------------   Client4821 Pty  <---- reply (streamed)',
   ' 7 evidence   one line per request ............   counts and outcomes, never content',
   ' 8 detail     Fabrikam Inc -> Client4821 Pty ..   what was replaced, kept here for audit',
@@ -229,18 +229,18 @@ function reference() {
         h('li', {}, h('code', {}, 'POST /api/tokenise'), ', ', h('code', {}, 'POST /api/rehydrate'), ': text in, text out, for hooks')),
       h('h3', {}, 'Files'),
       h('ul', {},
-        h('li', {}, h('code', {}, 'clients\\<id>.json'), ': one client per file (the unit of sharing); ', h('code', {}, '_global.json'), ' beside the config for Global (yours alone, never in the shared clients folder)'),
+        h('li', {}, h('code', {}, 'clients\\<id>.json'), ': one topic per file (the unit of sharing); ', h('code', {}, '_global.json'), ' beside the config for Global (yours alone, never in the shared clients folder)'),
         h('li', {}, h('code', {}, 'ignore-list.json'), ' and the local ', h('code', {}, 'candidates-<host>.jsonl'), ' beside the mapping'),
         h('li', {}, h('code', {}, 'logs\\'), ': the evidence log (counts only) and the optional substitution detail log'),
-        h('li', {}, h('code', {}, '%USERPROFILE%\\.aicleaner\\lastgood\\'), ': last good copy of each client file, used when an edit is rejected'))));
+        h('li', {}, h('code', {}, '%USERPROFILE%\\.aicleaner\\lastgood\\'), ': last good copy of each topic file, used when an edit is rejected'))));
 }
 
 function howItWorks() {
   return h('details', { class: 'more', id: 'how' }, h('summary', {}, 'How it works'),
     h('div', {},
-      h('p', {}, 'A local proxy between your AI tools and the model provider. Client identifiers are swapped for tokens on the way out and back on the way in, so real names stay on this machine and only tokens go on the wire. Anything the proxy cannot inspect is refused. Every request leaves an evidence line of counts, and what was replaced - each real name and the token that stood in for it - is written to a detail log so a request can be audited afterwards. Both stay on this machine and neither is ever sent anywhere.'),
+      h('p', {}, 'A local proxy between your AI tools and the AI service. Each topic\'s real names are swapped for tokens on the way out and back on the way in, so they stay on this machine and only tokens go on the wire. Anything the proxy cannot inspect is refused. Every request leaves an evidence line of counts, and what was replaced - each real name and the token that stood in for it - is written to a detail log so a request can be audited afterwards. Both stay on this machine and neither is ever sent anywhere.'),
       h('pre', { class: 'diagram' }, DIAGRAM),
-      h('p', { class: 'muted' }, 'The proxy only listens on the loopback address: no other machine can reach it, and the only outbound connections are to the model provider itself, carrying tokens.')));
+      h('p', { class: 'muted' }, 'The proxy only listens on the loopback address: no other machine can reach it, and the only outbound connections are to the AI service itself, carrying tokens.')));
 }
 
 export async function render(main, ctx) {

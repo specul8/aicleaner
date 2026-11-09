@@ -19,12 +19,12 @@ function host() {
 
 const ACTIONS = [
   ['scan', 'add', 'Scan Repo and map',
-   'Reads the folder and maps every high-confidence find to this client. Writes to the mapping.'],
-  ['preflight', 'add', 'Scan Repo + Previous Chats and map',
+   'Reads the folder and maps every high-confidence find to this topic. Writes to the mapping.'],
+  ['preflight', 'add', 'Scan Repo + Previous Conversations and map',
    'The same, over the folder AND the Claude Code history for it - so picking up existing work '
    + 'does not send a first request full of identifiers the mapping has never seen.'],
   ['scan', 'queue', 'Scan Repo for review',
-   'Reads the folder and puts the finds in Review, already marked as this client\'s, to decide '
+   'Reads the folder and puts what it finds in Review as suggestions, already marked as this topic\'s, to decide '
    + 'by hand. Writes nothing to the mapping.'],
 ];
 
@@ -49,7 +49,7 @@ function progressBlock(job) {
     return h('div', { class: 'scan-progress' },
       h('progress', { max: String(total || 1), value: String(done) }),
       h('p', { class: 'hint' },
-        `Writing the mapping: ${done} of ${total} entries`
+        `Writing the mapping: ${done} of ${total} terms`
         + (job.now ? ` for ${job.now}` : '') + ' - the reading is done.'));
   }
   const total = job.total_bytes || 0;
@@ -67,11 +67,11 @@ function progressBlock(job) {
 function outcomeText(job, clientName) {
   const n = (count, one, many) => `${count} ${count === 1 ? one : many}`;
   if (job.mode === 'add') {
-    return job.added ? `${n(job.added, 'real', 'reals')} added to the ${clientName} client filter.`
-      : `Nothing new to add to the ${clientName} client filter.`;
+    return job.added ? `${n(job.added, 'term', 'terms')} added to the ${clientName} topic.`
+      : `Nothing new to add to the ${clientName} topic.`;
   }
   if (job.mode === 'queue') {
-    return job.queued ? `${n(job.queued, 'find', 'finds')} sent to Review, marked as ${clientName}'s.`
+    return job.queued ? `${n(job.queued, 'suggestion', 'suggestions')} sent to Review, marked as ${clientName}'s.`
       : 'Nothing new to send to Review.';
   }
   return '';
@@ -139,7 +139,7 @@ export function scanBlock(cid, clientName = cid) {
   };
 
   const section = h('section', { class: 'card', dataset: { card: 'scan' } },
-    h('h2', {}, 'Scan a folder for this client'),
+    h('h2', {}, 'Scan a folder for this topic'),
     h('p', { class: 'hint' },
       'Runs the same scan the command line runs, for '
       + `${cid}. The folder is on ${host()}, where the proxy runs, whether you are sitting at it `
