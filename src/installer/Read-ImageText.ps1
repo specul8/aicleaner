@@ -46,7 +46,12 @@ param(
     [switch]$Boxes,
     # Feature 114: a JSON file of boxes ([{x,y,w,h}], in the image's pixels) to fill solid black, written to -OutPath.
     [string]$Fill = '',
-    [string]$OutPath = ''
+    [string]$OutPath = '',
+    # The copy's size cap in bytes (0: none). Brad, 2026-11-10: a redacted picture at most 125% of the original.
+    [int]$MaxBytes = 0,
+    # JPEG quality to start at, and the floor it steps down to while the copy is over -MaxBytes.
+    [int]$Quality = 90,
+    [int]$MinQuality = 60
 )
 # The app folder: this script's own, or its parent when it sits in installer\ (feature 102).
 $script:AppFolder = if (-not $PSScriptRoot) { $PWD.Path } elseif ((Split-Path -Leaf $PSScriptRoot) -eq 'installer') { Split-Path -Parent $PSScriptRoot } else { $PSScriptRoot }
@@ -782,7 +787,8 @@ if ($Engine) {
     Assert-WindowsPowerShell
     Get-ImageEngine
 } elseif ($Path -and $Fill) {
-    # Feature 114: the boxes filled solid in a copy of the image, saved as PNG. Nothing else of the picture changes.
+    # Feature 114: the boxes filled solid in a fresh copy of the image (format and size below). Prints what it wrote as
+    # JSON ({format, quality, bytes}), or {tooLarge} when no encoding fitted -MaxBytes.
     Add-Type -AssemblyName System.Drawing
     # Through the pipeline once more: Windows PowerShell's ConvertFrom-Json hands a JSON array on as ONE object, so
     # @() of it was a list holding the whole list - the loop ran once, and filling failed for no box or for two or
@@ -791,7 +797,17 @@ if ($Engine) {
     $rects = @($parsed | Where-Object { $null -ne $_ })
     $source = [System.Drawing.Image]::FromFile((Resolve-Path -LiteralPath $Path).Path)
     try {
-        $canvas = New-Object System.Drawing.Bitmap($source.Width, $source.Height)
+        # Brad, 2026-11-10: not ballooning the size, keeping the original's fidelity. Always a fresh encode (feature 114
+        # security review: no EXIF, thumbnail, comments or profile text of the original goes), in the original's
+        # format where it can be written - JPEG stays JPEG, PNG stays PNG, GIF becomes PNG, anything else JPEG unless
+        # it has transparency - at the original's pixel size and resolution (DPI), and at most -MaxBytes.
+        $raw = $source.RawFormat.Guid
+        $indexed = ($source.PixelFormat -band [System.Drawing.Imaging.PixelFormat]::Indexed) -ne 0
+        $alpha = [System.Drawing.Image]::IsAlphaPixelFormat($source.PixelFormat) -or
+            ($indexed -and (($source.Palette.Flags -band 1) -ne 0))
+        $pixel = if ($alpha) { [System.Drawing.Imaging.PixelFormat]::Format32bppArgb } else { [System.Drawing.Imaging.PixelFormat]::Format24bppRgb }
+        $canvas = New-Object System.Drawing.Bitmap($source.Width, $source.Height, $pixel)
+        $canvas.SetResolution($source.HorizontalResolution, $source.VerticalResolution)
         $graphics = [System.Drawing.Graphics]::FromImage($canvas)
         try {
             $graphics.DrawImage($source, 0, 0, $source.Width, $source.Height)
@@ -801,8 +817,51 @@ if ($Engine) {
             }
             $brush.Dispose()
         } finally { $graphics.Dispose() }
-        $canvas.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png)
+        $jpegCodec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
+        $qualities = @()
+        for ($q = $Quality; $q -ge $MinQuality; $q -= 5) { $qualities += $q }
+        if ($qualities.Count -eq 0) { $qualities = @($MinQuality) }
+        $isGif = $raw -eq [System.Drawing.Imaging.ImageFormat]::Gif.Guid
+        $tries = @()
+        if ($raw -eq [System.Drawing.Imaging.ImageFormat]::Jpeg.Guid -or (-not $alpha -and -not $isGif -and $raw -ne [System.Drawing.Imaging.ImageFormat]::Png.Guid)) {
+            $tries = @($qualities | ForEach-Object { 'jpeg:' + $_ })
+        } else {
+            # PNG first; over the cap, JPEG for a picture with no transparency (a GIF may have some: PNG only).
+            $tries = @('png')
+            if (-not $alpha -and -not $isGif) { $tries += @($qualities | ForEach-Object { 'jpeg:' + $_ }) }
+        }
+        $written = $null
+        $smallest = [long]::MaxValue
+        foreach ($try in $tries) {
+            $stream = New-Object System.IO.MemoryStream
+            try {
+                if ($try -eq 'png') {
+                    $canvas.Save($stream, [System.Drawing.Imaging.ImageFormat]::Png)
+                } else {
+                    $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters(1)
+                    $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+                        [System.Drawing.Imaging.Encoder]::Quality, [long]($try.Split(':')[1]))
+                    $canvas.Save($stream, $jpegCodec, $encoderParams)
+                    $encoderParams.Dispose()
+                }
+                $bytes = $stream.ToArray()
+            } finally { $stream.Dispose() }
+            $smallest = [Math]::Min($smallest, $bytes.Length)
+            if ($MaxBytes -le 0 -or $bytes.Length -le $MaxBytes) {
+                [System.IO.File]::WriteAllBytes($OutPath, $bytes)
+                $written = $try
+                break
+            }
+        }
         $canvas.Dispose()
+        if ($written) {
+            $parts = $written.Split(':')
+            $quality = if ($parts.Count -gt 1) { [int]$parts[1] } else { 0 }
+            ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ format = $parts[0]; quality = $quality; bytes = (Get-Item -LiteralPath $OutPath).Length })
+        } else {
+            # Nothing fitted at the floor: no copy is written, and the proxy sends the picture's text instead.
+            ConvertTo-Json -Compress -InputObject ([pscustomobject]@{ tooLarge = $true; smallest = $smallest; cap = $MaxBytes })
+        }
     } finally { $source.Dispose() }
 } elseif ($Path -and $Boxes) {
     # Feature 114: each word or line the reader found, with its box in the first page's pixels.

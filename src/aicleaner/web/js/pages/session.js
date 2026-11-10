@@ -113,19 +113,55 @@ function atBottom(log) {
 }
 
 // Feature 156 (Brad, 2026-11-04): View previous prompt / View previous response. A prompt is a "you" turn, or an answer
-// to Claude's question (Brad, 2026-11-04: what he chose is something he sent); a response starts at the first "claude"
-// turn after one (its later parts, between tool calls, belong to the same reply).
-// Whatever the log holds counts - the earlier lines Show earlier adds (up to 1000) too; above those, the buttons are
-// greyed out and Show earlier is the way further back.
+// to Claude's question (`you-answer`: the question card's answer, live, or one given in the terminal or VS Code,
+// replayed from the transcript - Brad, 2026-11-10: "View prompt should also include askuserquestion responses").
+// A response (D234, Brad 2026-11-10) is the first "claude" turn after a prompt, and every later one that is not a short
+// progress note: in a long agent-driven turn the message worth reading comes mid-turn or last.
+// Whatever the log holds counts, in document order - the earlier lines Show earlier adds (up to 1000) too; above
+// those, the buttons are greyed out and Show earlier is the way further back.
+const TURN_LINES = ':scope > .turn, :scope > .log-head .log-earlier > .turn';
+
+// A Claude message worth stopping on (D234): one with a table, a list or a code block, or more than REPLY_NOTE_LINES
+// lines of text. Lines are counted from the rendered text, not its height on screen, so the answer does not change
+// with the window's width: each paragraph or heading, and each line break inside one, is a line per REPLY_LINE_CHARS
+// characters (rounded up) - roughly a line of the log at a usual width. "Now the next step." is one line, a progress
+// note; four short paragraphs, or one of 350 characters, is a message. A message's verdict is kept: its text does
+// not change once drawn, and the buttons ask again on every scroll.
+const REPLY_NOTE_LINES = 3;
+const REPLY_LINE_CHARS = 100;
+const replyVerdicts = new WeakMap();
+
+function textLines(text) {
+  return String(text).split('\n').map((line) => line.trim()).filter(Boolean)
+    .reduce((total, line) => total + Math.ceil(line.length / REPLY_LINE_CHARS), 0);
+}
+
+function substantialReply(turn) {
+  if (replyVerdicts.has(turn)) return replyVerdicts.get(turn);
+  const doc = turn.querySelector('.md-reply') || turn;
+  let verdict = Boolean(doc.querySelector('table, ul, ol, pre'));
+  if (!verdict) {
+    const blocks = [...doc.querySelectorAll('p, h1, h2, h3, h4, h5, h6')];
+    const lines = blocks.length ? blocks.reduce((total, block) => total + textLines(block.textContent), 0)
+      : textLines(doc.textContent);
+    verdict = lines > REPLY_NOTE_LINES;
+  }
+  replyVerdicts.set(turn, verdict);
+  return verdict;
+}
+
 function turnStarts(log, kind) {
-  const turns = [...log.querySelectorAll(':scope > .turn')];
+  const turns = [...log.querySelectorAll(TURN_LINES)];
   const sent = (t) => t.classList.contains('you') || t.classList.contains('you-answer');
   if (kind === 'prompt') return turns.filter(sent);
   const starts = [];
   let sincePrompt = true;
   for (const t of turns) {
     if (sent(t)) sincePrompt = true;
-    else if (t.classList.contains('claude') && sincePrompt) { starts.push(t); sincePrompt = false; }
+    else if (t.classList.contains('claude')) {
+      if (sincePrompt || substantialReply(t)) starts.push(t);
+      sincePrompt = false;
+    }
   }
   return starts;
 }
@@ -2944,7 +2980,9 @@ export async function render(main, context = {}) {
     button.addEventListener('animationend', () => button.classList.remove('tapped'));
   }
   log.addEventListener('scroll', previousButtons);
-  new MutationObserver(previousButtons).observe(log, { childList: true });
+  const turnsChanged = new MutationObserver(previousButtons);
+  turnsChanged.observe(log, { childList: true });
+  turnsChanged.observe(earlierBox, { childList: true });     // Show earlier's lines are stops too (D234)
   new ResizeObserver(previousButtons).observe(log);
   toLatest.addEventListener('click', () => {
     log.scrollTop = log.scrollHeight;

@@ -30,7 +30,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import aiohttp
@@ -39,7 +39,7 @@ from pathlib import Path
 
 from .config import Config, session_profiles
 from .attachments import scrub
-from .convert import image_converter, pdftotext_converter
+from .convert import RememberedReader, image_converter, pdftotext_converter
 from .contact import ContactSource
 from . import bashguard, codetab_settings, deliver, lifecycle, rules, shutdown, updates, who
 from .codetab import CODETAB, CodeTab
@@ -49,11 +49,11 @@ from .tunnelcrypt import Sessions as TunnelSessions, TunnelSecret
 from .tunnelgate import make_tunnel_gate
 from .detect import (STATELESS_KINDS, CandidateStore, SeenContext,
                      carries_client_real, client_resources, find_candidates, make_placeholder, near_miss_words,
-                     owned_emails, owned_values, request_project, token_names)
+                     owned_emails, owned_values, request_project, token_names, ValueFinder)
 from .dialects import get_stream_rewriter
 from .evidence import CANARY_REFUSED_NOTE, EvidenceLog, SubCounter
 from .mapping import (ORIGIN_AUTO, PENDING_PREFIX, GLOBAL_ID, SOURCE_AUTO, Form, Mapper,
-                      MapperHandle, MappingError, email_rule_for)
+                      MapperHandle, MappingError, email_rule_for, LITERAL, _compile_sharded, _shard_sort)
 from .notify import Notifier, strip_footers_from_history
 from .profiles import PROFILES_FILE, ProfileStore
 from .shares import SHARES_FILE, ShareStore
@@ -139,6 +139,12 @@ INERT = Mapper([])
 
 # Credentials: read by nobody here, and a key that happens to spell a client's name is not a leak.
 _CREDENTIAL_HEADERS = {"authorization", "x-api-key", "anthropic-api-key"}
+
+
+def _literal_pattern(keys: frozenset[str]) -> Any:
+    """Any of these keys, as written, longest first (Proxy._screen); None for no keys. A large set is kept as shards
+    (mapping.LITERAL): the set screened against grows by a few stand-ins per request."""
+    return _compile_sharded(_shard_sort(keys), LITERAL) if keys else None
 
 
 def _outside_body(request: web.Request, tail: str) -> str:
@@ -304,6 +310,38 @@ class _Filtering:
     held_back: dict
     attach: dict
     near_miss: int
+    # Set by handle: the D199 token note goes on a Messages request (added in the filter's worker call now).
+    token_note: bool = False
+    # What the filter did, for the upstream monitor (incremental filtering, spec part 5).
+    stats: Any = None
+    # Set when the client goes away mid-filter: the worker stops at its next check (coordinator, 2026-11-10).
+    cancel: Any = None
+    # Claude Code's session id, read from the body as it arrived (upstreamwatch.claude_session_of).
+    claude_session: str = ""
+
+
+@dataclass
+class _Filtered:
+    """What the filter's worker call hands back to the event loop (Brad 2026-11-10): a refusal to send, the
+    topics the canary refused for, and pictures the session should hear about; `abandoned` when the client went
+    away and the work was stopped."""
+    refused: str = ""
+    leaked: list = field(default_factory=list)
+    said: list = field(default_factory=list)
+    abandoned: bool = False
+
+
+# How often (s) the event loop looks whether the client is still there while its request is filtered.
+CLIENT_CHECK_S = 0.25
+
+
+def _client_gone(request: Any) -> bool:
+    """True when the client's connection has closed (aiohttp does not cancel the handler for it by default)."""
+    try:
+        transport = request.transport
+    except Exception:  # noqa: BLE001 - a request with no connection behind it (a WebSocket frame's stand-in)
+        return False
+    return transport is None or transport.is_closing()
 
 
 class Proxy:
@@ -407,6 +445,15 @@ class Proxy:
             self._build_session_host()
         # Always constructed so the mode can be switched on at runtime; consulted only when mode is redact.
         self.user_secrets = UserSecrets(cfg.user_secrets_path)
+        # Incremental and multi-core filtering (spec 2026-11-10-incremental-filtering.md, Brad 2026-11-10): what each
+        # unit of a request gave, remembered in memory, and the worker processes (started by run(), not here: a proxy
+        # built by a test must not start eight processes).
+        from .incremental import FilterEngine, share_the_gil
+        self.filter_engine = FilterEngine()
+        share_the_gil()     # a filter thread must not hold the event loop up (spec part 1)
+        # Requests are filtered on worker threads, several at once: the stand-ins and the placeholder mappers they
+        # share are changed by one at a time.
+        self._filter_state_lock = threading.RLock()
         # (mapping id, placeholder version) -> (placeholder-only mapper, mapping + placeholders)
         self._ph_key: tuple[int, int, int] | None = None
         self._ph_mappers: tuple[Mapper | None, Mapper | None] = (None, None)
@@ -431,6 +478,9 @@ class Proxy:
         self._image_to_text = image_converter(cfg.ocr_timeout_s) if cfg.ocr else None
         if cfg.ocr and self._image_to_text is None:
             log.info("no OCR engine on this machine: images and scanned PDFs stay withheld")
+        elif self._image_to_text is not None:
+            # A picture in the history is sent again with every request: read once, remembered by its hash.
+            self._image_to_text = RememberedReader(self._image_to_text)
         # dialect -> (gateway token, upstream key); loaded once at startup.
         self._swaps: dict[str, tuple[str, str]] = {}
         for dialect, spec in cfg.credentials.items():
@@ -572,10 +622,14 @@ class Proxy:
     @staticmethod
     def _screen(forms: list[Form], existing: list[Form]) -> list[Form]:
         everyone = existing + forms
-        tokens = sorted({f.token.lower() for f in everyone if f.token}, key=len, reverse=True)
-        reals = sorted({f.real.lower() for f in everyone if f.real}, key=len, reverse=True)
-        has_token = re.compile("|".join(map(re.escape, tokens))) if tokens else None
-        has_real = re.compile("|".join(map(re.escape, reals))) if reals else None
+        tokens = frozenset(f.token.lower() for f in everyone if f.token)
+        reals = frozenset(f.real.lower() for f in everyone if f.real)
+        # Prefix trees, not flat alternations: `re` tries every alternative at every position, so
+        # the flat form cost O(forms x keys) - 25 s for a 4.9 MB conversation's stand-ins
+        # (2026-11-10). A tree matches what the longest-first alternation matched: at each position
+        # the longest key, then on from its end.
+        has_token = _literal_pattern(tokens)
+        has_real = _literal_pattern(reals)
         kept: list[Form] = []
         seen: set[str] = set()
         for f in forms:
@@ -743,16 +797,19 @@ class Proxy:
                            context: SeenContext) -> list[Form]:
         """Forms that stand in or hold back each address at a mapped domain (DECISIONS 46)."""
         forms: list[Form] = []
+        taken: set[str] | None = None   # lower case; made once, kept up to date as stand-ins are minted
         for real, client in owned_emails(text, mapper, self.store.ignore_set()):
             token = ""
             if mode == "auto":
                 known = self._stood_in.get(real.lower())
                 if known is None:
-                    taken = ({f.token.lower() for f in mapper.forms}
-                             | {t.lower() for _k, t in self._stood_in.values()})
-                    token = make_placeholder(real, "email", taken)
+                    if taken is None:
+                        taken = ({f.token.lower() for f in mapper.forms}
+                                 | {t.lower() for _k, t in self._stood_in.values()})
+                    token = make_placeholder(real, "email", taken, folded=True)
                     if token:
                         self._stood_in[real.lower()] = ("email", token)
+                        taken.add(token.lower())
                         self._stood_in_version += 1
                 else:
                     token = known[1]
@@ -820,7 +877,7 @@ class Proxy:
         for value, kind in wanted:
             if value in self._stood_in or value in ours or value in taken:
                 continue
-            stand_in = make_placeholder(value, kind, taken)
+            stand_in = make_placeholder(value, kind, taken, folded=True)
             if stand_in:
                 self._stood_in[value] = (kind, stand_in)
                 taken.add(stand_in.lower())
@@ -1955,6 +2012,17 @@ class Proxy:
             await self.session.detach_all()
         if self._session:
             await self._session.close()
+        # The filter's worker processes stop with the proxy, and what it remembered goes (Brad 2026-11-10).
+        await asyncio.to_thread(self.filter_engine.close)
+
+    def start_filter_pool(self) -> None:
+        """The filter's worker processes, warmed with the mapping as it is now (run() starts them with AI Cleaner,
+        spec part 4). Off the event loop: starting eight processes takes a moment. Started whatever
+        filter.incremental says, so switching it on needs no restart; idle, the workers cost nothing."""
+        try:
+            self.filter_engine.start_pool(self.mapper, self._filter_settings())
+        except Exception as exc:  # noqa: BLE001 - the filter runs in one thread instead
+            log.warning("filter pool not started (%s): filtering in one thread", type(exc).__name__)
 
     # ---- utility endpoints -------------------------------------------------
 
@@ -2009,218 +2077,43 @@ class Proxy:
         tokenised, new identifiers queued or added, near misses repaired, secrets redacted, values
         held back, the canary run. A refusal is returned for the caller to send; otherwise `f`
         holds the filtered body and what the reply needs. Moved out of handle as it was (item E,
-        2026-10-19), so a Copilot WebSocket frame goes through exactly what an HTTP request does."""
+        2026-10-19), so a Copilot WebSocket frame goes through exactly what an HTTP request does.
+
+        A JSON body is filtered in one worker call (spec 2026-11-10-incremental-filtering.md part 1, Brad
+        2026-11-10): every pass over it - parse, tokenise, detect, secrets, serialise, canary - ran on the event
+        loop, about 2.7 s at 3.5 MB, and while it did AI Cleaner served nothing else. The loop now only moves bytes;
+        what has to be said or recorded (a refusal, the evidence line, a picture's note) is done back here."""
         request, dialect, tail, started = f.request, f.dialect, f.tail, f.started
-        session_name, session_client, content_type = f.session_name, f.session_client, f.content_type
-        mapper, reply_mapper, body = f.mapper, f.reply_mapper, f.body
-        outbound, inbound, secrets, auto_added = f.outbound, f.inbound, f.secrets, f.auto_added
-        pre_held, held_back, attach, near_miss = f.pre_held, f.held_back, f.attach, f.near_miss
-        if body and not self.cfg.proxy_bypass:
+        content_type = f.content_type
+        if f.body and not self.cfg.proxy_bypass:
             if _is_json(content_type):
-                try:
-                    obj = json.loads(body)
-                except json.JSONDecodeError:
-                    return self._refuse(dialect, request, started, outbound, "request body is not valid JSON")
-                # The history comes back carrying the green marks we added to earlier replies. They
-                # are ours: removed before anything is tokenised, so the provider never sees them.
-                obj = walk_strings(obj, strip_marks)
-                # The review footer likewise: left in the history, the model learns to write it
-                # and does, until the output cap (D63).
-                if dialect == "anthropic":
-                    obj = strip_footers_from_history(obj)
-                    # Where Claude Code's prompts are typed (the user, 2026-10-18). Not a Session-page
-                    # session (its note is added as the prompt is sent) and not a program (sdk).
-                    agent = request.headers.get("User-Agent", "")
-                    if (self.cfg.origin_note and isinstance(obj, dict) and agent.startswith(CLAUDE_CODE_AGENT)
-                            and not _completion(request)
-                            and "sdk" not in agent and not request.match_info.get("profile")
-                            and "messages" in tail and "count_tokens" not in tail):
-                        from .origin import VSCODE_NOTE, add_to_typed
-                        obj = add_to_typed(obj, VSCODE_NOTE)
-                # Attachments first (review finding 4): text PDFs become text that is filtered below;
-                # images, scanned PDFs and anything uninspectable are replaced by a notice.
-                #
-                # Near-miss repair rides along with the conversion, because that is the only place
-                # a misreading is expected: an engine turns rn into m, a person typing does not.
-                # The correction puts the real form back, so the tokenising below replaces it the
-                # ordinary way. `read` keeps what was converted, so the candidate pass beneath
-                # looks at that text and not at the whole request.
-                near: Counter[str] = SubCounter()
-                read: list[str] = []
-
-                def repair(text: str) -> str:
-                    fixed = mapper.repair_near_misses(text, near) if self.cfg.near_miss else text
-                    read.append(fixed)
-                    return fixed
-
-                said: list[tuple[str, str]] = []
-                obj, attach_counts = await asyncio.to_thread(
-                    lambda: scrub(obj, self.cfg.allow_images, self._pdf_to_text, picture=self._picture(mapper, said),
-                                  image_to_text=self._image_to_text, repair=repair,
-                                  ocr_max_pages=self.cfg.ocr_max_pages,
-                                  ocr_timeout_s=self.cfg.ocr_timeout_s,
-                                  ocr_max_bytes=self.cfg.ocr_max_bytes))
-                attach = dict(attach_counts)
-                if said and session_name:
-                    self._say_pictures(session_name, said)
-                original = obj
-                project = request_project(obj)
-                request[_REQ]["project"] = project
-                obj = tokenise_json(mapper, obj, outbound)
-                # One sweep of the tokenised text, off the event loop, shared by everything below:
-                # auto-add, resource naming and the review queue used to sweep it three times each,
-                # on the loop, so one large request froze every other one while it ran.
-                sweep: list[tuple[str, str, str, str]] = []
-                if self.store is not None:
-                    text = detection_text(obj)
-                    sweep = await asyncio.to_thread(lambda: list(find_candidates(text, mapper)))
-                    # What each kind does with something new (DECISIONS 46): auto-tokenise, tokenise
-                    # & review, or ignore; and, for review, whether a provable owner adds it at once.
-                    modes = self.kind_modes()
-                    self.store.ignore_kinds = frozenset(k for k, m in modes.items() if m == "ignore")
-                    owner_add = self.owner_add_kinds(modes)
-                    # Added by itself only where the value proves its owner (DECISIONS 38). There
-                    # is no "chosen kinds" route: it guessed the owner from the conversation.
-                    wanted: list[tuple[str, str, str]] = []
-                    resource_mode = modes.get("client-resource")
-                    if ((self.cfg.auto_map_client_resources and resource_mode == "review")
-                            or (resource_mode == "ignore" and "client-resource" in self.cfg.ignore_add_kinds)):
-                        # A resource name that carries one of a client's own forms: the owner is certain.
-                        wanted += [(client, value, "client-resource") for value, client in
-                                   client_resources(text, mapper, sweep)]
-                    # A name carrying one client's token: the token proves the owner (DECISIONS 37).
-                    wanted += [(client, value, "name") for value, client in
-                               token_names(text, mapper, sweep, self.store.ignore_set())]
-                    if "email" in owner_add:
-                        # An email at a client's mapped domain: the domain proves the owner, and
-                        # without this the mailbox name went out in clear (DECISIONS 45).
-                        wanted += [(client, value, "email") for value, client in
-                                   owned_emails(text, mapper, self.store.ignore_set())]
-                    elif mapper.email_rules:
-                        # A domain with an email rule (feature 96) adds its addresses whatever the
-                        # email setting: the person said every address there is the client's.
-                        wanted += [(client, value, "email") for value, client in
-                                   owned_emails(text, mapper, self.store.ignore_set())
-                                   if email_rule_for(value, mapper.email_rules)]
-                    # Tenant, SharePoint, domain and DevOps: their own proofs (DECISIONS 46).
-                    wanted += [(client, value, kind) for value, kind, client in
-                               owned_values(text, mapper, sweep, owner_add - {"email"}, self.store.ignore_set())]
-                    if wanted:
-                        auto_added += await asyncio.to_thread(self._add_forms, wanted)
-                    if auto_added:
-                        # The mapping was reloaded mid-request, so the snapshot is stale: re-read
-                        # it and tokenise again, so THIS request is covered by what was just added.
-                        mapper = self.mapper
-                        outbound = SubCounter()
-                        obj = tokenise_json(mapper, original, outbound)
-                    if modes.get("email") in ("auto", "review") and "email" not in owner_add:
-                        # An address at a mapped domain has already lost its domain to the mapping,
-                        # so nothing downstream sees it; its mailbox name would go out. Stood in or
-                        # held back whole here, from the original text (DECISIONS 46).
-                        forms = self._owned_email_forms(detection_text(obj), mapper, modes["email"],
-                                                        f"{dialect} /{tail}",
-                                                        SeenContext(dict(outbound), project, session_name))
-                        if forms:
-                            obj, outbound, pre_held = self._tokenise_with(original, mapper, forms)
-                if self.cfg.near_miss and read:
-                    # Already repaired above, inside the conversion. What is left is the
-                    # bookkeeping: count what was put right, and hold back a word that is almost a
-                    # client's name (where the mapping holds the longer form) for review.
-                    near_miss = sum(near.values())
-                    if near_miss:
-                        outbound.update(near)
-                    if self.store is not None:
-                        was_read = "\n".join(read)
-                        misses = await asyncio.to_thread(near_miss_words, was_read, mapper)
-                        for word, client, near in misses:
-                            if self.store.add_candidate(word, "client-resource", "high", client,
-                                                        f"{dialect} /{tail}", self.cfg.placeholder_kinds,
-                                                        SeenContext(dict(outbound), project, session_name),
-                                                        near=near):
-                                near_miss += 1
-                                log.info("near miss of a %s identifier held back: %r", client, word)
-                if self.cfg.secrets_mode == "block":
-                    fams = find_families(detection_text(obj))
-                    if fams:
-                        return self._refuse(dialect, request, started, outbound,
-                                            f"secrets present ({', '.join(fams)}); remove it and retry")
-                elif self.cfg.secrets_mode == "redact":
-                    if self.user_secrets is not None:
-                        self.user_secrets.maybe_reload()
-                        obj = walk_strings(obj, lambda t: self.user_secrets.redact(t, secrets))
-                    obj = walk_strings(obj, lambda t: redact(t, secrets))
-                body = dumps(obj)
-                reply_mapper = mapper
-                if self.store is not None:
-                    # Learning mode: anything identifier-shaped left after tokenisation is unmapped.
-                    # Read from the decoded strings, never the raw JSON: signatures and base64 are not
-                    # text, and fragments of them queued for review were mapped as "identifiers".
-                    final_text = detection_text(obj)
-                    # What auto-add mapped is now known and skipped; what near-miss or redaction took
-                    # out of the text is no longer in it, and is not queued.
-                    still = [c for c in sweep if c[0] in final_text]
-                    # In a thread (H12): it runs the detectors and writes the candidates file, and on
-                    # the loop it held up every other request - the proxy and the page alike. The
-                    # store locks each method, so concurrent requests are safe.
-                    new = await asyncio.to_thread(
-                        self.store.record, final_text, mapper, f"{dialect} /{tail}", self.cfg.placeholder_kinds,
-                        SeenContext(dict(outbound), project, session_name), still)
-                    if new:
-                        self.notifier.maybe_toast(self.store.pending_count(), self.store.version)
-                    # Fail closed: unknown identifiers of the chosen kinds go out as placeholders, and
-                    # replies are rehydrated with them too, so you and local tools see real values.
-                    self._stand_in(sweep, mapper)
-                    only, combined = self._placeholder_mappers(mapper)
-                    if only is not None and combined is not None:
-                        held: Counter[str] = SubCounter()
-                        obj = tokenise_json(only, obj, held)
-                        held.update(pre_held)
-                        held.pairs.update(pre_held.pairs)
-                        body = dumps(obj)
-                        held_back = {k.split(":", 1)[1]: v for k, v in held.items()}
-                        reply_mapper = combined
-                        request[_REQ]["held"] = held
-                    # Queued and not held back goes out as it is while it waits. Logged, so it is
-                    # seen rather than assumed (DECISIONS 38).
-                    sent_text = detection_text(obj)
-                    request[_REQ]["unprotected"] = [(v, k) for v, k, _c, _o in still
-                                                    if v in sent_text and self._waiting_unheld(v)]
-                leaked = canary(mapper, body)
-                # What a match rule declined to replace went out as written, by the rule's own
-                # decision; the canary no longer refuses it, so it is reported instead (DECISIONS 39).
-                declined = rule_declined(mapper, body)
-                if declined:
-                    request[_REQ]["declined"] = declined
-                    for cid, found, _real in declined:
-                        log.info("match rule let %r through for %s (not the client, by the rule)", found, cid)
-                if leaked:
-                    for site in canary_sites(mapper, body):
-                        log.warning("canary match at %s", site)
-                    # The same matches, with their surroundings, for the substitution log.
-                    request[_REQ]["canary"] = canary_matches(mapper, body)
-                if leaked and self.cfg.canary_fail_open:
-                    # The emergency switch on the Settings page: send it anyway, and say so loudly.
-                    log.warning("canary FAIL-OPEN: sent a request the canary would have refused (clients: %s)",
-                                ", ".join(leaked))
-                    request[_FAIL_OPEN] = leaked   # the request's one evidence line will say so
-                elif leaked:
+                done = await self._filter_watching_client(f)
+                if done.abandoned:
+                    # Nobody is waiting: nothing is sent, and the upstream line says so (with how far it got).
+                    self._filter_gone(f)
+                    return web.Response(status=499, text="the client went away while the request was filtered")
+                if done.said and f.session_name:
+                    self._say_pictures(f.session_name, done.said)
+                if done.refused:
+                    return self._refuse(dialect, request, started, f.outbound, done.refused)
+                if done.leaked:
                     self._record(
                         request,
                         dialect=dialect, method=request.method, path="/" + tail, status=REFUSED_STATUS,
-                        outbound=outbound, inbound=inbound, canary=leaked, streamed=False,
+                        outbound=f.outbound, inbound=f.inbound, canary=done.leaked, streamed=False,
                         started=started, note=CANARY_REFUSED_NOTE,
-                        session=session_name, session_client=session_client,
+                        session=f.session_name, session_client=f.session_client,
                     )
                     return web.json_response(
                         {"type": "error", "error": {"type": "aicleaner_canary",
                          "message": "AI Cleaner refused this request: a real name "
-                                    f"survived tokenisation (topics: {', '.join(leaked)}). "
+                                    f"survived tokenisation (topics: {', '.join(done.leaked)}). "
                                     "The Log page (Refused by the canary) shows what matched and offers a fix."}},
                         status=REFUSED_STATUS,
                     )
             elif "/" + tail not in self.cfg.allow_non_json_paths:
                 return self._refuse(
-                    dialect, request, started, outbound,
+                    dialect, request, started, f.outbound,
                     f"non-JSON request body ({content_type or 'no content-type'}) is not inspectable",
                 )
             else:
@@ -2239,16 +2132,290 @@ class Proxy:
                 self._record(
                     request,
                     dialect=dialect, method=request.method, path="/" + tail, status=0,
-                    outbound=outbound, inbound=Counter(), canary=[], streamed=False,
+                    outbound=f.outbound, inbound=Counter(), canary=[], streamed=False,
                     started=started, note="UNFILTERED: exempt path, nothing was inspected",
                     session=self._session_of(request)[0], session_client=self._session_of(request)[1],
                 )
+        return None
+
+    async def _filter_watching_client(self, f: "_Filtering") -> "_Filtered":
+        """_filter_json on a worker thread, with an eye on the client (coordinator, 2026-11-10): an 11 MB request took
+        minutes to filter, Claude Code gave up and sent it again, and the abandoned one ran on to the end for nobody.
+        If the connection closes - or the handler is cancelled for it - the worker is told to stop at its next check
+        (between passes, units and pool batches)."""
+        f.cancel = threading.Event()
+        work = asyncio.ensure_future(asyncio.to_thread(self._filter_json, f))
+        try:
+            while not work.done():
+                await asyncio.wait({work}, timeout=CLIENT_CHECK_S)
+                if not work.done() and not f.cancel.is_set() and _client_gone(f.request):
+                    f.cancel.set()
+            return work.result()
+        except asyncio.CancelledError:
+            f.cancel.set()
+            # The worker stops at its next check; its line is written once it has, with what it did by then.
+            work.add_done_callback(lambda _t: self._filter_gone(f))
+            raise
+
+    def _filter_gone(self, f: "_Filtering") -> None:
+        """The upstream line for a request whose client went away while it was filtered: outcome client_gone, the
+        filter's breakdown so far, nothing sent."""
+        from .upstreamwatch import Watch
+        info = f.request.get(_REQ) or {}
+        watch = Watch(info.get("id", ""), f.dialect, "/" + f.tail, f.started, b"",
+                      (info.get("who") or {}).get("app") or f.request.headers.get("User-Agent", "").split(" ")[0],
+                      session=f.claude_session)
+        watch.rec["body_bytes"] = len(f.body or b"")
+        watch.filter(f.stats or {"abandoned": True})
+        watch.end("client_gone", "the client went away while the request was being filtered; nothing was sent")
+        self.upstream_log.write(watch)
+        log.info("request %s abandoned while filtering: the client went away", info.get("id", ""))
+
+    def _filter_settings(self) -> str:
+        """The settings a filter result depends on, fingerprinted for the filter generation (incremental filtering)."""
+        from .incremental import settings_print
+        return settings_print(self.cfg, self.user_secrets)
+
+    def _filter_json(self, f: "_Filtering") -> "_Filtered":
+        """The JSON branch of _filter_body, on a worker thread: everything that reads or rewrites the body, in the
+        order it has always run. Writes the results into `f`; a refusal is returned for the event loop to send.
+
+        The passes go through a FilterRun (incremental.py): with `filter.incremental` on (the default, Brad
+        2026-11-10) each remembers what it found per unit, so the history a conversation resends is not filtered
+        again; the results, and so the bytes sent, are the ones the whole-body passes give."""
+        from .incremental import FilterAbandoned
+        done = _Filtered()
+        run = self.filter_engine.begin(self.cfg.filter_incremental, self.cfg.filter_shadow, self._filter_settings(),
+                                       cancel=f.cancel)
+        try:
+            self._filter_json_passes(f, run, done)
+        except FilterAbandoned:
+            done.abandoned = True
+        finally:
+            f.stats = run.summary()
+        return done
+
+    def _filter_json_passes(self, f: "_Filtering", run: Any, done: "_Filtered") -> None:
+        request, dialect, tail, session_name = f.request, f.dialect, f.tail, f.session_name
+        mapper, reply_mapper, body = f.mapper, f.reply_mapper, f.body
+        outbound, secrets, auto_added = f.outbound, f.secrets, f.auto_added
+        pre_held, held_back, attach, near_miss = f.pre_held, f.held_back, f.attach, f.near_miss
+        try:
+            obj = json.loads(body)
+        except json.JSONDecodeError:
+            done.refused = "request body is not valid JSON"
+            return
+        # The history comes back carrying the green marks we added to earlier replies. They
+        # are ours: removed before anything is tokenised, so the provider never sees them.
+        obj = walk_strings(obj, strip_marks)
+        # The review footer likewise: left in the history, the model learns to write it
+        # and does, until the output cap (D63).
+        if dialect == "anthropic":
+            obj = strip_footers_from_history(obj)
+            # Where Claude Code's prompts are typed (the user, 2026-10-18). Not a Session-page
+            # session (its note is added as the prompt is sent) and not a program (sdk).
+            agent = request.headers.get("User-Agent", "")
+            if (self.cfg.origin_note and isinstance(obj, dict) and agent.startswith(CLAUDE_CODE_AGENT)
+                    and not _completion(request)
+                    and "sdk" not in agent and not request.match_info.get("profile")
+                    and "messages" in tail and "count_tokens" not in tail):
+                from .origin import VSCODE_NOTE, add_to_typed
+                obj = add_to_typed(obj, VSCODE_NOTE)
+        # Attachments first (review finding 4): text PDFs become text that is filtered below;
+        # images, scanned PDFs and anything uninspectable are replaced by a notice.
+        #
+        # Near-miss repair rides along with the conversion, because that is the only place
+        # a misreading is expected: an engine turns rn into m, a person typing does not.
+        # The correction puts the real form back, so the tokenising below replaces it the
+        # ordinary way. `read` keeps what was converted, so the candidate pass beneath
+        # looks at that text and not at the whole request.
+        near: Counter[str] = SubCounter()
+        read: list[str] = []
+
+        def repair(text: str) -> str:
+            fixed = mapper.repair_near_misses(text, near) if self.cfg.near_miss else text
+            read.append(fixed)
+            return fixed
+
+        said = done.said
+        obj, attach_counts = scrub(obj, self.cfg.allow_images, self._pdf_to_text, picture=self._picture(mapper, said),
+                                   image_to_text=self._image_to_text, repair=repair,
+                                   ocr_max_pages=self.cfg.ocr_max_pages,
+                                   ocr_timeout_s=self.cfg.ocr_timeout_s,
+                                   ocr_max_bytes=self.cfg.ocr_max_bytes)
+        attach = dict(attach_counts)
+        run.check()                     # the client may have gone during the pictures' reading
+        original = obj
+        project = request_project(obj)
+        request[_REQ]["project"] = project
+        obj = run.tokenise_json(mapper, obj, outbound)
+        run.check()
+        # One sweep of the tokenised text, shared by everything below: auto-add, resource naming
+        # and the review queue used to sweep it three times each.
+        sweep: list[tuple[str, str, str, str]] = []
+        if self.store is not None:
+            sweep, text = run.detect(mapper, obj)
+            # What each kind does with something new (DECISIONS 46): auto-tokenise, tokenise
+            # & review, or ignore; and, for review, whether a provable owner adds it at once.
+            modes = self.kind_modes()
+            self.store.ignore_kinds = frozenset(k for k, m in modes.items() if m == "ignore")
+            owner_add = self.owner_add_kinds(modes)
+            # Added by itself only where the value proves its owner (DECISIONS 38). There
+            # is no "chosen kinds" route: it guessed the owner from the conversation.
+            wanted: list[tuple[str, str, str]] = []
+            resource_mode = modes.get("client-resource")
+            if ((self.cfg.auto_map_client_resources and resource_mode == "review")
+                    or (resource_mode == "ignore" and "client-resource" in self.cfg.ignore_add_kinds)):
+                # A resource name that carries one of a client's own forms: the owner is certain.
+                wanted += [(client, value, "client-resource") for value, client in
+                           client_resources(text, mapper, sweep)]
+            # A name carrying one client's token: the token proves the owner (DECISIONS 37).
+            wanted += [(client, value, "name") for value, client in
+                       token_names(text, mapper, sweep, self.store.ignore_set())]
+            if "email" in owner_add:
+                # An email at a client's mapped domain: the domain proves the owner, and
+                # without this the mailbox name went out in clear (DECISIONS 45).
+                wanted += [(client, value, "email") for value, client in
+                           owned_emails(text, mapper, self.store.ignore_set())]
+            elif mapper.email_rules:
+                # A domain with an email rule (feature 96) adds its addresses whatever the
+                # email setting: the person said every address there is the client's.
+                wanted += [(client, value, "email") for value, client in
+                           owned_emails(text, mapper, self.store.ignore_set())
+                           if email_rule_for(value, mapper.email_rules)]
+            # Tenant, SharePoint, domain and DevOps: their own proofs (DECISIONS 46).
+            wanted += [(client, value, kind) for value, kind, client in
+                       owned_values(text, mapper, sweep, owner_add - {"email"}, self.store.ignore_set())]
+            if wanted:
+                auto_added += self._add_forms(wanted)
+            if auto_added:
+                # The mapping was reloaded mid-request, so the snapshot is stale: re-read
+                # it and tokenise again, so THIS request is covered by what was just added.
+                mapper = self.mapper
+                outbound = SubCounter()
+                obj = run.tokenise_json(mapper, original, outbound)
+            if modes.get("email") in ("auto", "review") and "email" not in owner_add:
+                # An address at a mapped domain has already lost its domain to the mapping,
+                # so nothing downstream sees it; its mailbox name would go out. Stood in or
+                # held back whole here, from the original text (DECISIONS 46).
+                with self._filter_state_lock:
+                    forms = self._owned_email_forms(detection_text(obj), mapper, modes["email"],
+                                                    f"{dialect} /{tail}",
+                                                    SeenContext(dict(outbound), project, session_name))
+                if forms:
+                    obj, outbound, pre_held = self._tokenise_with(original, mapper, forms)
+        if self.cfg.near_miss and read:
+            # Already repaired above, inside the conversion. What is left is the
+            # bookkeeping: count what was put right, and hold back a word that is almost a
+            # client's name (where the mapping holds the longer form) for review.
+            near_miss = sum(near.values())
+            if near_miss:
+                outbound.update(near)
+            if self.store is not None:
+                was_read = "\n".join(read)
+                misses = near_miss_words(was_read, mapper)
+                for word, client, near in misses:
+                    if self.store.add_candidate(word, "client-resource", "high", client,
+                                                f"{dialect} /{tail}", self.cfg.placeholder_kinds,
+                                                SeenContext(dict(outbound), project, session_name),
+                                                near=near):
+                        near_miss += 1
+                        log.info("near miss of a %s identifier held back: %r", client, word)
+        run.check()
+        if self.cfg.secrets_mode == "block":
+            fams = run.families(obj)
+            if fams:
+                f.outbound = outbound
+                done.refused = f"secrets present ({', '.join(fams)}); remove it and retry"
+                return
+        elif self.cfg.secrets_mode == "redact":
+            if self.user_secrets is not None:
+                self.user_secrets.maybe_reload()
+                obj = run.redact_user(self.user_secrets, obj, secrets)
+            obj = run.redact(obj, secrets)
+        body = dumps(obj)
+        reply_mapper = mapper
+        if self.store is not None:
+            # Learning mode: anything identifier-shaped left after tokenisation is unmapped.
+            # Read from the decoded strings, never the raw JSON: signatures and base64 are not
+            # text, and fragments of them queued for review were mapped as "identifiers".
+            final_text = detection_text(obj)
+            # What auto-add mapped is now known and skipped; what near-miss or redaction took
+            # out of the text is no longer in it, and is not queued.
+            # Asked once per distinct value, in one pass (ValueFinder): per occurrence it was
+            # O(candidates x text), the square of the conversation.
+            finder = ValueFinder(c[0] for c in sweep)
+            present = finder.within(final_text)
+            still = [c for c in sweep if c[0] in present]
+            # The store locks each method, so concurrent requests are safe (H12).
+            new = self.store.record(final_text, mapper, f"{dialect} /{tail}", self.cfg.placeholder_kinds,
+                                    SeenContext(dict(outbound), project, session_name), still)
+            if new:
+                self.notifier.maybe_toast(self.store.pending_count(), self.store.version)
+            # Fail closed: unknown identifiers of the chosen kinds go out as placeholders, and
+            # replies are rehydrated with them too, so you and local tools see real values.
+            with self._filter_state_lock:
+                self._stand_in(sweep, mapper)
+                only, combined = self._placeholder_mappers(mapper)
+            if only is not None and combined is not None:
+                held: Counter[str] = SubCounter()
+                obj = run.tokenise_json(only, obj, held)
+                held.update(pre_held)
+                held.pairs.update(pre_held.pairs)
+                body = dumps(obj)
+                held_back = {k.split(":", 1)[1]: v for k, v in held.items()}
+                reply_mapper = combined
+                request[_REQ]["held"] = held
+            # Queued and not held back goes out as it is while it waits. Logged, so it is
+            # seen rather than assumed (DECISIONS 38).
+            sent_text = detection_text(obj)
+            sent = finder.within(sent_text, {c[0] for c in still})
+            unheld = {v: self._waiting_unheld(v) for v in dict.fromkeys(c[0] for c in still) if v in sent}
+            request[_REQ]["unprotected"] = [(v, k) for v, k, _c, _o in still if v in sent and unheld[v]]
+        run.check()
+        # The canary, on the bytes being sent. What a match rule declined to replace went out as
+        # written, by the rule's own decision; the canary does not refuse it, so it is reported
+        # instead (DECISIONS 39).
+        leaked, declined = run.canary(mapper, body)
+        if declined:
+            request[_REQ]["declined"] = declined
+            for cid, found, _real in declined:
+                log.info("match rule let %r through for %s (not the client, by the rule)", found, cid)
+        if leaked:
+            for site in canary_sites(mapper, body):
+                log.warning("canary match at %s", site)
+            # The same matches, with their surroundings, for the substitution log.
+            request[_REQ]["canary"] = canary_matches(mapper, body)
+        if leaked and self.cfg.canary_fail_open:
+            # The emergency switch on the Settings page: send it anyway, and say so loudly.
+            log.warning("canary FAIL-OPEN: sent a request the canary would have refused (clients: %s)",
+                        ", ".join(leaked))
+            request[_FAIL_OPEN] = leaked   # the request's one evidence line will say so
+        elif leaked:
+            f.outbound = outbound
+            done.leaked = leaked
+            return
+        # D199: names it sees as tokens are right where it wrote them. Added after the canary, as it
+        # always was, and here rather than on the event loop (Brad 2026-11-10).
+        if (f.token_note and dialect == "anthropic" and tail.rstrip("/").endswith("v1/messages")
+                and sum(outbound.values())):
+            body = _with_token_note(body)
         f.mapper, f.reply_mapper, f.body = mapper, reply_mapper, body
         f.outbound, f.auto_added, f.pre_held = outbound, auto_added, pre_held
         f.held_back, f.attach, f.near_miss = held_back, attach, near_miss
-        return None
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
+        """One model request. Its entry in the open-request list (activity.model_requests) goes however it ends - an
+        answer, a refusal, an error, or the client going away mid-filter (coordinator, 2026-11-10: an abandoned
+        request stayed listed as open)."""
+        try:
+            return await self._handle_request(request)
+        finally:
+            info = request.get(_REQ)
+            if info:
+                self._open.pop(info.get("id", ""), None)
+
+    async def _handle_request(self, request: web.Request) -> web.StreamResponse:
         started = time.monotonic()
         # Counted before anything can refuse it: the question this answers is "is a client
         # pointed at us", not "did the request succeed".
@@ -2314,9 +2481,11 @@ class Proxy:
             log.warning("proxy.bypass is ON: %s /%s forwarded untouched", dialect, tail)
             body = _without_our_marks(body, content_type, dialect)
 
+        from .upstreamwatch import claude_session_of
         filtering = _Filtering(request, dialect, tail, started, session_name, session_client, content_type,
                                mapper, reply_mapper, body, outbound, inbound, secrets, auto_added, pre_held,
-                               held_back, attach, near_miss)
+                               held_back, attach, near_miss, token_note=True,
+                               claude_session=claude_session_of(body))
         refused = await self._filter_body(filtering)
         if refused is not None:
             return refused
@@ -2325,17 +2494,19 @@ class Proxy:
         held_back, attach, near_miss = filtering.held_back, filtering.attach, filtering.near_miss
 
         mapper = reply_mapper if body and _is_json(content_type) else mapper
-        if dialect == "anthropic" and tail.rstrip("/").endswith("v1/messages") and sum(outbound.values()) \
-                and not request.get(_BYPASS) and _is_json(content_type):
-            body = _with_token_note(body)         # D199: names it sees as tokens are right where it wrote them
+        # D199's token note (names it sees as tokens are right where it wrote them) is added by the filter's worker
+        # call now, after the canary as before (Brad 2026-11-10): it was a parse and a serialise on the event loop.
         headers = {k: v for k, v in request.headers.items() if _forwardable(k)}
         auth_mode = self._apply_credential(dialect, headers)
         assert self._session is not None
         from .upstreamwatch import Watch
         watch = Watch((request.get(_REQ) or {}).get("id", ""), dialect, "/" + tail, started, body or b"",
                       ((request.get(_REQ) or {}).get("who") or {}).get("app")
-                      or request.headers.get("User-Agent", "").split(" ")[0])
+                      or request.headers.get("User-Agent", "").split(" ")[0],
+                      session=filtering.claude_session)
         watch.mark("filtered")                    # the request is ready to go: what came before was AI Cleaner
+        if filtering.stats:
+            watch.filter(filtering.stats)         # the filter's breakdown (incremental filtering, spec part 5)
         try:
             upstream_resp = await self._session.request(
                 request.method, url, headers=headers, data=body if body else None, allow_redirects=False,
@@ -2696,6 +2867,9 @@ def run(cfg: Config) -> None:
                     "specific refusal right now.", path)
     app = proxy.build_app()
     app.on_startup.append(lambda _app: _start_watchdog(cfg.listen, cfg.port, lambda: _restart_self(cfg)))
+    # The filter's worker processes start with AI Cleaner and are kept (Brad 2026-11-10), in the background: the proxy
+    # answers at once and filters in one thread until they are up.
+    app.on_startup.append(_start_filter_pool(proxy))
     # Logoff or shutdown: say so and leave at once, rather than hold Windows up (stability spec S4). Sessions live
     # in their brokers, which answer the same event for themselves.
     shutdown.install(lambda kind: lifecycle.record("proxy-stop", pid=os.getpid(), why=kind))
@@ -2714,6 +2888,13 @@ def _restart_self(cfg: Config) -> None:
         raise RuntimeError("not started from an installed config")
     log_path = restart(cfg.path.parent, cfg.port, Path(cfg.log_dir))
     log.critical("restart handed to PowerShell (log %s)", log_path)
+
+
+def _start_filter_pool(proxy: "Proxy") -> Any:
+    """The start-up hook that starts the filter's worker processes on a thread (incremental filtering, spec part 4)."""
+    async def start(_app: web.Application) -> None:
+        threading.Thread(target=proxy.start_filter_pool, name="filter-pool-start", daemon=True).start()
+    return start
 
 
 async def _guard_accepts(app: web.Application) -> None:

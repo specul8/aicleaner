@@ -161,13 +161,21 @@ class _Scrubber:
             self.counts["image_redaction_failed"] += 1
             return None
         if result.image is None:
-            self.counts["image_redaction_refused"] += 1
+            if getattr(result, "too_large", False):
+                # Brad, 2026-11-10: never an over-cap picture; its text goes instead, and that is said in the log.
+                log.warning("a redacted picture could not be made small enough, so it went as its text: %s",
+                            result.withheld)
+                self.counts["image_redaction_too_large"] += 1
+            else:
+                self.counts["image_redaction_refused"] += 1
             return None
         self.counts["image_redacted" if result.hidden else "image_clean"] += 1
         said = (f"[aicleaner: this image was sent with {result.hidden} real name(s) or identifier(s) blacked out; "
                 "its readable text follows.]" if result.hidden else
                 "[aicleaner: this image was checked on this machine and had no real names; its readable text follows.]")
-        media = "image/png"                    # always re-encoded (feature 114 security review)
+        # Always a fresh encode (feature 114 security review), in the original's format where it can be written
+        # (Brad, 2026-11-10): the media type is what was actually written.
+        media = getattr(result, "media", "") or "image/png"
         picture = {"type": "image", "source": {"type": "base64", "media_type": media,
                                                "data": base64.b64encode(result.image).decode("ascii")}}
         return [picture, _notice(f"{said}\n\n{self._read(result.text)}" if result.text.strip() else said)]

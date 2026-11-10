@@ -420,6 +420,12 @@ class Config:
     # True: every value on every request, for diagnosis.
     detail_every_request: bool = False
     detail_retention_days: int = 90    # detail files older than this are deleted at proxy start
+    # Incremental and multi-core filtering (spec 2026-11-10-incremental-filtering.md, Brad 2026-11-10): a string
+    # already filtered is not filtered again, and a large request is shared across worker processes. On by default
+    # once the equivalence tests passed. `shadow` runs the old whole-body passes beside it, sends their result and
+    # logs any difference (sizes and kinds only) - for diagnosis. Both local only: they change how the filter runs.
+    filter_incremental: bool = True
+    filter_shadow: bool = False
     path: Path | None = None  # the aicleaner-config.json this was loaded from, for runtime edits
     client_max_mb: int = 64
     upstream_timeout_s: int = 600
@@ -476,6 +482,8 @@ class Config:
         "canary.fail_open": ("canary_fail_open", bool),
         "proxy.bypass": ("proxy_bypass", bool),
         "debug.timings": ("debug_timings", bool),
+        "filter.incremental": ("filter_incremental", bool),
+        "filter.shadow": ("filter_shadow", bool),
         "editor.preview_dblclick": ("editor_preview_dblclick", str),
         "editor.inline_suggest": ("editor_inline_suggest", bool),
         "editor.minimap": ("editor_minimap", bool),
@@ -700,6 +708,9 @@ class Config:
                                           if REPLACEMENT_RE.fullmatch(str(v).strip())]
         debug = data.get("debug") or {}
         cfg.debug_timings = _flag(debug, "timings", False, "debug.timings")
+        filtering = data.get("filter") or {}
+        cfg.filter_incremental = _flag(filtering, "incremental", True, "filter.incremental")
+        cfg.filter_shadow = _flag(filtering, "shadow", False, "filter.shadow")
         try:
             cfg.debug_timings_since = int(debug.get("timings_since", 0) or 0)
         except (TypeError, ValueError):

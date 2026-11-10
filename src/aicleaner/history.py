@@ -508,6 +508,14 @@ def _event_of(line: str) -> dict[str, Any] | None:
     if kind == "assistant" and isinstance(record.get("message"), dict):
         return {"type": "assistant", "message": record["message"], **stamp}
     if kind == "user":
+        # D234: an answer to an AskUserQuestion is a tool result, kept with what was chosen in `toolUseResult`. A
+        # conversation answered in the terminal or VS Code, caught up or resumed here, drew no line for it - live, the
+        # page's question card emits `permission_answered`. Replayed in that shape, so it reads, and steps, the same.
+        result = record.get("toolUseResult")
+        answers = result.get("answers") if isinstance(result, dict) else None
+        if isinstance(answers, dict) and answers:
+            return {"type": "permission_answered", "allow": True,
+                    "answers": {str(question): str(answer) for question, answer in answers.items()}, **stamp}
         text = SPACES.sub(" ", _text_of(record.get("message"))).strip()
         if text.startswith(NOTICE):
             # D212: the transcript keeps a background task's notice as a user message; live, the stream sends it as

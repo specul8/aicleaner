@@ -79,7 +79,9 @@ const BUILTIN_WORDS = {
   folders: ['directories', 'paths', 'file picker', 'OneDrive', 'allowed folders'],
   'remote-desktop': ['RDP', 'aicleaner-rdp', 'remote desktop', 'menu link', 'another machine'],
   logging: ['logs', 'audit', 'history', 'retention', 'detail log'],
-  diagnostics: ['telemetry', 'tracing', 'performance', 'timings', 'slow', 'speed', 'debug'],
+  diagnostics: ['telemetry', 'tracing', 'performance', 'timings', 'slow', 'speed', 'debug',
+    // Incremental filtering (Brad 2026-11-10)
+    'incremental', 'cache', 'filter speed', 'cores', 'worker processes', 'shadow'],
   advanced: ['config file', 'port', 'listening', 'aicleaner-config.json', 'technical'],
   bypass: ['turn off filtering', 'disable', 'pass through', 'off switch', 'unfiltered'],
   'fail-open': ['canary', 'emergency', 'false positive', 'locked out', 'override'],
@@ -1368,13 +1370,35 @@ function diagnosticsCard(s, status) {
     ? h('p', { class: 'chip warn diagnostics-on' },
       `Recording until ${new Date(status.debug_timings_until * 1000).toLocaleString()}`)
     : null;
+  // Incremental filtering (spec 2026-11-10-incremental-filtering.md, Brad 2026-11-10): how the filter runs, so they
+  // change only where AI Cleaner runs. Remotely they are shown, greyed, and left out of the save, so the timings
+  // switch beside them still saves from anywhere.
+  const remote = Boolean((view.config || {}).remote);
+  const incremental = checkbox('filter-incremental', 'Filter only what is new in each request (incremental filtering)',
+    s['filter.incremental'] !== false);
+  const shadow = checkbox('filter-shadow', 'Shadow check: also filter the whole request the old way, send that, and '
+    + 'log any difference (sizes and kinds only)', s['filter.shadow']);
+  for (const box of [incremental, shadow]) {
+    if (remote) {
+      box.querySelector('input').disabled = true;
+      box.title = LOCAL_ONLY;
+    }
+  }
   return card('diagnostics', 'Diagnostics',
     'Record timings: how long each request and each step of the pages takes (switching session, '
     + 'loading a conversation, drawing it, decrypting through the tunnel), written to '
     + 'logs\\timings-<date>.jsonl on this machine. Durations, sizes and request paths only - never '
-    + 'content. Switches itself off after 24 hours.',
-    [until, h('div', { class: 'form-row' }, timings), processesPanel()].filter(Boolean),
-    () => ({ 'debug.timings': timings.querySelector('input').checked }));
+    + 'content. Switches itself off after 24 hours. Incremental filtering remembers, in memory only, what '
+    + 'each part of a conversation gave the filter, so a request filters only its new messages and a large '
+    + 'one is shared across processor cores; the result sent is the same. logs\\upstream-<date>.jsonl says '
+    + 'what it did for each request.',
+    [until, h('div', { class: 'form-row' }, timings), h('div', { class: 'form-row' }, incremental),
+      h('div', { class: 'form-row' }, shadow), processesPanel()].filter(Boolean),
+    () => (remote ? { 'debug.timings': timings.querySelector('input').checked } : {
+      'debug.timings': timings.querySelector('input').checked,
+      'filter.incremental': incremental.querySelector('input').checked,
+      'filter.shadow': shadow.querySelector('input').checked,
+    }));
 }
 
 // Processes (spec 2026-10-24-session-lifecycle-instrumentation.md): memory, each session's processes as its job

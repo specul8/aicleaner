@@ -9,7 +9,10 @@ One line per model request in logs/upstream-<date>.jsonl, with the time each pha
   it works (pings before message_start mean the request is waiting at the service);
 - what the service says: status, request id, rate-limit and retry headers, error events (overloaded, rate limit),
   token usage (input, cache read, cache write, output) and stop reason;
-- how it ended: complete, the service ended it part-way, or the client (Claude Code) went away - and when.
+- how it ended: complete, the service ended it part-way, or the client (Claude Code) went away - and when;
+- the filter's own breakdown (`filter`, 2026-11-10): units total / from the cache / filtered, the time in each pass,
+  whether the worker processes were used, and the filter generation - so a cache-miss storm after a mapping change
+  shows as one.
 
 Nothing in a line is client data: no prompt or answer text, only sizes, times, counts and the service's own headers.
 """
@@ -30,8 +33,32 @@ log = logging.getLogger("aicleaner.upstreamwatch")
 KEEP_HEADERS = re.compile(r"^(request-id|x-request-id|cf-ray|retry-after|x-should-retry|anthropic-ratelimit-.*|"
                           r"x-ratelimit-.*|openai-processing-ms|x-envoy-upstream-service-time|server-timing|"
                           r"anthropic-organization-id)$", re.I)
-_SESSION = re.compile(rb'session_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')
+# Claude Code's session id, in either of the shapes its `metadata.user_id` has had: "user_<h>_account_<id>_session_<id>",
+# and a JSON object written as a string ({"device_id": ..., "session_id": "<id>"}, its quotes escaped in the body).
+_UUID = rb'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+_SESSION = re.compile(rb'session_' + _UUID + rb'|session_id\\?"\s*:\s*\\?"' + _UUID)
 _MODEL = re.compile(rb'"model"\s*:\s*"([^"]{1,80})"')
+_METADATA = b'"metadata"'
+
+
+def claude_session_of(body: bytes | None) -> str:
+    """Claude Code's session id from a request body as the client sent it ("" when there is none). Read before
+    filtering: the filter stands a GUID in, so the body sent upstream carries a stand-in, not the session.
+
+    The metadata object can sit anywhere in the body - after a long tools list it is in neither the first nor the last
+    4 KB - so the text after each `"metadata"` key is read too (a few of them: a tool's schema may have one)."""
+    if not body:
+        return ""
+    windows = [body[-4096:], body[:4096]]
+    at = body.find(_METADATA)
+    while at >= 0 and len(windows) < 22:
+        windows.append(body[at:at + 2048])
+        at = body.find(_METADATA, at + len(_METADATA))
+    for window in windows:
+        m = _SESSION.search(window)
+        if m:
+            return (m.group(1) or m.group(2)).decode()
+    return ""
 
 
 def _ms(since: float) -> float:
@@ -41,15 +68,16 @@ def _ms(since: float) -> float:
 class Watch:
     """The timings of one request, filled in as it goes, written once when it ends."""
 
-    def __init__(self, request_id: str, dialect: str, path: str, started: float, body: bytes, client: str) -> None:
+    def __init__(self, request_id: str, dialect: str, path: str, started: float, body: bytes, client: str,
+                 session: str | None = None) -> None:
+        """`session`: Claude Code's session id read from the body as it arrived (claude_session_of); without it, it
+        is read from `body`."""
         self.started = started
-        tail = body[-4096:] if body else b""
-        session = _SESSION.search(tail) or (_SESSION.search(body[:4096]) if body else None)
         model = _MODEL.search(body[:4096]) if body else None
         self.rec: dict[str, Any] = {
             "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             "request": request_id, "dialect": dialect, "path": path[:120], "client": client[:60],
-            "claude_session": session.group(1).decode() if session else "",
+            "claude_session": session if session is not None else claude_session_of(body),
             "model": model.group(1).decode(errors="replace") if model else "",
             "body_bytes": len(body or b""), "ms": {}, "pings_before_start": 0, "pings_after_start": 0,
             "events": 0, "outcome": "",
@@ -61,6 +89,12 @@ class Watch:
     def mark(self, name: str) -> None:
         """The time since the request reached AI Cleaner that `name` happened, first time only."""
         self._ms.setdefault(name, _ms(self.started))
+
+    def filter(self, stats: dict[str, Any]) -> None:
+        """What the filter did with this request (incremental filtering, spec part 5, Brad 2026-11-10): its units in
+        total, from the cache and filtered now; the milliseconds in each pass; whether the worker processes were
+        used; the filter generation; and any shadow difference (by pass name). Counts and times only, no text."""
+        self.rec["filter"] = stats
 
     def headers(self, status: int, headers: Any) -> None:
         self.mark("response_headers")

@@ -15,6 +15,7 @@ installed it and otherwise the engine that ships with Windows.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import shutil
@@ -232,6 +233,50 @@ def image_converter(timeout: int = 60) -> ImageToText | None:
     Neither is a dependency.
     """
     return windows_ocr_converter(timeout=timeout) or tesseract_converter(timeout=timeout)
+
+
+# How many readings, and how much text, a RememberedReader keeps (in memory only: it is client data).
+READINGS_KEPT = 512
+READINGS_MAX_CHARS = 16_000_000
+
+
+class RememberedReader:
+    """An image reader that remembers what it read, by the SHA-256 of the image's bytes (and its media type).
+
+    A picture in a conversation's history is sent again with every request, and each time it was read again: a
+    PowerShell process and an OCR pass per picture, per request (2026-11-10, the Pictures settings measurements). The
+    reading of the same bytes is the same, so it is kept - a successful reading only: a reader that failed (timeout,
+    error) is asked again next time. In memory, bounded, never written anywhere; lost on restart."""
+
+    def __init__(self, read: ImageToText, kept: int = READINGS_KEPT, max_chars: int = READINGS_MAX_CHARS) -> None:
+        import threading
+        from collections import OrderedDict
+
+        self._read = read
+        self._kept: "OrderedDict[tuple[str, str], str | None]" = OrderedDict()
+        self._chars = 0
+        self._limit = (kept, max_chars)
+        self._lock = threading.Lock()
+        self.reads = 0           # readings actually made (for the monitor and the tests)
+        self.remembered = 0      # readings answered from memory
+
+    def __call__(self, raw: bytes, media: str = "") -> str | None:
+        key = (hashlib.sha256(raw).hexdigest(), media)
+        with self._lock:
+            if key in self._kept:
+                self._kept.move_to_end(key)
+                self.remembered += 1
+                return self._kept[key]
+        found = self._read(raw, media)           # a ConversionError goes to the caller, and nothing is kept
+        with self._lock:
+            self.reads += 1
+            if key not in self._kept:
+                self._kept[key] = found
+                self._chars += len(found or "")
+            while self._kept and (len(self._kept) > self._limit[0] or self._chars > self._limit[1]):
+                _key, old = self._kept.popitem(last=False)
+                self._chars -= len(old or "")
+        return found
 
 
 def ocr_engine_name() -> str:

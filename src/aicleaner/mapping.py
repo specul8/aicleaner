@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import itertools
 import json
 import re
+import threading
 from bisect import bisect_right
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -38,6 +40,18 @@ PENDING_PREFIX = "pending:"
 # why eviction is the wrong tool and what happens past the ceiling instead. High enough that no
 # ordinary session reaches it; low enough that a runaway one cannot grow without limit.
 MAX_LEARNED_VARIANTS = 5000
+
+# Every Mapper built in this process gets the next number (incremental filtering, spec
+# 2026-11-10-incremental-filtering.md, Brad 2026-11-10): a reload, a placeholder mapper or a stand-in
+# mapper is a new object with a new number, so a result remembered for one is never used for another.
+_SERIALS = itertools.count(1)
+
+
+class VariantNeeded(Exception):
+    """Raised by a Mapper that may not learn (`learning` False) when a string needs a case variant
+    it has not met: a worker process's copy of the mapping (incremental filtering, Brad 2026-11-10).
+    The variant's token depends on every variant learned before it, in document order, so such a
+    string is filtered again on the proxy's own mapper, at its place in the document."""
 
 
 def is_real_client(cid: str) -> bool:
@@ -507,8 +521,14 @@ def _spelling(key: str) -> str:
     a rebuild: one `re.fullmatch` per key per tree, with a distinct pattern each time, which
     overflows `re`'s own small pattern cache and recompiles. At twenty builds per edit that was
     tens of thousands of throwaway compilations.
+
+    An ASCII key always survives (an ASCII letter and its lower case match each other under
+    IGNORECASE), so it is answered without `re`: a placeholder mapper holds tens of thousands of
+    keys, which overflowed the memo and recompiled one pattern per key - 21 s at 4.9 MB (2026-11-10).
     """
     low = key.lower()
+    if key.isascii():
+        return low
     return low if re.fullmatch(re.escape(low), key, re.IGNORECASE) else key
 
 
@@ -521,6 +541,19 @@ def _trie(keys: Iterable[str], mode: str = "word") -> dict:
             node = node.setdefault(char, {})
         node[_END] = _tail(key, mode)
     return root
+
+
+def literal_trie_regex(keys: Iterable[str]) -> str:
+    """A pattern matching any of `keys` exactly as written (case-sensitive, no edge assertions),
+    the longest where several start at one place - what a flat alternation sorted longest-first
+    matches, without its cost of trying every key at every position. Keys must be non-empty."""
+    root: dict = {}
+    for key in keys:
+        node = root
+        for char in key:
+            node = node.setdefault(char, {})
+        node[_END] = ""
+    return _trie_regex(root)
 
 
 def _trie_regex(node: dict) -> str:
@@ -967,11 +1000,153 @@ def near_miss_match(word: str, other: str) -> bool:
     return any(a == b or one_edit_apart(a, b) for a, b in (plain, shaped))
 
 
+# ---- sharded patterns (2026-11-10) -------------------------------------------------------------------------------
+#
+# The placeholder mappers (proxy._placeholder_mappers) hold every stand-in a conversation has met - 47,000 keys at
+# 11 MB - and were rebuilt on every request that added one: four patterns compiled from scratch, about 17 s each in
+# `re`'s own Python-level parser and code generator, 75 s of an 84 s request. Compiling is linear; doing it per request
+# made a conversation quadratic.
+#
+# So a large key set that grows is compiled as SHARDS: the shards of the set it grew from, reused as they are, plus
+# one for the new keys - merged with the shard before it whenever it reaches 1/_SHARD_RATIO of that one's size, so the
+# shards stay few (sizes falling geometrically) and each key is compiled O(log n) times over a conversation.
+#
+# Matching over shards gives exactly what the one pattern gives, under one condition, checked: every key is ASCII.
+# Then each key's spelling in the tree is its lower case (_spelling), the tree's branches at a node are distinct ASCII
+# characters, and a character of text can follow at most one of them under IGNORECASE - so the walk down the tree is
+# fixed by the text, and the pattern's match at a position is the LONGEST key whose edge assertions hold there (the
+# deepest terminal on that one path). The head assertion wraps a group of keys sharing a first-character class, and two
+# groups cannot both match at one position. So the one pattern's match at a position is the longest of the shards'
+# matches there, and its scan (leftmost match, then on from its end) is what ShardedPattern does with the shards.
+# A key set with any other character is compiled whole, as before.
+#
+# Two more modes use the same shards for the checks around a rebuild, which had become the next largest cost:
+# - LITERAL: keys exactly as written, case-sensitive, no edge assertions (proxy._screen's "does this value contain a
+#   token"). A tree of literal keys always has one path for a text, so the longest-match argument holds for any key;
+# - FIND: every position, overlapping, as a lookahead (detect.ValueFinder, "which of these occur"): the values found
+#   are the prefixes of each position's longest match, and every value occurring at a position is a prefix of the
+#   longest match of the shard that holds it - so the union over the shards is exact. ValueFinder reads `.patterns`.
+
+SHARD_MIN = 2000          # below this many keys a set is compiled whole: it is quick
+_SHARD_RATIO = 8
+_MAX_SHARDS = 6
+_SHARD_MEMO = 24          # sharded sets remembered (each holds references to shared shard patterns)
+LITERAL = "literal"
+FIND = "find"
+_shard_lock = threading.Lock()
+_sharded: "OrderedDict[tuple[str, frozenset[str]], ShardedPattern]" = OrderedDict()
+
+
+class ShardedPattern:
+    """One pattern's matching, done with several compiled shards (see above). Offers what the Mapper and the stream
+    rewriter use of a pattern: finditer, search, sub."""
+
+    def __init__(self, keysets: list[frozenset[str]], patterns: list[re.Pattern[str]]):
+        self.keysets = keysets
+        self.patterns = patterns
+        self.keys = frozenset().union(*keysets)
+
+    def _next(self, text: str, found: list[re.Match[str] | None], pos: int) -> re.Match[str] | None:
+        """The one pattern's next match at or after `pos`; `found` holds each shard's next match, kept up to date."""
+        for i, m in enumerate(found):
+            if m is not None and m.start() < pos:
+                found[i] = self.patterns[i].search(text, pos)
+        best: re.Match[str] | None = None
+        for m in found:
+            if m is not None and (best is None or m.start() < best.start()
+                                  or (m.start() == best.start() and m.end() > best.end())):
+                best = m
+        return best
+
+    def finditer(self, text: str, pos: int = 0) -> Iterator[re.Match[str]]:
+        found: list[re.Match[str] | None] = [p.search(text, pos) for p in self.patterns]
+        while True:
+            m = self._next(text, found, pos)
+            if m is None:
+                return
+            yield m
+            pos = m.end()      # keys are never empty, so a match always moves on
+
+    def search(self, text: str, pos: int = 0) -> re.Match[str] | None:
+        return next(self.finditer(text, pos), None)
+
+    def sub(self, repl: Callable[[re.Match[str]], str] | str, text: str) -> str:
+        parts: list[str] = []
+        last = 0
+        for m in self.finditer(text):
+            parts.append(text[last:m.start()])
+            parts.append(repl(m) if callable(repl) else m.expand(repl))
+            last = m.end()
+        if not parts:
+            return text
+        parts.append(text[last:])
+        return "".join(parts)
+
+
+def _shard_sort(keys: Iterable[str]) -> tuple[str, ...]:
+    return tuple(sorted(keys, key=lambda k: (-len(k), k)))
+
+
+def _compile_whole(keys: tuple[str, ...], mode: str) -> re.Pattern[str]:
+    """One pattern for these keys: a Mapper's (real / token / word), LITERAL or FIND (see above)."""
+    if mode == LITERAL:
+        return re.compile(literal_trie_regex(keys))
+    if mode == FIND:
+        return re.compile("(?=(" + literal_trie_regex(keys) + "))")
+    return Mapper._compile_keys(keys, mode)
+
+
+def _compile_sharded(keys: tuple[str, ...], mode: str) -> "re.Pattern[str] | ShardedPattern":
+    """The pattern for these keys (sorted as Mapper._compile sorts them): whole, or as shards of a set compiled before.
+    FIND always gives a ShardedPattern once it is past SHARD_MIN (its reader takes the shards, one or several)."""
+    literal = mode in (LITERAL, FIND)
+    if len(keys) < SHARD_MIN or not (literal or all(k.isascii() for k in keys)):
+        return _compile_whole(keys, mode)
+    keyset = frozenset(keys)
+    with _shard_lock:
+        hit = _sharded.get((mode, keyset))
+        if hit is not None:
+            _sharded.move_to_end((mode, keyset))
+            return hit.patterns[0] if len(hit.patterns) == 1 and mode != FIND else hit
+        # The largest set compiled before that this one contains (a set much smaller than this one is not worth it:
+        # it would be merged away at once).
+        base = max((s for (m, ks), s in _sharded.items()
+                    if m == mode and len(ks) * _SHARD_RATIO > len(keyset) and ks <= keyset),
+                   key=lambda s: len(s.keys), default=None)
+    if base is None:
+        keysets, patterns = [keyset], [_compile_whole(keys, mode)]
+    else:
+        keysets, patterns = list(base.keysets), list(base.patterns)
+        new = keyset - base.keys
+        keysets.append(frozenset(new))
+        patterns.append(None)  # type: ignore[arg-type]   # compiled below, once its final shape is known
+        # Merge the newest shard into the one before while it is not much smaller (or there are too many).
+        while len(keysets) > 1 and (len(keysets[-1]) * _SHARD_RATIO >= len(keysets[-2])
+                                    or len(keysets) > _MAX_SHARDS):
+            merged = keysets[-2] | keysets[-1]
+            del keysets[-2:], patterns[-2:]
+            keysets.append(merged)
+            patterns.append(None)  # type: ignore[arg-type]
+        patterns[-1] = _compile_whole(_shard_sort(keysets[-1]), mode)
+    made = ShardedPattern(keysets, patterns)
+    with _shard_lock:
+        _sharded[(mode, made.keys)] = made      # made.keys == keyset; one set kept per entry, not two
+        _sharded.move_to_end((mode, made.keys))
+        while len(_sharded) > _SHARD_MEMO:
+            _sharded.popitem(last=False)
+    return patterns[0] if len(patterns) == 1 and mode != FIND else made
+
+
 class Mapper:
     """Compiled two-way substitution over a validated set of forms."""
 
     def __init__(self, forms: Iterable[Form], build: bool = True):
         self.forms: list[Form] = list(forms)
+        self.serial = next(_SERIALS)          # which mapping a remembered result belongs to (Brad 2026-11-10)
+        # False on a worker process's copy: a new case variant raises VariantNeeded instead of being
+        # learned there, and the string is filtered again here (incremental filtering, Brad 2026-11-10).
+        self.learning = True
+        self._learn_lock = threading.Lock()   # requests are filtered on several threads at once
         self._validate()
         if not build:
             # Validation only (see from_dict): nothing below can refuse a mapping, it only builds
@@ -1062,7 +1237,7 @@ class Mapper:
         tens of them, so the memo turns every repeat into a lookup. Patterns are immutable, so
         sharing one between mappers is safe.
         """
-        return Mapper._compile_keys(tuple(sorted(table, key=lambda k: (-len(k), k))), mode)
+        return _compile_sharded(tuple(sorted(table, key=lambda k: (-len(k), k))), mode)
 
     @staticmethod
     @lru_cache(maxsize=16)
@@ -1140,8 +1315,15 @@ class Mapper:
         joined_reals = "\x00".join(reals)
         # Compared ignoring case, as the matching does: "box" was let past a token "Client05_Box" (2026-10-23).
         folded_tokens = joined_tokens.lower()
+        # Which ones occur, asked once over the set (detect.ValueFinder: exactly `x in joined`): one
+        # `in` per form over the joined other side was O(forms^2), seconds for a placeholder mapper of
+        # tens of thousands of forms rebuilt on every request that adds a stand-in (2026-11-10).
+        from .detect import ValueFinder      # here, not at the top: detect imports mapping
+
+        reals_in_tokens = ValueFinder(r.lower() for r in reals).within(folded_tokens)
+        tokens_in_reals = ValueFinder(tokens).within(joined_reals)
         for r in reals:
-            if r.lower() in folded_tokens:
+            if r.lower() in reals_in_tokens:
                 # Only where the real would actually be FOUND inside the token by the outbound matching rule (a
                 # word or case edge each side): "AB" sits inside a token like "abwidgetbox" but runs on into
                 # "widget", so it is never matched there, and refusing it kept a two-letter name out (2026-10-23).
@@ -1150,7 +1332,7 @@ class Mapper:
                 if bad is not None:
                     raise MappingError(f"token {bad!r} contains a real term; unsafe")
         for t in tokens:
-            if t in joined_reals:
+            if t in tokens_in_reals:
                 raise MappingError(f"a real term contains token {t!r}; unsafe")
 
     def _check_roundtrip(self) -> None:
@@ -1198,6 +1380,20 @@ class Mapper:
         # form the mapping does not declare a variant of. Nothing leaks either way.
         if len(self._learned) >= MAX_LEARNED_VARIANTS:
             return primary
+        if not self.learning:
+            raise VariantNeeded(text)
+        with self._learn_lock:
+            # Requests are filtered on several threads at once (Brad 2026-11-10): one spelling is
+            # learned once, so two requests meeting it together send the same token.
+            found = self._learned.get(text)
+            if found is not None:
+                return found
+            if len(self._learned) >= MAX_LEARNED_VARIANTS:
+                return primary
+            return self._learn(text, primary)
+
+    def _learn(self, text: str, primary: Form) -> Form:
+        """Mint and remember the token for a case variant met for the first time (see forward)."""
         token = variant_token(text, primary.real, primary.token,
                               set(self._rev) | {f.token for f in self._learned.values()})
         # The variant inherits the rule. Without it, one occurrence next to a corroborating word
@@ -1731,6 +1927,7 @@ class MapperHandle:
         self.reports: dict = {}
         self.broken: list[str] = []
         self.last_error: str | None = None
+        self._current_lock = threading.RLock()
         self._sig = self.store.signature()
         self._reload()
 
@@ -1766,9 +1963,12 @@ class MapperHandle:
         # hot-reload tests pin. A 2s TTL was tried on 2026-09-26 and backed out - signature()
         # measures 0.4ms, the status poll is ten seconds apart so a short TTL never collapses it,
         # and the cost this entry was chasing turned out to be _reload() rather than the walk.
-        sig = self.store.signature()
-        if sig != self._sig:
-            self._sig = sig
-            self._reload()
-            self.reloads += 1
-        return self.mapper
+        # Locked since requests are filtered on worker threads, several at once (Brad 2026-11-10):
+        # two seeing the same change reload it once, and neither reads a half-made mapper.
+        with self._current_lock:
+            sig = self.store.signature()
+            if sig != self._sig:
+                self._sig = sig
+                self._reload()
+                self.reloads += 1
+            return self.mapper

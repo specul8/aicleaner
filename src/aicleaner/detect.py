@@ -380,11 +380,68 @@ def request_project(obj: Any) -> str:
 _TEST_NETS = ("192.0.2", "198.51.100", "203.0.113")
 
 
-def make_placeholder(value: str, kind: str, taken: set[str]) -> str:
+# Below this many characters of searching (distinct values x text length), plain `in` per value is
+# cheaper than compiling a prefix tree of them.
+_IN_BUDGET = 200_000_000
+
+
+class ValueFinder:
+    """Which of a set of values occur in a text as substrings - exactly `{v for v in values if v in text}`.
+
+    Asked per candidate occurrence, `v in text` was O(candidates x text): at 4.4 MB with 51,000
+    occurrences of 18,000 distinct values it took 4.5 s, and it grows with the square of the
+    conversation (2026-11-10). Over a large set the values go into one prefix tree tried at every
+    position (a lookahead, so overlapping occurrences are all seen). At each position the tree gives
+    the LONGEST value starting there (each node offers its continuations before "ends here", and a
+    trie has one continuation per character), and every shorter value starting there is a prefix of
+    that one - so taking each longest match's prefixes that are values finds exactly the values that
+    occur, each where `in` would have found it. The tree is compiled once, on first need, and serves
+    every text asked about."""
+
+    def __init__(self, values: Iterable[str]):
+        self.distinct = set(values)
+        self._empty = "" in self.distinct           # "" is in every string
+        self.distinct.discard("")
+        self._pattern: re.Pattern[str] | None | bool = False
+
+    def within(self, text: str, among: set[str] | None = None) -> set[str]:
+        """The values (or those of `among`, a subset) that occur in `text`."""
+        wanted = self.distinct if among is None else (self.distinct & among)
+        found: set[str] = {""} if self._empty and (among is None or "" in among) else set()
+        patterns = None if len(wanted) * max(1, len(text)) <= _IN_BUDGET else self._compiled()
+        if patterns is None:
+            return found | {v for v in wanted if v in text}
+        longest = set()
+        for pattern in patterns:          # the shards of a large set (mapping.FIND): the union is exact
+            longest.update(m.group(1) for m in pattern.finditer(text))
+        for match in longest:
+            for end in range(1, len(match) + 1):
+                if match[:end] in wanted:
+                    found.add(match[:end])
+        return found
+
+    def _compiled(self) -> list[re.Pattern[str]] | None:
+        """The lookahead tree(s) over the values: shards kept from a set asked about before (mapping.FIND), so a set
+        that grows from request to request is not compiled whole each time."""
+        if self._pattern is False:
+            from .mapping import FIND, _compile_sharded, _shard_sort
+
+            try:
+                compiled = _compile_sharded(_shard_sort(self.distinct), FIND) if self.distinct else None
+                self._pattern = None if compiled is None else list(getattr(compiled, "patterns", [compiled]))
+            except (RecursionError, re.error, OverflowError):   # a value too deep for `re`: the plain way
+                self._pattern = None
+        return self._pattern  # type: ignore[return-value]
+
+
+def make_placeholder(value: str, kind: str, taken: set[str], folded: bool = False) -> str:
     """A stable stand-in for an unknown identifier, shaped like it, unique among `taken`
-    (lower-cased placeholders and tokens). "" when none is free (the value then goes out as-is)."""
+    (lower-cased placeholders and tokens). "" when none is free (the value then goes out as-is).
+
+    `folded=True` says `taken` is already lower case, so it is used as it is: lowering it on every
+    call made minting n stand-ins O(n^2) - 29 s for 18,849 of them (2026-11-10)."""
     hx = hashlib.sha1(value.lower().encode()).hexdigest()
-    used = {t.lower() for t in taken}
+    used = taken if folded else {t.lower() for t in taken}
     if kind == "ip" and is_ipv6(value):
         # An IPv6 address waits as an IPv6 address (DECISIONS 41): the documentation prefix, in the
         # ffff block that no client index reaches, so a stand-in can never equal a token.
@@ -647,6 +704,31 @@ _HOST_SHAPE = re.compile(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+")
 PATTERN_MIN = 4
 
 
+def _presence_tree(keys: Iterable[str]) -> str:
+    """Keys as one prefix tree, for an IGNORECASE pattern asked only WHETHER one occurs (search).
+
+    Whether some alternative matches somewhere does not depend on how the alternatives are laid
+    out - `re` backtracks through every branch - so a tree answers exactly what the flat
+    alternation answered, at the cost of one walk per position instead of one try per key. ASCII
+    keys go in lower case (an ASCII letter and its lower case match each other under IGNORECASE);
+    any other key goes in as written."""
+    from .mapping import literal_trie_regex
+
+    return literal_trie_regex({k.lower() if k.isascii() else k for k in keys})
+
+
+def _token_presence(mapper: Mapper) -> re.Pattern[str] | None:
+    """The same question as `_token_pattern(...).search`, as a tree (cached on the mapper): asked for
+    every candidate occurrence, the flat alternation cost 55 us each (2026-11-10)."""
+    cached = getattr(mapper, "_token_presence_cache", False)
+    if cached is not False:
+        return cached
+    tokens = {f.token for f in mapper.forms if len(f.token) >= 5}
+    pattern = re.compile(_presence_tree(tokens), re.IGNORECASE) if tokens else None
+    mapper._token_presence_cache = pattern
+    return pattern
+
+
 def _client_real_pattern(mapper: Mapper) -> re.Pattern[str] | None:
     """Every client's real (Global's excluded), as one pattern (cached on the mapper; feature 76).
 
@@ -658,10 +740,14 @@ def _client_real_pattern(mapper: Mapper) -> re.Pattern[str] | None:
     cached = getattr(mapper, "_client_real_cache", False)
     if cached is not False:
         return cached
-    reals = sorted({f.real for f in mapper.forms if f.client.lower() != GLOBAL_ID and f.real.strip()},
-                   key=len, reverse=True)
-    parts = [re.escape(r) if len(r) >= PATTERN_MIN else rf"(?<![a-z0-9]){re.escape(r)}(?![a-z0-9])"
-             for r in reals]
+    reals = {f.real for f in mapper.forms if f.client.lower() != GLOBAL_ID and f.real.strip()}
+    # Asked only whether one occurs (search), so the long reals go in as one tree (_presence_tree:
+    # the flat alternation was tried key by key at every position of every candidate occurrence -
+    # 4.8 s of a 4.4 MB request, 2026-11-10); the short ones keep their edges, as before.
+    long = [r for r in reals if len(r) >= PATTERN_MIN]
+    short = sorted((r for r in reals if len(r) < PATTERN_MIN), key=len, reverse=True)
+    parts = ([_presence_tree(long)] if long else []) + (
+        [rf"(?<![a-z0-9])(?:{'|'.join(map(re.escape, short))})(?![a-z0-9])"] if short else [])
     pattern = re.compile("|".join(parts), re.IGNORECASE) if parts else None
     mapper._client_real_cache = pattern
     return pattern
@@ -813,7 +899,7 @@ def carries_token(value: str, mapper: Mapper | None) -> bool:
     rejected as unsafe, and cost a mapping rebuild - minutes of them for one request."""
     if mapper is None:
         return False
-    pattern = _token_pattern(mapper)
+    pattern = _token_presence(mapper)
     return bool(pattern and pattern.search(value))
 
 
@@ -841,18 +927,53 @@ def find_candidates(text: str, mapper: Mapper | None = None, resource_names: boo
     eaten real client data, and a suppressed value is otherwise invisible: not queued, not held
     back, not tokenised, not written anywhere a person looks (D13).
     """
-    for found in _raw_candidates(text, mapper, resource_names, suppressed):
-        if not carries_token(found[0], mapper) and not is_placeholder(found[0]):
-            yield found
+    yield from kept_candidates(_raw_candidates(text, mapper, resource_names, suppressed), mapper)
 
 
-def _raw_candidates(text: str, mapper: Mapper | None = None, resource_names: bool = False,
-                    suppressed: list[tuple[str, str]] | None = None) -> Iterable[tuple[str, str, str, str]]:
-    """Yield (value, kind, confidence, client) for identifier-shaped strings in text.
+def kept_candidates(found: Iterable[tuple[str, str, str, str]],
+                    mapper: Mapper | None) -> Iterable[tuple[str, str, str, str]]:
+    """find_candidates' last step, shared with incremental filtering: our own tokens and placeholders out."""
+    for item in found:
+        if not carries_token(item[0], mapper) and not is_placeholder(item[0]):
+            yield item
 
-    `client` is the suggested owner, set only when the value carries a mapped form of that client
-    (kind "client-resource"); it is "" for everything else. With no mapper, the two resource kinds
-    that need the mapping are skipped."""
+
+@dataclass
+class UnitFindings:
+    """What the detectors found in one stretch of text, before anything that reads beyond it.
+
+    Incremental filtering (spec 2026-11-10-incremental-filtering.md, Brad 2026-11-10) remembers these
+    per unit of the request, so the history a conversation sends again is not read again. Two
+    detectors look past the match itself further than a unit's edge can be trusted to stop them - a
+    domain's context (eight characters before it) and an IPv4 address's version test (up to ninety
+    before it, "from 1.2.3.4 to 5.6.7.8" with "version" in an earlier string) - so those are kept as
+    positions here and decided by `merged_findings` against the whole text. Everything else depends
+    on the unit alone (the property test in test_incremental_filtering.py proves the union is the
+    whole). The lists are in the order the detectors meet them."""
+    emails: list[str] = field(default_factory=list)
+    tenants: list[str] = field(default_factory=list)
+    sharepoints: list[str] = field(default_factory=list)
+    domains: list[tuple[str, int, int]] = field(default_factory=list)     # decided on the whole text
+    guids: list[str] = field(default_factory=list)
+    ipv4: list[tuple[str, int, int]] = field(default_factory=list)        # decided on the whole text
+    ipv6: list[str] = field(default_factory=list)
+    devops: list[tuple[str, str, str]] = field(default_factory=list)
+    names: list[tuple[str, str]] = field(default_factory=list)
+    resources: list[tuple[str, str, bool]] = field(default_factory=list)  # not de-duplicated
+
+    def size(self) -> int:
+        """Roughly how many bytes this holds, for the cache's limit."""
+        return 64 + sum(len(item[0] if isinstance(item, tuple) else item) + 16
+                        for group in (self.emails, self.tenants, self.sharepoints, self.domains, self.guids,
+                                      self.ipv4, self.ipv6, self.devops, self.names, self.resources)
+                        for item in group)
+
+
+def unit_findings(text: str, mapper: Mapper | None = None,
+                  suppressed: list[tuple[str, str]] | None = None) -> UnitFindings:
+    """The detectors over one unit of text (see UnitFindings); _raw_candidates is this over the whole
+    text as one unit, so there is one set of detectors, not two."""
+    out = UnitFindings()
     for m in RE_EMAIL.finditer(text):
         v = m.group(0)
         host = v.split("@", 1)[1]
@@ -862,26 +983,22 @@ def _raw_candidates(text: str, mapper: Mapper | None = None, resource_names: boo
         if not RE_DOMAIN.fullmatch(host):
             continue
         if not _domain_is_noise(host):
-            yield v, "email", "high", ""
+            out.emails.append(v)
         elif suppressed is not None and is_public(host):
             suppressed.append((v, "email"))
-    for m in RE_TENANT.finditer(text):
-        yield m.group(0).lower(), "tenant", "high", ""
-    for m in RE_SHAREPOINT.finditer(text):
-        yield m.group(0).lower(), "sharepoint", "high", ""
+    out.tenants = [m.group(0).lower() for m in RE_TENANT.finditer(text)]
+    out.sharepoints = [m.group(0).lower() for m in RE_SHAREPOINT.finditer(text)]
     for m in RE_DOMAIN.finditer(text):
         v = m.group(0).lower()
         if v.endswith(".onmicrosoft.com") or v.endswith(".sharepoint.com") or _domain_is_noise(v):
             if suppressed is not None and is_public(v):
                 suppressed.append((v, "domain"))
             continue
-        if not _domain_has_context(text, m.start(), m.end(), v):
-            continue
-        yield v, "domain", "high", ""
+        out.domains.append((v, m.start(), m.end()))
     for m in RE_GUID_KEYED.finditer(text):
         v = m.group(1).lower()
         if not is_public(v):
-            yield v, "guid", "high", ""
+            out.guids.append(v)
         elif suppressed is not None:
             suppressed.append((v, "guid"))
     for m in RE_IPV4.finditer(text):
@@ -890,38 +1007,89 @@ def _raw_candidates(text: str, mapper: Mapper | None = None, resource_names: boo
             continue  # noise, our own token range, multicast
         if not identifies_somebody(v):
             continue  # private, reserved, or a version number wearing the same shape
-        if reads_as_version(text, m.start(), m.end()):
-            continue
-        yield v, "ip", "high", ""
+        out.ipv4.append((v, m.start(), m.end()))
     for m in RE_IPV6.finditer(text):
         v = m.group(0)
         if identifies_somebody(v):
-            yield v.lower(), "ip", "high", ""
+            out.ipv6.append(v.lower())
     for m in RE_DEVOPS.finditer(text):
         # A mapped organisation is its token here; a project under it is that client's (DECISIONS 46).
         org_owner = mapper.backward(m.group(1)).client if mapper is not None and _is_token(m.group(1), mapper) else ""
         if not org_owner:
-            yield m.group(1), "devops-org", "high", ""
+            out.devops.append((m.group(1), "devops-org", ""))
         if m.group(2):
-            yield m.group(2), "devops-project", "high", org_owner
+            out.devops.append((m.group(2), "devops-project", org_owner))
     # `name` only where a phrase carries one of our tokens (feature 63). Any capitalised phrase was
     # 40% of everything found and 1 in 140 was kept; a conversation about this tool filled Review
     # with "The Global". The cost, chosen: a client named in prose and not yet mapped at all is no
     # longer caught by this kind. domain, email and tenant are what catch a new client.
-    seen_resources: set[str] = set()
     if mapper is not None:
         for phrase, owner in token_phrases(text, mapper):
             # A phrase whose other words are all ordinary - "Set <client>", "<client> Key Vault" -
             # adds nothing: the client's own word is already replaced (D149, the user 2026-10-08).
             if phrase_adds_nothing(phrase, mapper):
                 continue
-            yield phrase, "name", "low", owner
+            out.names.append((phrase, owner))
         # A mapped client name inside a longer word: whole-word matching leaves these in clear.
-        for run, client, resource_shaped in contained_forms(text, mapper):
-            if run.lower() in seen_resources:
+        out.resources = list(contained_forms(text, mapper))
+    return out
+
+
+def merged_findings(units: Iterable[tuple[int, UnitFindings]], text: str,
+                    seen_resources: set[str] | None = None) -> Iterable[tuple[str, str, str, str]]:
+    """(value, kind, confidence, client) from units' findings, in the order _raw_candidates has always
+    yielded them: detector by detector, each in document order. `units` is (offset in `text`, findings)
+    in document order, and `text` is the whole text the units were cut from, which the domain-context
+    and IPv4-version tests read (incremental filtering, Brad 2026-11-10). `seen_resources` collects the
+    client-resource runs (lower case), first occurrence kept."""
+    units = list(units)
+    for _offset, found in units:
+        for v in found.emails:
+            yield v, "email", "high", ""
+    for _offset, found in units:
+        for v in found.tenants:
+            yield v, "tenant", "high", ""
+    for _offset, found in units:
+        for v in found.sharepoints:
+            yield v, "sharepoint", "high", ""
+    for offset, found in units:
+        for v, start, end in found.domains:
+            if _domain_has_context(text, offset + start, offset + end, v):
+                yield v, "domain", "high", ""
+    for _offset, found in units:
+        for v in found.guids:
+            yield v, "guid", "high", ""
+    for offset, found in units:
+        for v, start, end in found.ipv4:
+            if not reads_as_version(text, offset + start, offset + end):
+                yield v, "ip", "high", ""
+    for _offset, found in units:
+        for v in found.ipv6:
+            yield v, "ip", "high", ""
+    for _offset, found in units:
+        for v, kind, owner in found.devops:
+            yield v, kind, "high", owner
+    for _offset, found in units:
+        for phrase, owner in found.names:
+            yield phrase, "name", "low", owner
+    seen = seen_resources if seen_resources is not None else set()
+    for _offset, found in units:
+        for run, client, resource_shaped in found.resources:
+            if run.lower() in seen:
                 continue
-            seen_resources.add(run.lower())
+            seen.add(run.lower())
             yield run, "client-resource", "high" if resource_shaped else "low", client
+
+
+def _raw_candidates(text: str, mapper: Mapper | None = None, resource_names: bool = False,
+                    suppressed: list[tuple[str, str]] | None = None) -> Iterable[tuple[str, str, str, str]]:
+    """Yield (value, kind, confidence, client) for identifier-shaped strings in text.
+
+    `client` is the suggested owner, set only when the value carries a mapped form of that client
+    (kind "client-resource"); it is "" for everything else. With no mapper, the two resource kinds
+    that need the mapping are skipped. The whole text as one unit (unit_findings, merged_findings)."""
+    seen_resources: set[str] = set()
+    yield from merged_findings([(0, unit_findings(text, mapper, suppressed))], text, seen_resources)
     # A naming-shaped slug with no client in it: rg-aue-prd-management, vm-aue-prd-papercut-01.
     # Off unless asked for. Measured on a real client mapping these were a quarter of everything
     # collected and none of them named anybody - the shape is our own convention, repeated for
@@ -1256,19 +1424,32 @@ class CandidateStore:
             # What the public list takes out, so over-suppression is visible rather than silent.
             taken: list[tuple[str, str]] = []
             found = candidates if candidates is not None else find_candidates(text, mapper, suppressed=taken)
+            # Whether an occurrence is passed over depends on its value and kind alone, so it is
+            # decided once per (value, kind): asked per occurrence it cost seconds a request (51,000
+            # occurrences of 18,000 values at 4.4 MB, 2026-11-10). The ignore file is read once for
+            # the pass - re-read per occurrence it was 41,000 stats.
+            own_ignore = self._read_ignore()
+            passed_over: dict[tuple[str, str], bool] = {}
+
+            def pass_over(value: str, kind: str) -> bool:
+                if kind in self.quiet_kinds or kind in self.ignore_kinds or kind in STATELESS_KINDS:
+                    return True
+                if (ignored_by(value, own_ignore, protect) or value.lower() in known
+                        or ignored_by(value, shared_ignore, protect)):
+                    return True
+                if value.lower() in ours or is_common_word(value) or not worth_queueing(value):
+                    return True
+                if at_pending(value, kind):
+                    return True
+                return is_public(value)   # the same in every tenant: not this client's identity
+
             for value, kind, confidence, client in found:
                 key = value.lower() if kind != "name" else value
-                if kind in self.quiet_kinds or kind in self.ignore_kinds or kind in STATELESS_KINDS:
+                skip = passed_over.get((value, kind))
+                if skip is None:
+                    skip = passed_over[(value, kind)] = pass_over(value, kind)
+                if skip:
                     continue
-                if (ignored_by(value, self._read_ignore(), protect) or value.lower() in known
-                        or ignored_by(value, shared_ignore, protect)):
-                    continue
-                if value.lower() in ours or is_common_word(value) or not worth_queueing(value):
-                    continue
-                if at_pending(value, kind):
-                    continue
-                if is_public(value):
-                    continue  # the same in every tenant: not this client's identity
                 c = self._items.get(key)
                 if c is None:
                     c = Candidate(value=value, kind=kind, confidence=confidence, first_seen=_now(), client=client)
@@ -1345,7 +1526,7 @@ class CandidateStore:
         for c in self._items.values():
             if c.placeholder or c.kind not in kinds or c.confidence != "high":
                 continue
-            ph = make_placeholder(c.value, c.kind, taken)
+            ph = make_placeholder(c.value, c.kind, taken, folded=True)
             if ph:
                 c.placeholder = ph
                 c.unprotected = False
