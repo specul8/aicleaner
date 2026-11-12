@@ -622,7 +622,8 @@ function transcript(events, { after = null, placeholder = true } = {}) {
       for (const tool of tools) {
         // The dot says whether the call is still running (D176); markTools sets it, on every
         // paint, because a result arrives after the line was drawn.
-        const dot = h('span', { class: 'tool-dot', 'data-tool-id': tool.id || '', 'aria-hidden': 'true' });
+        const dot = h('span', { class: 'tool-dot', 'data-tool-id': tool.id || '', 'aria-hidden': 'true',
+          'data-replayed': event.replayed ? '' : null });
         lines.push(h('div', { class: 'turn tool' }, h('span', { class: 'who' }, dot, 'tool'), toolDetail(tool)));
         if (AGENT_TOOLS.has(tool.name) && tool.id) lines.push(agentReportLine(tool));
       }
@@ -744,8 +745,12 @@ function finishedIds(events) {
 
 // Each tool call's state for its dot (D176): "done" once a result names it, "stopped" when the turn
 // it belonged to ended without one (an interrupt, an exit) or the session is not running, and
-// "running" otherwise. Several calls run at once, so each is answered for itself.
+// "running" otherwise. Several calls run at once, so each is answered for itself. A call replayed from a resumed
+// conversation's transcript (D237) is "earlier" unless a result names it: the replay keeps the calls but not their
+// results or turn ends, so they all read as running - 208 tools on Brad's page. They ran in an earlier sitting; how
+// each ended is not known here, so the dot says only that, quietly.
 const TURN_ENDS = new Set(['result', 'interrupted', 'exited', 'stopped']);
+const DOT_TITLES = { running: 'still running', stopped: 'stopped before it finished', earlier: 'from an earlier sitting', done: 'finished' };
 
 function toolStates(events, running) {
   const list = events || [];
@@ -764,18 +769,20 @@ function toolStates(events, running) {
     for (const block of ((event.message || {}).content || [])) {
       if (block.type !== 'tool_use' || !block.id) continue;
       if (done.has(block.id)) states.set(block.id, 'done');
+      else if (event.replayed) states.set(block.id, 'earlier');
       else states.set(block.id, !running || at < lastEnd ? 'stopped' : 'running');
     }
   });
   return states;
 }
 
+// A dot not in the events (Show earlier's lines, D237) is "earlier" when its line was replayed, else "done".
 function markTools(log, events, running) {
   const states = toolStates(events, running);
   for (const dot of log.querySelectorAll('.tool-dot[data-tool-id]')) {
-    const state = states.get(dot.dataset.toolId) || 'done';
+    const state = states.get(dot.dataset.toolId) || ('replayed' in dot.dataset ? 'earlier' : 'done');
     dot.dataset.state = state;
-    dot.title = state === 'running' ? 'still running' : state === 'stopped' ? 'stopped before it finished' : 'finished';
+    dot.title = DOT_TITLES[state] || DOT_TITLES.done;
   }
 }
 
@@ -790,7 +797,7 @@ function dragGrip() {
 // sideways scrolling - so "line 16 of snippet 2" points at something both of you can see.
 function promptBody(text) {
   const parts = splitPrompt(text);
-  if (!parts.some((part) => part.snippet)) return h('div', {}, text);
+  if (!parts.some((part) => part.snippet)) return h('div', { class: 'prompt-text' }, text);
   return h('div', { class: 'prompt-parts' }, ...parts.map((part) => (part.snippet
     ? snippetBlock(part.snippet) : h('div', { class: 'prompt-text' }, part.text))));
 }
@@ -910,12 +917,14 @@ function workLabel(tool) {
 
 const isAgent = (name) => AGENT_TOOLS.has(name) || /agent/i.test(String(name || ''));
 
-// Whether a turn is open: something was said or done since the last turn ended.
+// Whether a turn is open: something was said or done since the last turn ended. A resumed conversation's replayed
+// turns (D237) carry no turn end, so they are not work in this one.
 function turnOpen(events, running) {
   if (!running) return false;
   let lastEnd = -1;
   let lastWork = -1;
   (events || []).forEach((event, at) => {
+    if (event.replayed) return;
     if (TURN_ENDS.has(event.type)) lastEnd = at;
     else if (event.type === 'prompt' || event.type === 'assistant' || event.type === 'user') lastWork = at;
   });
@@ -931,7 +940,8 @@ function foregroundSteps(events, running) {
   const states = toolStates(events, running);
   const items = [];
   for (const event of events || []) {
-    if (event.type !== 'assistant' || event.parent_tool_use_id) continue;
+    // A replayed call (D237) is from an earlier sitting, never a step running now.
+    if (event.type !== 'assistant' || event.parent_tool_use_id || event.replayed) continue;
     for (const block of ((event.message || {}).content || [])) {
       if (block.type !== 'tool_use' || !block.id || states.get(block.id) !== 'running') continue;
       const input = block.input || {};

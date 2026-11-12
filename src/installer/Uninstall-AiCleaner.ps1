@@ -976,6 +976,11 @@ try {
                 Stop-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
                 Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction Stop
                 Write-Status "Removed task $task" -Level Detail
+                # Stopping a task leaves the programs it started running: the tunnel's loop (Run-TunnelService.ps1)
+                # may have started cloudflared again since remote access was taken down above.
+                if ($task -eq 'aicleaner-tunnel-service') {
+                    Get-Process -Name 'cloudflared' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+                }
             } catch {
                 Write-Status "Could not remove the start-up task $task ($($_.Exception.Message)); from an elevated PowerShell: Unregister-ScheduledTask -TaskName $task -Confirm:`$false" -Level Warn
             }

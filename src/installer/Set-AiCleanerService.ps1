@@ -15,7 +15,10 @@
         restarted on failure. It runs installer\Run-AiCleanerService.ps1, which keeps AI Cleaner running and
         stops when Stop-AiCleaner.ps1 stops it on purpose;
       - when remote access is set up (the aicleaner-tunnel task exists), registers aicleaner-tunnel-service the
-        same way, running what aicleaner-tunnel runs;
+        same way, running installer\Run-TunnelService.ps1, which runs Start-Tunnel.ps1 and runs it again whenever
+        the tunnel ends or fails (2026-11-12: a single run failed at early boot and nothing retried). Saving it
+        again (this script, -Mode User) replaces a task saved by an earlier version; -Mode Status reports one as
+        tunnel_resave;
       - leaves the sign-in task aicleaner-proxy on: it is the fallback when Windows cannot sign the start-up task
         in (your password changed) - Start-AiCleaner.ps1 then starts AI Cleaner as you and says so;
       - records what it did in %USERPROFILE%\.aicleaner\state\service.json;
@@ -69,7 +72,7 @@
     Back to starting at sign-in only.
 
 .NOTES
-    Last-modified: 2026-10-24
+    Last-modified: 2026-11-12
     Requires:      Windows PowerShell 5.1 or PowerShell 7+; administrator for User and Off
 #>
 
@@ -162,9 +165,25 @@ function Get-TaskState {
     }
 }
 
+function Test-TunnelActionCurrent {
+    <# True when a start-up tunnel task runs Run-TunnelService.ps1 with Windows PowerShell directly - the action
+       Enable-Service has built since 2026-11-12. A task saved before ran Start-Tunnel.ps1 once through conhost, and
+       stayed down when that failed at early boot; changing it needs the password, so it is reported, not changed. #>
+    [OutputType([bool])]
+    param($Task)
+    if (-not $Task) { return $false }
+    $current = @($Task.Actions | Where-Object {
+        $_.PSObject.Properties['Execute'] -and (Split-Path -Leaf ([string]$_.Execute)) -eq 'powershell.exe' -and
+        [string]$_.Arguments -match 'Run-TunnelService\.ps1'
+    })
+    return ($current.Count -gt 0)
+}
+
 function Get-State {
     $service = Get-TaskState -Name $script:ServiceTask
     $tunnel = Get-TaskState -Name $script:TunnelServiceTask
+    $resave = $false
+    if ($tunnel) { $resave = -not (Test-TunnelActionCurrent -Task (Get-ScheduledTask -TaskName $script:TunnelServiceTask -ErrorAction SilentlyContinue)) }
     $record = $null
     if (Test-Path -LiteralPath $script:Record) {
         try { $record = Get-Content -LiteralPath $script:Record -Raw | ConvertFrom-Json } catch { $record = $null }
@@ -184,6 +203,7 @@ function Get-State {
         task             = $service
         tunnel           = $tunnel
         password_problem = $problem
+        tunnel_resave    = $resave
         record           = [bool]$record
     }
 }
@@ -215,9 +235,13 @@ function Get-ServiceTaskDefinition {
 }
 
 function Get-LauncherAction {
-    param([string]$App)
+    <# A start-up task's action: Windows PowerShell running one of the supervising loops directly. No conhost
+       --headless wrapper (D175's fix for sign-in tasks): a task that runs whether you are signed in or not runs in
+       session 0, where no window can show, and with the wrapper a failure to start PowerShell came back as the
+       wrapper's exit code - which Task Scheduler does not count as a failed start, so it never retried. #>
+    param([string]$App, [string]$Script = 'Run-AiCleanerService.ps1')
     $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $launcher = Join-Path $App 'installer\Run-AiCleanerService.ps1'
+    $launcher = Join-Path $App "installer\$Script"
     $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcher`""
     return New-ScheduledTaskAction -Execute $powershell -Argument $arguments -WorkingDirectory $App
 }
@@ -305,8 +329,16 @@ function Enable-Service {
         -Description 'AI Cleaner, started with the computer as you (feature 107); kept running by Run-AiCleanerService.ps1'
     $signInTunnel = Get-ScheduledTask -TaskName $script:SignInTunnelTask -ErrorAction SilentlyContinue
     if ($signInTunnel) {
-        $tasks[$script:TunnelServiceTask] = Get-ServiceTaskDefinition -Actions @($signInTunnel.Actions) -Account $Account `
-            -Description 'AI Cleaner remote access: the Cloudflare tunnel, started with the computer as you (feature 107)'
+        foreach ($needed in (Join-Path $App 'installer\Run-TunnelService.ps1'), (Join-Path $App 'installer\Start-Tunnel.ps1')) {
+            if (-not (Test-Path -LiteralPath $needed)) {
+                Write-Line "not found: $needed - update AI Cleaner first. Nothing changed." -Level Error
+                return $false
+            }
+        }
+        # Built here, not copied from the sign-in task (2026-11-12): the copy ran Start-Tunnel once through conhost,
+        # and when that failed at early boot nothing tried again. The loop retries until the task is stopped.
+        $tasks[$script:TunnelServiceTask] = Get-ServiceTaskDefinition -Actions @(Get-LauncherAction -App $App -Script 'Run-TunnelService.ps1') `
+            -Account $Account -Description 'AI Cleaner remote access: the Cloudflare tunnel, started with the computer as you (feature 107); kept running by Run-TunnelService.ps1'
     }
     $names = @($tasks.Keys) -join ' and '
     if (-not $PSCmdlet.ShouldProcess($names, "Register at start-up as $Account (asks for the password)")) {
@@ -327,6 +359,12 @@ function Enable-Service {
     $record | ConvertTo-Json | Set-Content -LiteralPath $script:Record -Encoding UTF8
     Write-Line "recorded in $($script:Record)" -Level Done
 
+    # A start-up tunnel task already running (saved again, or saved over an older action) is stopped first: the
+    # task never starts a second instance (IgnoreNew), so the new action would otherwise wait for the next boot.
+    # Stopping the task leaves its cloudflared running; Stop-SignInCopy stops that.
+    if ($signInTunnel -and (Get-ScheduledTask -TaskName $script:TunnelServiceTask -TaskPath '\' -ErrorAction SilentlyContinue)) {
+        Stop-ScheduledTask -TaskName $script:TunnelServiceTask -TaskPath '\' -ErrorAction SilentlyContinue
+    }
     Stop-SignInCopy -App $App -ProxyPort $ProxyPort -Tunnel:([bool]$signInTunnel)
     Remove-Item -LiteralPath $script:StoppedMarker -ErrorAction SilentlyContinue
     foreach ($name in $tasks.Keys) { Start-ScheduledTask -TaskName $name }

@@ -191,7 +191,7 @@ Claude Code's user settings while their setting is on.
 | `Install-AiCleaner-VSCode.ps1`, `Install-AiCleaner-Desktop.ps1`, `Install-AiCleaner-Workstation.ps1` | Wire each role: the Python environment, Claude Code settings, Claude Desktop policy, the screenshot-to-text set-up on a client PC. |
 | `Enable-AiCleaner.ps1`, `Disable-AiCleaner.ps1` | Run readiness checks, then point the AI tools at the proxy; or point them back. |
 | `Start-AiCleaner.ps1`, `Stop-AiCleaner.ps1` | Start the proxy from the venv (`python -m aicleaner run`), detached or in a console; stop it. |
-| `Set-AiCleanerService.ps1`, `Run-AiCleanerService.ps1`, `service.py`, `lowertoken.py` | Optionally start AI Cleaner with the computer, as you, at a standard-user token ([Start with the computer](Settings.md#card-service)). |
+| `Set-AiCleanerService.ps1`, `Run-AiCleanerService.ps1`, `Run-TunnelService.ps1`, `service.py`, `lowertoken.py` | Optionally start AI Cleaner with the computer, as you, at a standard-user token ([Start with the computer](Settings.md#card-service)). |
 | `Check-AiCleanerHealth.ps1`, `Watch-AiCleaner.ps1` | The wiring checked on a timer; the claude.ai watchdog and PAC service. |
 | `updates.py`, `restart.py` | The [Version and updates](Settings.md#card-updates) card: what is installed, what is available, and handing the update or a restart to a PowerShell that outlives the proxy. |
 | `perms.py` | Warns when other users on the PC could write to the install, topics or logs folders. |

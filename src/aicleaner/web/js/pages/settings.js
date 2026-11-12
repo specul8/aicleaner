@@ -1251,7 +1251,9 @@ function editorCard(s) {
     const active = (info.services || {})[info.active];
     lines.unshift(info.active ? `Answering now: ${active.label}.` : 'No service answers now (off, or none signed in).');
     if (info.active === 'copilot') lines.splice(1, 0, 'Unfiltered: file contents, real names included, go to GitHub as written.');
-    serviceState.textContent = lines.join(' ');
+    // One line each, "Answering now" first on its own (Brad, 2026-11-12): run together, which service was in use
+    // was hard to pick out.
+    serviceState.replaceChildren(...lines.map((line, index) => h('div', { class: index === 0 ? 'editor-service-now' : null }, line)));
   };
   getJSON('/api/editor/services').then((info) => { describe(info); showCopilotSignIn(info); })
     .catch(() => { serviceState.textContent = ''; });
@@ -1600,6 +1602,11 @@ function serviceCard() {
   const problem = h('p', { class: 'callout bad service-problem', hidden: true },
     'aicleaner\'s start-up task could not sign in - has your Windows password changed? AI Cleaner starts at your sign-in '
     + 'meanwhile. Enter the password again to put it right.');
+  // Saved before 2026-11-12, the start-up tunnel task ran the tunnel once and did not try again when that failed
+  // at boot. Changing it needs the password, so the page asks for it rather than Update changing it.
+  const resave = h('p', { class: 'callout warn service-resave', hidden: true },
+    'The start-up task for remote access was saved by an earlier version: if the tunnel fails as the computer starts, '
+    + 'it does not try again, and remote access waits for your sign-in. Enter the password again to save it the new way.');
   let current = { mode: 'off' };
   const show = (state) => {
     current = state;
@@ -1613,7 +1620,8 @@ function serviceCard() {
       : 'Off: AI Cleaner starts when you sign in.';
     problem.hidden = !state.password_problem;
     elevated.hidden = state.elevated !== true;
-    again.hidden = !state.password_problem;
+    resave.hidden = !(on && state.tunnel_resave);
+    again.hidden = !(state.password_problem || (on && state.tunnel_resave));
     again.disabled = remote;
   };
   const load = () => getJSON('/api/service').then(show)
@@ -1637,7 +1645,7 @@ function serviceCard() {
   load();
   const section = card('service', 'Start with the computer',
     'Normally AI Cleaner starts when you sign in. It can start with the computer instead, before anyone signs in, still as you - so remote access works after a reboot. Changed on this machine only: Windows asks for administrator and your password.',
-    [status, h('div', { class: 'form-row' }, label), elevated, problem, h('div', { class: 'form-row' }, again)], null);
+    [status, h('div', { class: 'form-row' }, label), elevated, problem, resave, h('div', { class: 'form-row' }, again)], null);
   if (remote) {
     section.classList.add('local-only');
     section.title = LOCAL_ONLY;

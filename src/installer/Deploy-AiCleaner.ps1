@@ -3611,6 +3611,16 @@ function Update-TaskPath {
     if (-not (Test-Path -LiteralPath $folder) -or -not (Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue)) { return }
     $moved = @(Get-ChildItem -LiteralPath $folder -Filter '*.ps1' | ForEach-Object Name)
     foreach ($task in @(Get-ScheduledTask -TaskName 'aicleaner*' -ErrorAction SilentlyContinue)) {
+        # Feature 107's start-up tasks are left alone: they run in session 0, where no window shows, they were
+        # made after the layout, and changing one needs the password Windows keeps for it. One saved before
+        # 2026-11-12 (the tunnel run once, no retry) is reported: saving it again is the owner's to do.
+        if ($task.TaskName -in 'aicleaner-service', 'aicleaner-tunnel-service') {
+            if ($task.TaskName -eq 'aicleaner-tunnel-service' -and
+                -not @($task.Actions | Where-Object { [string]$_.Arguments -match 'Run-TunnelService\.ps1' -and (Split-Path -Leaf ([string]$_.Execute)) -eq 'powershell.exe' }).Count) {
+                Write-Status 'The start-up tunnel task (aicleaner-tunnel-service) was saved by an earlier version: if it fails at start-up it does not try again. Save it again: Settings > Start with the computer > Enter the password again (or run installer\Set-AiCleanerService.ps1 -Mode User).' -Level Warn
+            }
+            continue
+        }
         # The scripts the task names at the root, found before anything is rewritten: the rewrite
         # below changes the action in memory, and the fallback needs the old path (D173).
         $named = @(foreach ($name in $moved) {

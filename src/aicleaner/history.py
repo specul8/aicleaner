@@ -488,6 +488,25 @@ def _transcript(project: str | Path, session_id: str, root: Path | None) -> Path
     return None
 
 
+def answered_event(record: dict[str, Any]) -> dict[str, Any] | None:
+    """An answered AskUserQuestion as the page's question card draws it (`permission_answered`), from the user record
+    that carries its tool result - or None when the record is not one. The transcript keeps what was chosen in
+    `toolUseResult` (D234); the CLI's stream sends the same as `tool_use_result` (D235: a re-attach replays the
+    stream). The call it answers rides along as `tool_use_id`, so the same answer reached two ways is drawn once."""
+    result = record.get("toolUseResult", record.get("tool_use_result"))
+    answers = result.get("answers") if isinstance(result, dict) else None
+    if not isinstance(answers, dict) or not answers:
+        return None
+    event: dict[str, Any] = {"type": "permission_answered", "allow": True,
+                             "answers": {str(question): str(answer) for question, answer in answers.items()}}
+    content = (record.get("message") or {}).get("content") if isinstance(record.get("message"), dict) else None
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id"):
+            event["tool_use_id"] = str(block["tool_use_id"])
+            break
+    return event
+
+
 def _event_of(line: str) -> dict[str, Any] | None:
     """One transcript line as the event the Session page renders, or None for everything else
     (replay's rules)."""
@@ -511,11 +530,9 @@ def _event_of(line: str) -> dict[str, Any] | None:
         # D234: an answer to an AskUserQuestion is a tool result, kept with what was chosen in `toolUseResult`. A
         # conversation answered in the terminal or VS Code, caught up or resumed here, drew no line for it - live, the
         # page's question card emits `permission_answered`. Replayed in that shape, so it reads, and steps, the same.
-        result = record.get("toolUseResult")
-        answers = result.get("answers") if isinstance(result, dict) else None
-        if isinstance(answers, dict) and answers:
-            return {"type": "permission_answered", "allow": True,
-                    "answers": {str(question): str(answer) for question, answer in answers.items()}, **stamp}
+        answered = answered_event(record)
+        if answered is not None:
+            return {**answered, **stamp}
         text = SPACES.sub(" ", _text_of(record.get("message"))).strip()
         if text.startswith(NOTICE):
             # D212: the transcript keeps a background task's notice as a user message; live, the stream sends it as

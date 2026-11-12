@@ -51,7 +51,8 @@ def logon_failed(result: Any) -> bool:
 
 
 def off(windows: bool = True) -> dict[str, Any]:
-    return {"mode": "off", "windows": windows, "task": None, "tunnel": None, "password_problem": False}
+    return {"mode": "off", "windows": windows, "task": None, "tunnel": None, "password_problem": False,
+            "tunnel_resave": False}
 
 
 def parse(stdout: str) -> dict[str, Any]:
@@ -70,8 +71,11 @@ def parse(stdout: str) -> dict[str, Any]:
     task = found.get("task") or None
     tunnel = found.get("tunnel") or None
     problem = bool(task) and (logon_failed(task.get("last_result")) or task.get("state") == "Disabled")
+    # The start-up tunnel task saved by an earlier version (before 2026-11-12: Start-Tunnel run once, no retry).
+    resave = bool(task) and bool(tunnel) and bool(found.get("tunnel_resave"))
     return {"mode": "user" if task else "off", "windows": True, "task": task, "tunnel": tunnel,
-            "password_problem": problem, "user": found.get("user", ""), "since": found.get("since", "")}
+            "password_problem": problem, "tunnel_resave": resave, "user": found.get("user", ""),
+            "since": found.get("since", "")}
 
 
 def _run_status(root: Path) -> str:

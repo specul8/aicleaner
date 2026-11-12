@@ -2334,7 +2334,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         body = await request.json()
         request_id = f"{session.profile.name if session.profile else 'ask'}-{session._sequence + 1}"
         allowed = await session.ask_permission(request_id, str(body.get("tool", "a tool")),
-                                               body.get("input") or {})
+                                               body.get("input") or {}, str(body.get("tool_use_id") or ""))
         # A question comes back answered (D58): the choices ride along with the allow.
         if isinstance(allowed, dict):
             return web.json_response({"allow": bool(allowed.get("allow")), "answers": allowed.get("answers")})

@@ -698,6 +698,7 @@ class Pending:
     detail: dict[str, Any]
     asked_at: float = field(default_factory=time.time)
     answer: asyncio.Future | None = None
+    call: str = ""                     # the tool_use id it asks about, when the approval tool was given one (D235)
 
 
 def resolve_cli(name: str) -> str:
@@ -782,6 +783,9 @@ class Session(_FindsClaude):
         # would have a gap, so it is sent the whole buffer instead.
         self.epoch = ""
         self._dropped_upto = 0
+        # The AskUserQuestion calls whose answer this buffer has drawn (D235), by tool_use id: the page's card, the
+        # transcript's replay and a re-attach's stream can each name the same call; it is drawn once.
+        self._answered_calls: set[str] = set()
         self._new_epoch()
         self.slash_commands: list[str] = []      # what the CLI's init names (feature 84)
         self.transcript_folders: list[str] = []   # where its conversations may be filed (DECISIONS 64)
@@ -877,6 +881,7 @@ class Session(_FindsClaude):
         """The buffer was emptied (a start, a reattach): numbers the page holds no longer apply."""
         self.epoch = uuid.uuid4().hex[:12]
         self._dropped_upto = 0
+        self._answered_calls.clear()            # what the emptied buffer drew is drawn again
 
     def catch_up(self, projects: list[str]) -> bool:
         """As _catch_up, reading this session's agent's transcripts (item K)."""
@@ -2013,6 +2018,8 @@ class Session(_FindsClaude):
                     self._note_commands(event)
                 if self._take_control_response(event):
                     continue
+                if self._replaying and isinstance(event, dict):
+                    self._replayed_answer(event)
                 self._emit(event)
         except asyncio.CancelledError:
             raise
@@ -2034,6 +2041,22 @@ class Session(_FindsClaude):
             if message:
                 self.last_error = message
                 log.warning("session: %s", message)
+
+    def _replayed_answer(self, event: dict[str, Any]) -> None:
+        """D235: an answer given on the page's question card, drawn again when a re-attach replays the sitting.
+
+        The card's line was AI Cleaner's own `permission_answered`, which is not in the CLI's output the broker keeps,
+        so after a restart it was gone and View Prompt could not stop on it. The CLI's tool result for the call says
+        what was chosen (`tool_use_result.answers`); while the broker replays, that is drawn in the card's shape, just
+        before the result line. Only while replaying: live, the page's own event has drawn it already. Never twice for
+        one call: a call already answered in this buffer (the page's event, or the seed's transcript replay) is skipped."""
+        if event.get("type") != "user":
+            return
+        from .history import answered_event
+        answered = answered_event(event)
+        if answered is None or answered.get("tool_use_id", "") in self._answered_calls:
+            return
+        self._emit({**answered, **({"at": event["at"]} if event.get("at") else {})})
 
     def _note_commands(self, event: dict[str, Any]) -> None:
         """What the CLI says it accepts after a slash, from its `init` event (feature 84)."""
@@ -2151,6 +2174,8 @@ class Session(_FindsClaude):
         # An event that already knows when it happened keeps it - a replayed message was said
         # when the transcript says, not now (feature 66).
         event = {**event, "seq": self._sequence, "at": event.get("at") or time.time()}
+        if event.get("type") == "permission_answered" and event.get("tool_use_id"):
+            self._answered_calls.add(str(event["tool_use_id"]))      # drawn: never again from another source (D235)
         # What runs in the background (D202): the CLI's own live list. A turn that ends with one running
         # is not "finished" - its result starts the agent again - so the alert waits for the list to empty.
         if event.get("type") == "system" and event.get("subtype") == "background_tasks_changed" \
@@ -2204,7 +2229,13 @@ class Session(_FindsClaude):
     def _note_steps(self, event: dict[str, Any]) -> None:
         """The main agent's tool calls from the stream: open from its tool_use until its tool_result, with the command
         text of a shell call. A subagent's (parent_tool_use_id set) are not the foreground step and are left out; a
-        shell started in the background, or moved there (task_started names its call), is remembered as background."""
+        shell started in the background, or moved there (task_started names its call), is remembered as background.
+        A replayed event (a resumed conversation's earlier turns, seeded from its transcript) is never a step (D237):
+        the seed keeps the calls but not their results or turn ends, so each stayed open - 200 of them on Brad's page,
+        and Send now could plan to stop an old command's text. Keyed on the event's flag, not `_replaying`: the lines a
+        broker replays on a re-attach (D179) are the live sitting's own, unflagged, and still count."""
+        if event.get("replayed"):
+            return
         kind = event.get("type")
         if kind == "result":
             self._open_tools.clear()
@@ -2255,14 +2286,16 @@ class Session(_FindsClaude):
 
     # ---- permissions -------------------------------------------------------------------
 
-    async def ask_permission(self, request_id: str, tool: str, detail: dict[str, Any]) -> Any:
-        """Called by the approval host: park the request and wait for someone to answer.
+    async def ask_permission(self, request_id: str, tool: str, detail: dict[str, Any], tool_use_id: str = "") -> Any:
+        """Called by the approval host: park the request and wait for someone to answer. `tool_use_id` names the
+        call it asks about, so its answer is recognised in the CLI's output (D235).
 
         For as long as it takes, by default (the user, 2026-10-01): Claude Code in VS Code does not
         give up on a question, and five minutes was not enough to write an answer under Other.
         A positive approve_timeout_s still sets a deadline for whoever wants one."""
         loop = asyncio.get_running_loop()
-        waiting = Pending(id=request_id, tool=tool, detail=detail, answer=loop.create_future())
+        waiting = Pending(id=request_id, tool=tool, detail=detail, answer=loop.create_future(),
+                          call=str(tool_use_id or ""))
         self.pending[request_id] = waiting
         self._emit({"type": "permission", "id": request_id, "tool": tool, "detail": detail})
         try:
@@ -2303,6 +2336,8 @@ class Session(_FindsClaude):
         if answers is not None:
             # Kept so the transcript can show what was chosen, not only that it was (D80).
             answered["answers"] = dict(answers)
+        if waiting.call:
+            answered["tool_use_id"] = waiting.call       # the CLI's result for it is then not drawn again (D235)
         self._emit(answered)
         return True
 
