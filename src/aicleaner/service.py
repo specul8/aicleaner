@@ -142,7 +142,8 @@ def command(root: Path, on: bool, port: int, user: str = "", profile: str = "") 
 
 def handoff_folder() -> Path:
     """Where a hand-over's launcher is written (D239): the state folder."""
-    return Path(os.environ.get("USERPROFILE") or Path.home()) / ".aicleaner" / "state" / "desktop"
+    from .deskrun import default_folder
+    return default_folder()
 
 
 def change(root: Path, on: bool, port: int, launcher: Callable[..., Any] | None = None,

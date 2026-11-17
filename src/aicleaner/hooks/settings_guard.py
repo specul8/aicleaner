@@ -6,9 +6,10 @@ installed config file, reading or sending the API key (H2), or taking this guard
 (f185) changing which add-ons are loaded (`aicleaner-addons.json`), an add-on's code or the secrets and state it names,
 or reading any DPAPI-protected secret file. D247 (1.3.1): a shell command naming the registry, an add-on's paths
 or AI Cleaner's folder itself is refused unless it only reads (`_read_only`), however the name is spelled
-(`_spelled`) - and the registry is sealed, so one rewritten by a route this guard misses is not loaded. It is
-aimed at a helpful model "fixing" a setting on its own initiative; a process running as the user can always write
-the user's files.
+(`_spelled`) - and the registry is sealed, so one rewritten by a route this guard misses is not loaded. D248 (1.3.2):
+the same for the installed program and its venv (`_program_rules`), except running the installer's own scripts as
+the deploy line does. It is aimed at a helpful model "fixing" a setting on its own initiative; a process running as
+the user can always write the user's files.
 
 Run as: python settings_guard.py <install folder> <state folder>. Standard library only: Claude Code runs it with AI
 Cleaner's own Python. Anything it cannot read is let through - a broken guard must not stop all tool use.
@@ -19,6 +20,7 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import posixpath
 import re
 import sys
 from pathlib import Path
@@ -184,8 +186,11 @@ def _edit(tool: str, given: dict, install: Path, state: Path) -> str:
     if any(_within(path, folder) for folder in _addon_paths(state)):
         return "it would change an AI Cleaner add-on's code, secrets or state"
     # The installed app - this guard and the code that reads the settings - is Deploy's to change, not a tool call's.
-    if _within(path, Path(__file__).resolve().parents[2]):
+    if _within(path, Path(__file__).resolve().parents[2]) or _within(path, install):
         return "it would change AI Cleaner's installed program, this guard among it"
+    # D248: and the Python environment it runs in (a package there is code AI Cleaner imports).
+    if _within(path, state / "venv") or _within(os.path.realpath(os.path.expanduser(path)), state / "venv"):
+        return "it would change AI Cleaner's installed program (the Python environment it runs in)"
     if _claude_settings(path) and tool in ("Write", "Edit", "MultiEdit"):
         return _settings_change(tool, given, path)
     return ""
@@ -336,9 +341,6 @@ def _single_quoted_out(command: str) -> str:
     return re.sub(r"'[^']*'", "'_'", command)
 
 
-def _segments(command: str) -> list[str]:
-    return re.split(r"\$\(|&&|\|\||[;|\n(){}`]", _single_quoted_out(command))
-
 
 def _segment_reads(segment: str, tool: str) -> bool:
     segment = segment.strip().lstrip("!").strip()
@@ -372,21 +374,29 @@ def _segment_reads(segment: str, tool: str) -> bool:
     return head in BASH_READ
 
 
-def _read_only(command: str, tool: str) -> bool:
+def _read_only(command: str, tool: str, segment_ok=None, mask=None, not_read=None) -> bool:
     """Whether every command in it only reads: no redirection into a file, no call operator or background job, no
-    file-changing method, and each command one of the reading ones above."""
+    file-changing method, and each command one of the reading ones above. (D248 passes its own `segment_ok`, a
+    little wider, a `mask` that also hides literal double-quoted text, and `not_read` without the -O/-o rule.)"""
+    segment_ok = segment_ok or _segment_reads
+    mask = mask or _single_quoted_out
     text = DISCARDED.sub(" ", command)
     text = re.sub(r"\$\{((?:env:)?\w+)\}", r"$\1", text, flags=re.I)     # ${HOME}, ${env:X}: a variable, not a block
-    if REDIRECT.search(_single_quoted_out(text)) or NOT_READ.search(text):
+    if REDIRECT.search(mask(text)) or (not_read or NOT_READ).search(text):
         return False
-    if re.search(r"(?<![&>])&(?!&)", _single_quoted_out(text).replace("&&", "")):
+    if re.search(r"(?<![&>])&(?!&)", mask(text).replace("&&", "")):
         return False                                   # PowerShell's call operator; Bash's background job
     if tool == "PowerShell" and re.search(r"(?:^|[\s;|(])\.\s", text):
         return False                                   # dot-sourcing a script
     statics = [name.lower() for name in re.findall(r"::\s*(\w+)", text)]
     if any(name not in STATIC_READ for name in statics):
         return False
-    return all(_segment_reads(segment, tool) for segment in _segments(text))
+    return all(segment_ok(segment, tool) for segment in re.split(r"\$\(|&&|\|\||[;|\n(){}`]", mask(text)))
+
+
+ADDONS_WHY = "it would change which add-ons AI Cleaner loads"
+TOP_OF_STATE_WHY = (ADDONS_WHY + " (a file created, copied, moved or renamed in AI Cleaner's own folder could take the "
+                    "place of its add-on registry)")
 
 
 def _addon_rules(command: str, tool: str, state: Path, cwd: str) -> str:
@@ -401,16 +411,502 @@ def _addon_rules(command: str, tool: str, state: Path, cwd: str) -> str:
     if DPAPI_FILE.search(text):
         return "it would change or remove a secret AI Cleaner or one of its add-ons keeps (DPAPI)"
     if _names_registry(text, state, in_state):
-        return "it would change which add-ons AI Cleaner loads"
+        return ADDONS_WHY
     if in_state or _top_of_state(text, state):
-        return ("it would change which add-ons AI Cleaner loads (a file created, copied, moved or renamed in AI "
-                "Cleaner's own folder could take the place of its add-on registry)")
+        return TOP_OF_STATE_WHY
     if any(_names(command, folder) for folder in _addon_paths(state)):
         return "it would change an AI Cleaner add-on's code, secrets or state"
     return ""
 
 
-def _shell(command: str, state: Path | None = None, tool: str = "Bash", cwd: str = "") -> str:
+# ---- D248: the installed program and its Python environment, from a shell -------------------------------------------
+#
+# The Edit/Write rule kept tool calls out of the installed program (`<install>`, this guard among it) but a shell
+# command could still copy a .py over it, pip-install into its venv (`<state>\venv`) or redirect into either: code run
+# inside AI Cleaner's own process, or the guard switched off. Now a statement that touches them - names them however
+# `_spelled` reads, or runs with the shell's folder inside AI Cleaner's folder - must only read, and so must every
+# statement after it (a variable or a pipe could carry the path on to a writer). Running the installer's own scripts
+# is execution, not writing: the deploy line and its Disable follow-up, Start, Stop, Set-AiCleanerService and
+# Invoke-AiCleanerSession are let through (`_sanctioned`), as are the venv's pytest and read-only `-m aicleaner`
+# commands. As with D247, this is aimed at a helpful model "fixing" the program by hand: a script file, or a name
+# built at run time, is beyond any command reader, and a process running as the user can always write the user's
+# files - the deploy's signed release and the add-on seal are the checks that do not depend on reading commands.
+
+PROGRAM_ADVICE = ("AI Cleaner blocked this tool call: {what}. AI Cleaner's installed program is changed by its "
+                  "deploy/update, not by Claude (D248): change the source repository and deploy a release. Reading "
+                  "it is fine, and so is running the installer's scripts - Deploy-AiCleaner.ps1 -Action Update "
+                  "-AssumeDefaults, Disable-, Enable- (no arguments), Start-, Stop-AiCleaner.ps1, Set-AiCleanerService.ps1 and "
+                  "Invoke-AiCleanerSession.ps1 from <install>\\installer.")
+PROGRAM_WHY = "it would change AI Cleaner's installed program"
+INSTALLER_SCRIPTS = {"deploy-aicleaner.ps1", "disable-aicleaner.ps1", "enable-aicleaner.ps1", "start-aicleaner.ps1",
+                     "stop-aicleaner.ps1",
+                     "set-aicleanerservice.ps1", "invoke-aicleanersession.ps1"}
+DEPLOY_ARGS = ["-action", "update", "-assumedefaults"]
+AICLEANER_READS = {"check", "scan", "scan-tokens", "detail", "prune", "mcp-audit"}
+AICLEANER_WRITES = {"--add", "--queue", "--apply", "--write"}
+PATH_END = r"(?=$|[\s'\"|;&<>(),}])"
+PROGRAM_GENERIC = re.compile(r"(?<![\w-])(?:\.aicleaner|aiclea~\d)/(?P<sub>app|venv)(?P<rest>/[^\s'\"|;&<>(),]*)?"
+                             + PATH_END)
+BASH_KEYWORDS = re.compile(r"^(?:(?:if|then|else|elif|do|while|until|time|!)\s+)+")
+CONTROL_ONLY = {"fi", "done", "esac", "break", "continue", "then", "else", "do", "}", ")", ":"}
+PS_KEYWORDS = {"if", "elseif", "else", "while", "for", "do", "try", "catch", "finally", "break", "continue"}
+CURL_WRITES = re.compile(r"^-(?:-(?:output|remote-name|dump-header|cookie-jar|trace|trace-ascii|stderr|libcurl|"
+                         r"etag-save|hsts|alt-svc|config|output-dir|remote-header-name|create-dirs|upload-file)\b|"
+                         r"[a-zA-Z]*[oODcJKT])")
+
+
+def _statements(command: str, tool: str) -> list[tuple[str, int]]:
+    """The command's statements - split at ; && || newlines (and Bash's background &) outside quotes - each with the
+    bracket depth it reached (a cd inside ( ) or { } may or may not last)."""
+    out: list[tuple[str, int]] = []
+    buf: list[str] = []
+    quote, depth, deepest, i, n = "", 0, 0, 0, len(command)
+    escape = "\\" if tool == "Bash" else "`"
+
+    def flush() -> None:
+        nonlocal deepest
+        out.append(("".join(buf).strip(), max(deepest, depth)))
+        buf.clear()
+        deepest = depth
+
+    while i < n:
+        c = command[i]
+        if quote:
+            buf.append(c)
+            if quote == '"' and c == escape and i + 1 < n:
+                buf.append(command[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in "'\"":
+            quote = c
+        elif c == escape and i + 1 < n:
+            buf.append(command[i:i + 2])
+            i += 2
+            continue
+        elif command[i:i + 2] in ("&&", "||"):
+            flush()
+            i += 2
+            continue
+        elif c in ";\n" or (c == "&" and tool == "Bash" and command[i - 1:i] not in ("<", ">")
+                             and command[i + 1:i + 2] != ">"):
+            flush()
+            i += 1
+            continue
+        elif c in "({":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif c in ")}":
+            depth = max(depth - 1, 0)
+        buf.append(c)
+        i += 1
+    flush()
+    return [(text, level) for text, level in out if text]
+
+
+HEREDOC = re.compile(r"(?<!<)<<(-?)\s*(['\"]?)([A-Za-z_][\w-]*)\2")
+
+
+def _heredocs(command: str, tool: str) -> tuple[str, list[str]]:
+    """Bash here-documents taken out: the command with `<<HEREDOC<n>` in each one's place, and their bodies - text
+    fed to the command, not commands (a commit message naming the program is not a write to it)."""
+    if tool != "Bash" or "<<" not in command:
+        return command, []
+    lines, out, bodies, i = command.split("\n"), [], [], 0
+    while i < len(lines):
+        line = lines[i]
+        found = list(HEREDOC.finditer(line)) if "<<" in _double_quoted_out(line) else []   # not one inside quotes
+        start, taken = i + 1, []
+        for match in found:
+            body = []
+            while start < len(lines) and (lines[start].lstrip("\t") if match.group(1) else lines[start]) \
+                    != match.group(3):
+                body.append(lines[start])
+                start += 1
+            start += 1                                 # the closing word
+            taken.append("\n".join(body))
+        # An unquoted word lets the shell run $( ) and backticks in the body: then its lines stay commands.
+        if not found or any(not m.group(2) and re.search(r"\$\(|`", body) for m, body in zip(found, taken)):
+            out.append(line)
+            i += 1
+            continue
+        numbers = iter(range(len(bodies), len(bodies) + len(found)))
+        out.append(HEREDOC.sub(lambda _m: f"<<HEREDOC{next(numbers)}", line))
+        bodies.extend(taken)
+        i = start
+    return "\n".join(out), bodies
+
+
+def _words(text: str) -> list[str]:
+    """Words, quote-aware, their outer quotes taken off."""
+    return [w[1:-1] if len(w) >= 2 and w[0] == w[-1] and w[0] in "'\"" else w
+            for w in re.findall(r"\"[^\"]*\"|'[^']*'|[^\s'\"]+", text)]
+
+
+def _pipeline(statement: str) -> list[str]:
+    """A statement's commands, split at single | outside quotes."""
+    parts, buf, quote = [], [], ""
+    for i, c in enumerate(statement):
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "|" and statement[i - 1:i] != "|" and statement[i + 1:i + 2] != "|":
+            parts.append("".join(buf))
+            buf = []
+            continue
+        buf.append(c)
+    parts.append("".join(buf))
+    return [p.strip() for p in parts]
+
+
+def _logs_only(rest: str | None) -> bool:
+    """`<install>\\logs` (and below): the program's log files, data rather than code."""
+    rest = rest or ""
+    return (rest == "/logs" or rest.startswith("/logs/")) and ".." not in rest
+
+
+def _state_part(part: str) -> bool:
+    if part == ".aicleaner" or re.fullmatch(r"aiclea~\d", part):
+        return True
+    return any(c in part for c in "*?[") and len(re.sub(r"[*?\[\]]", "", part)) >= 2 \
+        and fnmatch.fnmatchcase(".aicleaner", part)
+
+
+def _names_program(text: str, install: Path, state: Path) -> bool:
+    """Whether spelled text names the installed program or its venv (or something in them): by path, by the
+    `.aicleaner\\app|venv` form, 8.3 or with a wildcard or brace. `<install>\\logs` is not the program."""
+    for index, base in enumerate((_slashed(str(install)).rstrip("/"), _slashed(str(state / "venv")).rstrip("/"))):
+        for found in re.finditer(re.escape(base) + r"(?P<rest>/[^\s'\"|;&<>(),]*)?" + PATH_END, text):
+            if not (index == 0 and _logs_only(found.group("rest"))):
+                return True
+    for found in PROGRAM_GENERIC.finditer(text):
+        if not (found.group("sub") == "app" and _logs_only(found.group("rest"))):
+            return True
+    bases = [(_slashed(str(install)).rstrip("/").split("/"), True),
+             (_slashed(str(state / "venv")).rstrip("/").split("/"), False)]
+    for token in _tokens(text):
+        parts = token.split("/")
+        # A wildcard anywhere in the path (`C:/Users/*/.aicleaner/app`, `~/.aic*/ap?`), matched folder by folder.
+        if any(c in token for c in "*?["):
+            for base, is_install in bases:
+                if len(parts) >= len(base) and all(fnmatch.fnmatchcase(b, p) for b, p in zip(base, parts)) \
+                        and not (is_install and _logs_only("/" + "/".join(parts[len(base):]))):
+                    return True
+        for k, part in enumerate(parts[:-1]):
+            if not _state_part(part):
+                continue
+            nxt = parts[k + 1]
+            if any(c in nxt for c in "{}$%"):         # a brace list or a variable: it may well be app or venv
+                return True
+            if any(c in nxt for c in "*?[") and (fnmatch.fnmatchcase("app", nxt) or fnmatch.fnmatchcase("venv", nxt)):
+                return True
+            if nxt in ("app", "venv") and part != ".aicleaner" and not (nxt == "app" and _logs_only(
+                    "/" + "/".join(parts[k + 2:]) if len(parts) > k + 2 else "")):
+                return True
+    return False
+
+
+def _inside(path: str, folders: tuple[str, ...]) -> bool:
+    return any(path == f or path.startswith(f + "/") for f in folders if f)
+
+
+def _cwd_guarded(path: str | None, state: Path, install: Path) -> bool:
+    """A working folder in the program or its venv: every relative name there is theirs. (AI Cleaner's folder
+    itself is D247's; its other folders - sessions among them - are where relative names are resolved instead.)"""
+    if not path:
+        return False
+    folders = tuple(_slashed(str(p)).rstrip("/") for p in (install, state / "venv"))
+    logs = _slashed(str(install)).rstrip("/") + "/logs"
+    return _inside(path, folders) and not _inside(path, (logs,))   # in logs, a relative name is a log (or resolved)
+
+
+def _touches(spelled: str, paths: list[str], install: Path, state: Path) -> bool:
+    """Names the program or its venv - directly, or as a relative name from any folder the shell has been in."""
+    if _names_program(spelled, install, state):
+        return True
+    for token in _tokens(spelled):
+        if token.startswith(("-", "$", "/")) or re.match(r"^[a-z]:", token) or "://" in token:
+            continue
+        if any(_names_program(posixpath.normpath(posixpath.join(base, token)), install, state) for base in paths):
+            return True
+    return False
+
+
+def _cd_target(statement: str, tool: str) -> str | None:
+    """The folder a plain change of folder goes to ('' for home, '-' for back); None when it is not one."""
+    found = re.match(r"^(cd|chdir|pushd|popd|sl|set-location|push-location|pop-location)\b(.*)$", statement,
+                     re.I | re.S)
+    if not found:
+        return None
+    verb, rest = found.group(1).lower(), found.group(2).strip()
+    if verb in ("popd", "pop-location"):
+        return "-" if not rest else None
+    if re.search(r"[|<>`]|\$\(", rest):
+        return None
+    words = [w for w in _words(rest) if w.lower() not in ("/d", "-path", "-literalpath")]
+    if len(words) > 1:
+        return None
+    return words[0] if words else ""
+
+
+def _next_cwd(where: tuple[str | None, bool], target: str, ever: bool, depth: int, state: Path,
+              install: Path) -> tuple[str | None, bool]:
+    """The shell's folder after a cd: (path or None when unknown, inside the program or its venv). Inside ( ) or
+    { } going in counts and coming out may not last."""
+    path, guarded = where
+    if target == "-":
+        return None, ever
+    spelled = _spelled(target or "~").strip()
+    if re.search(r"[$*?\[{]", spelled):
+        new_path = None
+        new_guarded = guarded or _names_program(spelled, install, state) or _names_state(spelled, state)
+    else:
+        if re.match(r"^[a-z]:/", spelled):
+            new_path = posixpath.normpath(spelled)
+        elif path:
+            new_path = posixpath.normpath(posixpath.join(path, spelled))
+        else:
+            new_path = None
+        new_guarded = _cwd_guarded(new_path, state, install) if new_path else \
+            (guarded or _names_program(spelled, install, state) or _names_state(spelled, state))
+    if depth:
+        return new_path, guarded or new_guarded
+    return new_path, new_guarded
+
+
+def _double_quoted_out(text: str) -> str:
+    """Literal quoted text (no $( or backtick in it) is not commands: a | or ; inside it splits nothing."""
+    text = _single_quoted_out(text)
+    return re.sub(r"\"[^\"`$]*(?:\$(?!\()[^\"`$]*)*\"", "\"_\"", text)
+
+
+def _segment_harmless(segment: str, tool: str) -> bool:
+    """D247's reading commands, and the few more a deploy line runs after the deploy: assignments of a literal (or of
+    a read-only `$(...)`, checked as its own segments), loop and if keywords, sleep, seq, curl writing no file,
+    `sed -n Np`, and `pwsh -Command` with a read-only command."""
+    segment = segment.strip().lstrip("!").strip()
+    if tool == "Bash":
+        segment = BASH_KEYWORDS.sub("", segment).strip()
+        if not segment or segment in CONTROL_ONLY:
+            return True
+        if re.fullmatch(r"\w+=(?:[^\s$`]|\$\?)*", segment):
+            return True
+        if re.fullmatch(r"for\s+\w+\s+in\b.*", segment, re.S):
+            return _segment_harmless(re.sub(r"^for\s+\w+\s+in\b", "", segment).strip() or "true", tool) \
+                if not re.search(r"\$", segment) else True
+    else:
+        words = segment.split()
+        if words and words[0].lower() in PS_KEYWORDS:
+            return _segment_harmless(" ".join(words[1:]), tool) if len(words) > 1 else True
+    words = _words(segment)
+    if not words:
+        return True
+    head = words[0].replace("\\", "/").split("/")[-1].lower()
+    head = head[:-4] if head.endswith(".exe") else head
+    if head in ("sleep", "start-sleep", "seq"):
+        return True
+    if head == "date":
+        return not any(w.startswith(("-s", "--set")) for w in words[1:])
+    if head == "schtasks":                             # starting or listing a task; not making or changing one
+        flags = {w.lower().lstrip("/") for w in words[1:] if w.startswith("/")}
+        return bool(flags & {"run", "query"}) and not flags & {"create", "change", "delete", "end"}
+    if head == "tree" and any(re.match(r"^-\w*o", w) for w in words[1:]):
+        return False                                   # tree -o writes its listing to a file
+    if tool == "Bash" and (head in PS_READ or PS_READ_VERB.match(head)):
+        return True                                    # a PowerShell reading command typed into Bash runs nothing
+    if head == "curl":                                 # an output option only to nowhere (-o /dev/null)
+        return not any(CURL_WRITES.match(w) and not (w in ("-o", "-so", "-sSo", "--output") and words[1:][k + 1:k + 2]
+                                                     in (["/dev/null"], ["NUL"], ["nul"]))
+                       for k, w in enumerate(words[1:]))
+    if head == "sed":
+        script = [w for w in words[1:] if w != "-n"]
+        return "-n" in words and bool(script) and re.fullmatch(r"\d+(,\d+)?p", script[0]) is not None
+    return _segment_reads(segment, tool)
+
+
+def _nested_powershell(statement: str) -> str | None:
+    """The command of `pwsh|powershell [-NoProfile] -Command "<command>"`, or None when it is not that."""
+    words = _words(statement)
+    if len(_pipeline(statement)) != 1 or len(words) < 3:
+        return None
+    head = words[0].replace("\\", "/").split("/")[-1].lower()
+    if (head[:-4] if head.endswith(".exe") else head) not in ("pwsh", "powershell"):
+        return None
+    lowered = [w.lower() for w in words]
+    at = next((i for i, w in enumerate(lowered) if w in ("-command", "-c")), None)
+    if at is None or not all(w in ("-noprofile", "-nologo", "-noninteractive") for w in lowered[1:at]):
+        return None
+    return re.sub(r"\\([$\"`\\])", r"\1", " ".join(words[at + 1:]))     # Bash's escapes inside "..."
+
+
+def _harmless(statement: str, tool: str) -> bool:
+    inner = _nested_powershell(statement) if tool == "Bash" else None
+    if inner is not None:
+        return not REDIRECT.search(_double_quoted_out(statement)) and _harmless(inner, "PowerShell")
+    return _read_only(statement, tool, segment_ok=_segment_harmless, mask=_double_quoted_out, not_read=NOT_READ_D248)
+
+
+# D247's NOT_READ less its `-O` rule, which (case-blind) also stops `grep -o`: curl's and tree's output options are
+# checked by name in `_segment_harmless`; wget and sort are not reading commands at all.
+NOT_READ_D248 = re.compile(NOT_READ.pattern.replace(r"|--output|\s-O\b|", "|--output|"), re.I)
+
+
+def _script_path(word: str, where: tuple[str | None, bool]) -> str | None:
+    spelled = _spelled(word).strip()
+    if re.match(r"^[a-z]:/", spelled):
+        return posixpath.normpath(spelled)
+    if where[0] and not re.search(r"[$*?\[{]", spelled):
+        return posixpath.normpath(posixpath.join(where[0], spelled))
+    return None
+
+
+def _python_sanctioned(words: list[str], where: tuple[str | None, bool], install: Path, state: Path) -> bool:
+    """The venv's python running pytest from outside AI Cleaner's folder, or a read-only `-m aicleaner` command."""
+    exe = _script_path(words[0], where) or ""
+    venv = _slashed(str(state / "venv")).rstrip("/")
+    if exe not in (venv + "/scripts/python.exe", venv + "/scripts/python"):
+        return False
+    rest = list(words[1:])
+    while rest and rest[0].lower() in ("-i", "-u", "-b", "-x", "utf8"):
+        rest.pop(0)
+    args = " ".join(rest[2:])
+    if _names_program(_spelled(args), install, state) or _names_state(_spelled(args), state):
+        return False
+    if rest[:2] == ["-m", "pytest"]:
+        return bool(where[0]) and not where[1]
+    if rest[:2] == ["-m", "aicleaner"] and len(rest) > 2:
+        return rest[2] in AICLEANER_READS and not any(a.split("=")[0] in AICLEANER_WRITES for a in rest[3:])
+    return False
+
+
+def _sanctioned(statement: str, tool: str, where: tuple[str | None, bool], install: Path, state: Path) -> bool:
+    """One of the installer's own scripts run as the deploy line runs it (or the venv's pytest / read-only CLI):
+    input from nothing, output to a file outside or through reading filters, and arguments naming nothing of AI
+    Cleaner's. Deploy only as `-Action Update -AssumeDefaults` - its other actions install from elsewhere."""
+    run = _bare_run(statement, tool, where, install, state)
+    if run is None:
+        return False
+    words = _words(run)
+    if tool == "PowerShell" and words[:1] == ["&"]:
+        words = words[1:]
+    if not words:
+        return False
+    head = words[0].replace("\\", "/").split("/")[-1].lower()
+    head = head[:-4] if head.endswith(".exe") else head
+    if head in ("pwsh", "powershell"):
+        at = 1
+        while at < len(words) and words[at].lower() != "-file":
+            flag = words[at].lower()
+            if flag in ("-noprofile", "-nologo", "-noninteractive"):
+                at += 1
+            elif flag == "-executionpolicy" and at + 1 < len(words) and words[at + 1].lower() in ("bypass",
+                                                                                                    "remotesigned"):
+                at += 2
+            else:
+                return False
+        if at + 1 >= len(words):
+            return False
+        script, args = words[at + 1], words[at + 2:]
+    elif head.endswith(".ps1"):
+        script, args = words[0], words[1:]
+    else:
+        return _python_sanctioned(words, where, install, state)
+    full = _script_path(script, where)
+    if not full:
+        return False
+    folder, name = posixpath.split(full)
+    if folder != _slashed(str(install)).rstrip("/") + "/installer" or name not in INSTALLER_SCRIPTS:
+        return False
+    lowered = [a.lower() for a in args]
+    if name == "deploy-aicleaner.ps1":
+        return sorted(lowered) == sorted(DEPLOY_ARGS) and lowered[lowered.index("-action") + 1] == "update"
+    if name == "start-aicleaner.ps1" and any(a.startswith("-configpath") for a in lowered):
+        return False                                   # started on another settings file
+    if name == "enable-aicleaner.ps1" and lowered:
+        return False                # Brad, 2026-11-17: Enable only as-is, the counterpart of Disable after a deploy
+    spelled = _spelled(" ".join(args))
+    return not (_names_program(spelled, install, state) or _names_state(spelled, state))
+
+
+def _bare_run(statement: str, tool: str, where: tuple[str | None, bool], install: Path, state: Path) -> str | None:
+    """The command a statement runs, its input from nothing, its output to nowhere, to a file outside AI Cleaner's
+    folder or through reading filters taken off - or None when any of that is more than it."""
+    text = re.sub(r"\s*\d?>&\d", " ", statement)
+    text = re.sub(r"\s*<\s*(?:/dev/null|nul|\$null)(?=\s|$)", " ", text, flags=re.I)
+    commands = _pipeline(text)
+    run, filters = commands[0], commands[1:]
+    for item in filters:
+        spelled = _spelled(item)
+        if not _harmless(item, tool) or _names_program(spelled, install, state) or _names_state(spelled, state):
+            return None
+    output = re.search(r"\s\d?>>?\s*(\"[^\"]*\"|'[^']*'|\S+)\s*$", run)
+    if output:
+        target = _spelled(output.group(1).strip("'\""))
+        if target not in ("/dev/null", "$null", "nul"):
+            if _names_program(target, install, state) or _names_state(target, state) \
+                    or (where[1] and not re.match(r"^[a-z]:/", target)):
+                return None
+        run = run[:output.start()]
+    if re.search(r"[<>]|\$\(|<\(|\$\{", run) or (tool == "Bash" and "`" in run):
+        return None
+    return run
+
+
+def _program_rules(command: str, tool: str, install: Path, state: Path, cwd: str) -> str:
+    """D248: from the first statement touching the installed program or its venv on, only reading (or the
+    sanctioned runs above). Statements before it are not this rule's business."""
+    start = _slashed(cwd).rstrip("/") if cwd else None
+    where: tuple[str | None, bool] = (start, _cwd_guarded(start, state, install) or (bool(cwd) and _cwd_guarded(
+        _slashed(os.path.realpath(cwd)).rstrip("/"), state, install)))
+    ever, touched = where[1], False
+    paths = [start] if start else []           # every folder the shell may be in: a ( cd ) may not have lasted
+    command, bodies = _heredocs(command, tool)
+    for statement, depth in _statements(command, tool):
+        fed = " ".join(bodies[int(n)] for n in re.findall(r"<<HEREDOC(\d+)", statement) if int(n) < len(bodies))
+        core = re.sub(r"^[({\s]+|[)}\s]+$", "", statement)
+        core = BASH_KEYWORDS.sub("", core).strip() if tool == "Bash" else core
+        if not core:
+            continue
+        target = _cd_target(core, tool)
+        if target is not None:
+            where = _next_cwd(where, target, ever, depth, state, install)
+            ever = ever or where[1]
+            if where[0] and not depth and target != "-":
+                paths = [where[0]]                 # a cd at the top level: the folder is known again
+            elif where[0] and where[0] not in paths:
+                paths.append(where[0])
+            continue
+        if _sanctioned(core, tool, where, install, state):
+            continue
+        spelled = _spelled(core + (" " + fed if fed else ""))
+        names = where[1] or _touches(spelled, paths, install, state)
+        touched = touched or names
+        # After the first touch, a statement using a variable could be handed the path: it must only read too.
+        if (names or (touched and VARIABLE.search(spelled))) and not _harmless(core, tool):
+            return _program_why(core, spelled, where, install, state)
+    return ""
+
+
+VARIABLE = re.compile(r"\$(?:\{|[a-z_])|%[a-z_]\w*%")     # in `_spelled` text: the known ones are written out
+
+
+def _program_why(core: str, spelled: str, where: tuple[str | None, bool], install: Path, state: Path) -> str:
+    venv = _slashed(str(state / "venv")).rstrip("/") + "/scripts/"
+    if _words(spelled) and _words(spelled)[0].startswith(venv):
+        return (PROGRAM_WHY + " (its Python environment runs only pytest and the read-only `-m aicleaner` commands "
+                "for a tool call; run other scripts with the python on PATH or a repository's .venv)")
+    if where[1] and not _names_program(spelled, install, state):
+        return (PROGRAM_WHY + " (the shell's folder is in the installed program, where a relative name is one of "
+                "its files; change folder first)")
+    return PROGRAM_WHY + ", this guard among it (its code or its Python environment)"
+
+
+def _shell(command: str, state: Path | None = None, tool: str = "Bash", cwd: str = "",
+           install: Path | None = None) -> str:
     command = DISCARDED.sub(" ", command)
     if "api-key.dpapi" in command and READS_KEY.search(command):
         return "it would read AI Cleaner's API key"
@@ -418,9 +914,16 @@ def _shell(command: str, state: Path | None = None, tool: str = "Bash", cwd: str
     if DPAPI_FILE.search(command) and READS_KEY.search(command):
         return "it would read a secret AI Cleaner or one of its add-ons keeps (DPAPI)"
     if state is not None:
+        program = _program_rules(command, tool, install or state / "app", state, cwd)
+        if program and "aicleaner-config.json" in command.lower():
+            program = "it would change AI Cleaner's settings file"     # in the program's folder, but a setting
         why = _addon_rules(command, tool, state, cwd)
-        if why:
-            return why
+        # `.aicleaner\app` is also a name directly in AI Cleaner's folder, and `aiclea~1` also the registry's short
+        # name: D247 refuses those too, but the program's reason is the one that says why.
+        if why in (ADDONS_WHY, TOP_OF_STATE_WHY) and program and REGISTRY_STEM not in _spelled(command):
+            return program
+        if why or program:
+            return why or program
     if re.search(r"X-AI-Cleaner-Key|AICLEANER_API_KEY", command, re.I) and HTTP_CLIENT.search(command):
         return "it would call AI Cleaner's API with its key"
     if "aicleaner-config.json" in command and WRITES.search(command):
@@ -446,7 +949,7 @@ def verdict(payload: object, install: Path, state: Path) -> str:
     if tool in EDITS:
         return _edit(str(tool), given, install, state)
     if tool in SHELLS and isinstance(given.get("command"), str):
-        return _shell(given["command"], state, str(tool), str(payload.get("cwd") or ""))
+        return _shell(given["command"], state, str(tool), str(payload.get("cwd") or ""), install)
     return ""
 
 
@@ -462,7 +965,8 @@ def main(argv: list[str]) -> int:
     except Exception:  # noqa: BLE001 - a broken guard lets the call through rather than stopping all tool use
         return 0
     if why:
-        sys.stderr.write(ADVICE.format(what=why) + "\n")
+        advice = PROGRAM_ADVICE if why.startswith(PROGRAM_WHY) else ADVICE
+        sys.stderr.write(advice.format(what=why) + "\n")
         return 2
     return 0
 

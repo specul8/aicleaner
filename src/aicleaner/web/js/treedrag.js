@@ -11,17 +11,30 @@
 // the page is open on is saved there. Edge and Chrome only (`DownloadURL`; Firefox ignores it): the browser fetches
 // the address itself, so it is AI Cleaner's own download route, same origin. Through the encrypted tunnel a plain
 // address is turned away (D168) and a drag cannot wait for a sealed fetch, so there the drag carries no address and
-// the Files menu's Download is the way to save a file.
+// the Files menu's Download is the way to save a file. Feature 175 (Brad, 2026-11-09): several selected items dragged
+// out together are one zip of them all.
 import { h } from './dom.js';
 import { isSealed } from './sealed.js';
 import { isSelected, itemOf, selectedItems } from './treeselect.js';
 
 export const DRAG_TYPE = 'application/x-aicleaner-files';
 
-// `mime:filename:absolute URL`, Chromium's format, for one item - or '' when it cannot be offered (several items,
-// a root, or a sealed page). A file goes as itself; a folder as the zip its Download makes.
+// `mime:filename:absolute URL`, Chromium's format - or '' when it cannot be offered (nothing, a root among them, or
+// a sealed page). A file goes as itself; a folder as the zip its Download makes; several items (f175, Brad
+// 2026-11-09) as one zip of them all, fetched by a GET naming each root and path (the server's allow-list and limits
+// are the folder zip's).
 export function downloadUrl(session, items, sealed = isSealed()) {
-  if (sealed || !items || items.length !== 1) return '';
+  if (sealed || !items || !items.length) return '';
+  if (items.length > 1) {
+    if (items.some((item) => !item.root || !item.path)) return '';
+    const query = new URLSearchParams({ name: session || '' });
+    for (const item of items) { query.append('root', item.root); query.append('path', item.path); }
+    const now = new Date();
+    const two = (n) => String(n).padStart(2, '0');
+    const stamp = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-`
+      + `${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}`;
+    return `application/zip:files-${stamp}.zip:${new URL(`/api/session/files/zip?${query}`, window.location.href).href}`;
+  }
   const item = items[0];
   if (!item.root || !item.path) return '';
   const query = new URLSearchParams({ name: session || '', root: item.root, path: item.path });

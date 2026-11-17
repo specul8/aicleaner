@@ -1804,7 +1804,13 @@ function lastConversation(session) {
   return session && !session.running && CONVERSATION_ID.test(id) ? id : '';
 }
 
-function pastOptions(past, project, fromSelected = 0) {
+// f177 (feedback #7; Brad 2026-11-11): the last entry when the list was cut at 25 and older conversations exist -
+// a step that cannot be picked, saying how to see the rest. Worded for the screen since f183: the tick beside the list
+// reads "All" (its full name, "Show all conversations", is its tooltip). Not shown while All is ticked.
+const MORE_HINT = (several) => `Latest 25 ${several ? 'per folder' : 'conversations'} shown - to see older ones, `
+  + 'tick All beside this list and reopen it';
+
+function pastOptions(past, project, fromSelected = 0, more = false) {
   const groups = (past || []).filter((entry) => (entry.sessions || []).length);
   const total = groups.reduce((n, entry) => n + entry.sessions.length, 0);
   const first = [h('option', { value: '' }, total ? 'Start a new conversation' : 'Nothing to continue here')];
@@ -1815,12 +1821,16 @@ function pastOptions(past, project, fromSelected = 0) {
   }
   if (!total) return first;
   const shared = sharedTitles(groups);
+  const several = !(groups.length === 1 && !groups[0].outside);
+  // Value '' as the new conversation's, so code that sets the list's value never lands on it.
+  const last = more ? [h('option', { value: '', disabled: true, class: 'session-more-hint', dataset: { more: '1' } },
+    MORE_HINT(several))] : [];
   // One folder's worth reads as a plain list; several need saying which is which - and a folder
   // this profile does not cover always says so (feature 50).
-  if (groups.length === 1 && !groups[0].outside) {
+  if (!several) {
     return [...first, ...groups[0].sessions.map((row) =>
       h('option', { value: row.id, title: conversationTip(row), dataset: { project: groups[0].project } },
-        conversationLabel(row, shared.has(row.title))))];
+        conversationLabel(row, shared.has(row.title)))), ...last];
   }
   const ordered = [...groups].sort((a, b) => (a.project === project ? -1 : b.project === project ? 1 : 0));
   return [...first, ...ordered.map((entry) =>
@@ -1828,7 +1838,7 @@ function pastOptions(past, project, fromSelected = 0) {
       ...entry.sessions.map((row) =>
         h('option', { value: row.id, title: conversationTip(row),
                       dataset: { project: entry.project, outside: entry.outside ? '1' : null } },
-          conversationLabel(row, shared.has(row.title))))))];
+          conversationLabel(row, shared.has(row.title)))))), ...last];
 }
 
 // ---- the slash list ---------------------------------------------------------------------------
@@ -3441,7 +3451,7 @@ export async function render(main, context = {}) {
     repaint(resume, view.pastLoading
       ? [lastRun ? h('option', { value: lastRun, dataset: { provisional: '1' } }, 'Continue the last conversation (loading the others...)')
         : h('option', { value: '' }, 'Loading conversations...')]
-      : pastOptions(view.past, homeFolder, fromSelected ? fromSelected.ids.length : 0));
+      : pastOptions(view.past, homeFolder, fromSelected ? fromSelected.ids.length : 0, view.pastMore));
     const fromOption = resume.querySelector('option[data-from-selected]');
     if (fromOption) fromOption.selected = true;      // by index: its value is the plain new conversation's
     else if (held && Array.from(resume.options).some((option) => option.value === held)) resume.value = held;
@@ -3917,6 +3927,7 @@ export async function render(main, context = {}) {
     const all = showAll.querySelector('input').checked;
     if (!quiet) { view.pastLoading = true; paint(); }
     let past = [];
+    let more = false;
     try {
       // One request for a list already on its way (D224: a switch and the poll asked together, and through the
       // tunnel the second waited behind the first - 5.8 s and 3.1 s for the same list).
@@ -3927,10 +3938,14 @@ export async function render(main, context = {}) {
         request.finally(() => { if (view.pastInFlight && view.pastInFlight.request === request) view.pastInFlight = null; })
           .catch(() => {});
       }
-      past = (await view.pastInFlight.request).projects || [];
+      const answer = await view.pastInFlight.request;
+      past = answer.projects || [];
+      more = Boolean(answer.more);
     } catch (error) { /* an empty list, never an error: a new conversation can still start */ }
     if (asked !== view.name) return;   // a switch overtook it, and loads its own
     view.past = past;
+    // f177 (feedback #7): the list was cut at 25 and older ones exist - said in the list itself while All is off.
+    view.pastMore = more && !all;
     view.pastLoading = false;
     if (!all) view.pastBase = { name: asked, count: pastCount(past) };
     const base = view.pastBase && view.pastBase.name === asked ? view.pastBase.count : null;
@@ -5058,8 +5073,9 @@ export async function render(main, context = {}) {
     open: (items) => viewMany(items),
     session: () => view.name,          // feature 169: dragged out of the page, saved on this device
   });
-  // A few files one by one; more, or any folder, as one zip that keeps each file under its folders.
-  const downloadMany = async (items) => {
+  // A few files one by one; more, or any folder, as one zip that keeps each file under its folders. `zip`: one zip
+  // whatever they are (f175's Download selected (.zip)).
+  const downloadMany = async (items, zip = false) => {
     // Through the tunnel the links below are caught and fetched sealed, and fetch() is sealed (D168).
     const save = (href, filename = '') => {
       const link = h('a', { href, download: filename, hidden: true });
@@ -5067,7 +5083,7 @@ export async function render(main, context = {}) {
       link.click();
       link.remove();
     };
-    if (!needsZip(items)) {
+    if (!zip && !needsZip(items)) {
       for (const [i, file] of items.entries()) {
         setTimeout(() => save(`/api/session/file/download?${new URLSearchParams({ name: view.name, root: file.root, path: file.path })}`), i * 400);
       }
@@ -5218,15 +5234,16 @@ export async function render(main, context = {}) {
       if (window.matchMedia(PHONE).matches && band.classList.contains('rail-open')) setFilesOpen(false, false);
       return;
     }
-    // A group menu's View and Download (feature 97): for the selection, or the one folder.
-    const many = event.target.closest('button.tree-view-many, button.tree-download-many');
+    // A group menu's View and Download (feature 97): for the selection, or the one folder. f175: Download selected
+    // (.zip) makes one zip even of a few files.
+    const many = event.target.closest('button.tree-view-many, button.tree-download-many, button.tree-download-zip');
     if (many) {
       const own = many.closest('.tree-row, .tree-root').querySelector('button.tree-name');
       const items = menuItems(itemOf(own));
       tree.menu = null;
       showTree();
       if (many.classList.contains('tree-view-many')) await viewMany(items);
-      else await downloadMany(items);
+      else await downloadMany(items, many.classList.contains('tree-download-zip'));
       return;
     }
     // One file's Download (Brad, 2026-11-03: the menu stayed open after it). Closed on the next turn, not now: the

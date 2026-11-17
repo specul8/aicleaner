@@ -1162,10 +1162,19 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             if request.query.get("all") == "1":
                 limit = 5000
             from . import timing
+            # f177 (feedback #7): a cut list asks each folder for one more, so the page can say older ones exist
+            # (and only when they do); the extra one is dropped before it is sent.
+            cut = limit < 5000
             # Step times while timings are recorded (D224: the first list after a start took 7 s).
-            past = await asyncio.to_thread(session_host().past, name, limit, False,
+            past = await asyncio.to_thread(session_host().past, name, limit + 1 if cut else limit, False,
                                            request.get(timing.REQUEST_PARTS))
-            return web.json_response({"projects": past})
+            more = False
+            if cut:
+                for group in past:
+                    if len(group.get("sessions") or []) > limit:
+                        group["sessions"] = group["sessions"][:limit]
+                        more = True
+            return web.json_response({"projects": past, "more": more})
         except SessionError as problem:
             # A session just removed (a worktree's Remove) can still be asked for its list by the page it was open
             # on; it has no conversations to list, so that is the answer rather than an error the page logs.
@@ -1735,8 +1744,12 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if request.method == "GET":
             # Feature 169 (Brad, 2026-11-09): one folder by its address, so a folder dragged out of the
             # Files pane can be a zip the browser fetches itself (DownloadURL). Same allow-list and limits.
-            name, root, path = _file_args(request)
-            items = [{"root": root, "path": path}] if path else []
+            # f175 (Brad, 2026-11-09): several selected items dragged out together - repeated root/path pairs.
+            name = request.query.get("name", "")
+            roots, paths = request.query.getall("root", []), request.query.getall("path", [])
+            if len(roots) != len(paths) or not all(paths):
+                return web.json_response({"error": "each item needs a root and a path"}, status=400)
+            items = [{"root": r, "path": p} for r, p in zip(roots, paths)][:1000]
         else:
             body = await request.json()
             name = str(body.get("name", ""))

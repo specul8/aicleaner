@@ -64,7 +64,10 @@ Since 1.1, turning `proxy.bypass`, `canary.fail_open` or `attachments.allow_imag
 `off`, or taking an AI tool off filtering (Claude Desktop's chat, its Code tab, Copilot, Claude Code) waits for a
 **Yes on this machine's desktop**: AI Cleaner shows a Windows box, No is the default, and no answer in two minutes is
 a No. A script or a program on the machine cannot answer it. A change made through remote access is already gated by
-the remote sign-in, so it is not asked again on the desktop. Turning a protection back on is never asked.
+the remote sign-in, so it is not asked again on the desktop. Turning a protection back on is never asked. When AI
+Cleaner runs as the start-up task (Start with the computer), it has no desktop of its own: the box is shown on the
+desktop of the signed-in Windows user (at the computer or over Remote Desktop) through a one-off scheduled task, and
+with nobody signed in the change is refused at once, saying so.
 
 ## Tools that reach out
 

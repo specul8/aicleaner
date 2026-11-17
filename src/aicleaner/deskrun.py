@@ -15,6 +15,9 @@ So an administrator step is launched by `launch()`:
 - AI Cleaner in session 0 and nobody signed in: `NoDesktop`, carrying the command to run by hand in an elevated
   PowerShell. Nothing waits for a prompt nobody can see.
 
+D240: desktopconfirm's Yes/No box goes the same way from session 0 (`ask()`): shown by the one-off task in the person's
+session, its answer written back to a file; with nobody signed in, `NoDesktop` at once.
+
 A test server (AICLEANER_CLIENT_HOME set) never registers a real task: it is given stand-ins, or is refused.
 """
 from __future__ import annotations
@@ -25,6 +28,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -136,8 +140,8 @@ def _quote(text: str) -> str:
 
 def launcher_text(launch_line: str, task: str) -> str:
     """The launcher the task runs in the person's session: the line, then its own task and file removed."""
-    return (f"# {task}.ps1 - written by AI Cleaner (D239): hands one administrator step to this desktop, then removes\n"
-            f"# its scheduled task and itself.\n"
+    return (f"# {task}.ps1 - written by AI Cleaner (D239): hands one step to this desktop (an administrator\n"
+            f"# prompt, or D240's Yes/No box), then removes its scheduled task and itself.\n"
             f"try {{\n    {launch_line}\n}}\n"
             f"finally {{\n"
             f"    Unregister-ScheduledTask -TaskName {_quote(task)} -Confirm:$false -ErrorAction SilentlyContinue\n"
@@ -192,6 +196,11 @@ def _real(desk: Desktop) -> bool:
     return desk.run is _run_powershell
 
 
+def default_folder() -> Path:
+    """Where a hand-over's launcher (and a Yes/No box's answer) is written: the state folder."""
+    return Path(os.environ.get("USERPROFILE") or Path.home()) / ".aicleaner" / "state" / "desktop"
+
+
 def launch(launch_line: str, manual: str, folder: Path, desk: Desktop | None = None) -> Handoff:
     """Start `launch_line` (PowerShell that asks Windows for administrator) where the person can see it.
 
@@ -211,9 +220,17 @@ def launch(launch_line: str, manual: str, folder: Path, desk: Desktop | None = N
         raise NoDesktop("AI Cleaner is running as the start-up task and nobody is signed in to this computer, so "
                         "Windows has nowhere to show the administrator prompt. Sign in to this computer (at it or by "
                         "Remote Desktop) and try again, or run this command in PowerShell as administrator:", manual)
+    return _hand_over(launch_line, folder, desk, found,
+                      f"Run this command in PowerShell as administrator instead: {manual}")
+
+
+def _hand_over(launch_line: str, folder: Path, desk: Desktop, found: list[int] | None, instead: str,
+               task: str = "") -> Handoff:
+    """Session 0, someone signed in (or not known): the one-off interactive task that runs `launch_line` on their
+    desktop. `instead` ends the message when it could not be registered."""
     if _real(desk) and os.environ.get("AICLEANER_CLIENT_HOME", "").strip():
         raise DesktopError("a test server does not register scheduled tasks")
-    task = f"{TASK_PREFIX}{uuid.uuid4().hex[:8]}"
+    task = task or new_task()
     launcher = Path(folder) / f"{task}.ps1"
     try:
         launcher.parent.mkdir(parents=True, exist_ok=True)
@@ -228,7 +245,78 @@ def launch(launch_line: str, manual: str, folder: Path, desk: Desktop | None = N
         launcher.unlink(missing_ok=True)
         log.warning("handing the administrator step to the desktop failed (%s): %s", code, said.strip()[-500:])
         raise DesktopError("AI Cleaner is running as the start-up task, and the step could not be handed to your "
-                           f"desktop ({said.strip().splitlines()[-1] if said.strip() else f'exit {code}'}). Run this "
-                           f"command in PowerShell as administrator instead: {manual}")
-    log.info("administrator step handed to the desktop (task %s, session %s)", task, found or "unknown")
+                           f"desktop ({said.strip().splitlines()[-1] if said.strip() else f'exit {code}'}). {instead}")
+    log.info("step handed to the desktop (task %s, session %s)", task, found or "unknown")
     return Handoff("desktop", found[0] if found else None, task)
+
+
+def new_task() -> str:
+    return f"{TASK_PREFIX}{uuid.uuid4().hex[:8]}"
+
+
+# ---- a Yes/No box on the person's desktop (D240) -----------------------------------------------------------------
+#
+# desktopconfirm's box, raised from session 0, opened where nobody could see it. In session 0 the box is shown by the
+# same one-off task instead: WScript.Shell's Popup (a MessageBox with a time-out), whose answer the launcher writes,
+# after a nonce only this request knows, to a file beside it that AI Cleaner waits for. A program running as the same
+# user could write that file - as it could post a click to the box itself; the box stops a remote or blind caller.
+
+# Yes/No, warning, No by default, system-modal, brought to the front and kept on top (the in-process box's flags).
+POPUP_FLAGS = 0x4 | 0x30 | 0x100 | 0x1000 | 0x10000 | 0x40000
+IDYES = 6
+ANSWER_GRACE_S = 30          # for the task to start and the box to open, on top of the box's own time-out
+POLL_S = 0.5
+NOBODY_TO_ASK = ("AI Cleaner is running as the start-up task and nobody is signed in to this computer, so there is no "
+                 "desktop to ask for a Yes on. Sign in to this computer (at it or by Remote Desktop) and make the "
+                 "change again.")
+
+
+def ask_line(text: str, title: str, timeout_s: int, answer: Path, nonce: str) -> str:
+    """The launcher's line: show the box, then write `<nonce> <answer>` (6 Yes, 7 No, -1 timed out)."""
+    return (f"$answer = (New-Object -ComObject WScript.Shell).Popup({_quote(text)}, {int(timeout_s)}, {_quote(title)}, "
+            f"{POPUP_FLAGS})\n"
+            f"    Set-Content -LiteralPath {_quote(str(answer))} -Value ({_quote(nonce + ' ')} + $answer) -Encoding Ascii")
+
+
+def _read_answer(answer: Path, nonce: str) -> bool | None:
+    """True / False once the box has answered; None while there is nothing (or only part of it) to read yet."""
+    try:
+        said = answer.read_text(encoding="ascii", errors="replace").split()
+    except OSError:
+        return None
+    if len(said) < 2:
+        return None
+    if said[0] != nonce:
+        log.warning("an answer to the desktop's Yes/No box without its nonce was ignored (%s)", answer.name)
+        return False
+    return said[1] == str(IDYES)
+
+
+def ask(text: str, title: str, timeout_s: int, folder: Path, desk: Desktop | None = None,
+        sleep: Callable[[float], None] = time.sleep, clock: Callable[[], float] = time.monotonic) -> bool:
+    """From session 0: a Yes/No box on the signed-in person's desktop; True only for Yes. Raises NoDesktop at once
+    when nobody is signed in (nothing waits), DesktopError when it could not be handed over. Blocking: run it in a
+    thread."""
+    desk = desk or Desktop()
+    found = sessions_of(desk.user, desk.listed())
+    if found is not None and not found:
+        raise NoDesktop(NOBODY_TO_ASK, "")
+    task = new_task()
+    nonce = uuid.uuid4().hex
+    answer = Path(folder) / f"{task}.answer"
+    _hand_over(ask_line(text, title, timeout_s, answer, nonce), folder, desk, found,
+               "Try again in a moment; if it keeps failing, AI Cleaner's log says why.", task)
+    deadline = clock() + timeout_s + ANSWER_GRACE_S
+    try:
+        while True:
+            said = _read_answer(answer, nonce)
+            if said is not None:
+                log.info("the desktop's Yes/No box answered %s (task %s)", "yes" if said else "no", task)
+                return said
+            if clock() >= deadline:
+                log.warning("the desktop's Yes/No box gave no answer in %s s (task %s)", timeout_s + ANSWER_GRACE_S,
+                            task)
+                return False
+            sleep(POLL_S)
+    finally:
+        answer.unlink(missing_ok=True)

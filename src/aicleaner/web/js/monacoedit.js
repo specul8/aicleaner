@@ -160,6 +160,13 @@ export function monacoLanguage(name) {
 
 const theme = () => (document.documentElement.dataset.theme === 'light' ? 'vs' : 'vs-dark');
 
+// D249 (Brad, 2026-11-17: the right-click menu "shows without a background"): Monaco's theme colours are variables
+// (--vscode-menu-background and the rest) its theme service sets on `.monaco-editor, .monaco-component` in a page
+// style sheet. With useShadowDOM on (Monaco's default) the right-click menu is drawn in a shadow root, which that
+// style sheet does not reach and which sits outside .monaco-editor, so every colour was empty: no background, black
+// text. Drawn in the page, the menu is a .monaco-component and takes the theme's colours, as the other pop-ups do.
+const SHADOW_DOM = false;
+
 // A textarea's surface over a Monaco editor.
 export class MonacoBox {
   constructor(host, text, name, { compact = false, language = '', firstLine = 1 } = {}) {
@@ -174,7 +181,7 @@ export class MonacoBox {
       lineNumbers: first > 1 ? (n) => String(n + first - 1) : 'on',
       minimap: { enabled: minimap && !compact }, scrollBeyondLastLine: false, fontSize: 13, tabSize: 4,
       renderWhitespace: 'selection', wordWrap: 'off', 'semanticHighlighting.enabled': false,
-      ariaLabel: `Edit ${name}`, fixedOverflowWidgets: true,
+      ariaLabel: `Edit ${name}`, fixedOverflowWidgets: true, useShadowDOM: SHADOW_DOM,
     });
     this.model = this.editor.getModel();
     this.name = name;
@@ -319,7 +326,7 @@ export function showDiff(host, onDisk, mine, name) {
   const original = monaco.editor.createModel(String(onDisk || '').replace(/\r\n?/g, '\n'), language);
   const modified = monaco.editor.createModel(String(mine || '').replace(/\r\n?/g, '\n'), language);
   const diff = monaco.editor.createDiffEditor(host, { readOnly: true, originalEditable: false, automaticLayout: true,
-    renderSideBySide: true, theme: theme(), minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13 });
+    renderSideBySide: true, theme: theme(), useShadowDOM: SHADOW_DOM, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13 });
   diff.setModel({ original, modified });
   return () => { diff.dispose(); original.dispose(); modified.dispose(); };
 }

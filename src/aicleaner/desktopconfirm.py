@@ -5,6 +5,9 @@ the key file or load the page. For the few switches that let client names leave 
 Yes on this machine's desktop - a Windows message box, not something an API call or a script can answer. Through
 remote access these switches are refused already (local only), so the box is only ever raised for a change made here.
 
+D240: AI Cleaner run as the start-up task is in session 0, where a box is seen by nobody; there it is shown on the
+signed-in person's desktop through deskrun's hand-off (D239), and with nobody signed in the change is refused at once.
+
 Raised only when the running proxy asked for it (`Config.desktop_confirm`, set at start); tests that build the app in
 process never see a box. AICLEANER_CONFIRM_ANSWER=yes|no, read by the proxy at start, answers it for the test suites.
 """
@@ -15,11 +18,15 @@ import logging
 import os
 import sys
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
+
+from . import deskrun
 
 log = logging.getLogger("aicleaner.desktopconfirm")
 
 TIMEOUT_S = 120
+STARTUP_TASK = "AI Cleaner is running as the start-up task"
 ANSWER_ENV = "AICLEANER_CONFIRM_ANSWER"
 TITLE = "AI Cleaner - turn a protection off?"
 
@@ -104,8 +111,21 @@ def _still_granted(change: str) -> bool:
     return _granted.get(change, 0.0) > time.monotonic()
 
 
-async def confirm(changes: list[str]) -> tuple[bool, str]:
-    """(confirmed, why not). Waits for the person, at most TIMEOUT_S."""
+def _desktop() -> deskrun.Desktop:
+    """Which session this process is in and who is signed in (a test replaces it)."""
+    return deskrun.Desktop()
+
+
+def _folder() -> Path:
+    return deskrun.default_folder()
+
+
+async def confirm(changes: list[str], desk: deskrun.Desktop | None = None, folder: Path | None = None,
+                  sleep: Callable[[float], None] | None = None) -> tuple[bool, str]:
+    """(confirmed, why not). Waits for the person, at most TIMEOUT_S (plus the hand-over's start in session 0).
+
+    D240: run as the start-up task (session 0) the box is shown on the signed-in person's desktop through deskrun's
+    hand-off; with nobody signed in the change is refused at once (deskrun.NOBODY_TO_ASK)."""
     changes = [c for c in changes if not _still_granted(c)]
     if not changes:
         return True, ""
@@ -115,14 +135,29 @@ async def confirm(changes: list[str]) -> tuple[bool, str]:
         if preset == "yes":
             grant(changes)
         return preset == "yes", "" if preset == "yes" else "declined"
-    if sys.platform != "win32":
+    if desk is None and sys.platform != "win32":
         return False, "there is no desktop here to confirm it on"
-    log.warning("asking on the desktop before turning a protection off: %s", "; ".join(changes))
-    try:
-        yes = await asyncio.to_thread(_ask_windows, _message(changes))
-    except OSError as exc:
-        log.warning("the confirmation could not be shown: %s", exc)
-        return False, f"the confirmation could not be shown ({exc})"
+    desk = desk or _desktop()
+    text = _message(changes)
+    if desk.own() == 0:
+        log.warning("asking on the signed-in desktop (AI Cleaner runs in session 0) before turning a protection off: "
+                    "%s", "; ".join(changes))
+        try:
+            yes = await asyncio.to_thread(deskrun.ask, text, TITLE, TIMEOUT_S, folder or _folder(), desk,
+                                          sleep or time.sleep)
+        except deskrun.NoDesktop:
+            log.warning("protection-off change refused: nobody is signed in to show the box to")
+            return False, deskrun.NOBODY_TO_ASK
+        except deskrun.DesktopError as exc:
+            log.warning("the confirmation could not be handed to the desktop: %s", exc)
+            return False, str(exc)
+    else:
+        log.warning("asking on the desktop before turning a protection off: %s", "; ".join(changes))
+        try:
+            yes = await asyncio.to_thread(_ask_windows, text)
+        except OSError as exc:
+            log.warning("the confirmation could not be shown: %s", exc)
+            return False, f"the confirmation could not be shown ({exc})"
     log.warning("protection-off change %s on the desktop", "confirmed" if yes else "declined or timed out")
     if yes:
         grant(changes)
@@ -130,5 +165,8 @@ async def confirm(changes: list[str]) -> tuple[bool, str]:
 
 
 def refusal(why: str) -> str:
+    # D240: from the start-up task, the reason is already the whole story (nobody signed in, or no hand-over).
+    if why.startswith(STARTUP_TASK):
+        return f"Not changed: {why}"
     return (f"Not changed: turning a protection off needs a Yes on this machine's desktop ({why}). "
             "Make the change at this machine and answer the box AI Cleaner shows.")

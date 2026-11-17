@@ -118,7 +118,13 @@ export function groupMenu(items, ownFiles, sealed) {
     title: (zip ? 'Download as one zip, each file under its folders' : 'Download each file')
       + (sealed ? ' (through the encrypted tunnel: up to 50 MB)' : '') },
   ...(many ? labelled(icon('⬇'), ' Download', `${items.length} ${zip ? 'as zip' : 'files'}`) : [icon('⬇'), ' Download (zip)']));
-  return h('div', { class: 'tree-menu group', role: 'menu' }, prompt, view, download);
+  // f175: a few plain files download one by one above; this makes them one zip instead. When the Download above
+  // already zips (more files, or a folder among them), it is that entry, so it is not offered twice.
+  const asZip = many && !zip ? h('button', { type: 'button', class: 'tree-download-zip', role: 'menuitem',
+    'aria-label': `Download ${label} as one zip`,
+    title: 'Download the selected items as one zip' + (sealed ? ' (through the encrypted tunnel: up to 50 MB)' : '') },
+  ...labelled(icon('⬇'), ' Download selected (.zip)', `${items.length} items`)) : null;
+  return h('div', { class: 'tree-menu group', role: 'menu' }, prompt, view, download, asZip);
 }
 
 // A button's name, with what it covers on a second row beneath (the user, 2026-10-08: taller

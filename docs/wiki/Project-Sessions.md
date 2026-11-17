@@ -71,8 +71,10 @@ under it; the third **Asks**.
   and the topic's project assets folder, is passed with `--add-dir`, so Claude can reach them (prompts still apply).
 - **Continue** (the drop-down) lists earlier conversations held in the project session's folders, newest first, each
   shown by its title or first prompt. Choosing one starts with `--resume`. The **All** tick (Show all conversations)
-  lists every one, not just the newest 25. A transcript written to in the last few minutes is flagged as possibly open
-  elsewhere.
+  lists every one, not just the newest 25. When there are older ones, the list ends with a line that cannot be chosen:
+  "Latest 25 conversations shown - to see older ones, tick All beside this list and reopen it" ("Latest 25 per folder"
+  when the list is grouped by folder); it is not there with All ticked, or when there are 25 or fewer. A transcript
+  written to in the last few minutes is flagged as possibly open elsewhere.
 - **Conversation actions** opens a panel from the right edge of the window, over the page (nothing under it moves).
   Each action has a line saying what it does: **Search conversations** (also Ctrl+K) and **Suggest titles**;
   **Rename**, **Retitle**, **Move to another session** and **New conversation from existing ones**; then **Recently
@@ -209,7 +211,14 @@ between; Ctrl+click adds or removes one item, in any folder. The menu then acts 
 **Prompt** puts every path in, one per line; **View** opens each that a tab can show (asking first
 above 20); **Download** fetches up to five files one by one, and more - or any folder - as one zip
 in which each file keeps its folders (`docs/wiki/Settings.md`; with items from two project folders,
-each path starts with its project folder's name). Escape clears the selection.
+each path starts with its project folder's name). When Download would fetch them one by one, **Download
+selected (.zip)** under it makes them one zip instead. Escape clears the selection.
+
+**Dragging out.** In Edge or Chrome, drag a file from the tree onto your desktop or a folder of the device you are
+using to save it there; a folder is saved as its zip, and dragging any of several selected items saves them all as one
+zip (`files-<date>-<time>.zip`). Onto the conversation the same drag opens them in tabs, and onto the prompt it puts
+their paths in. Through the encrypted tunnel a drag cannot save; use the menu's **Download**. Dragging a project
+folder's own name moves it among the others (above), whatever is selected.
 
 Files are shown as they are on disk, real terms included: they go to you, not to the AI service.
 
