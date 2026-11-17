@@ -67,6 +67,17 @@ def _decode(data_b64: str) -> bytes | None:
         return None
 
 
+def withheld_reason(reason: str, hidden: int = 0) -> str:
+    """D246: why a picture that was to go with names blacked out went as its text instead, in words (counts only -
+    never a name). Used by the notice the AI service reads and the note the Session page shows."""
+    if reason == "legible":
+        return (f"after blacking out {hidden} name(s) or identifier(s), a real name or identifier could still be read "
+                "in it")
+    if reason == "too_large":
+        return "with names blacked out it was still over the size cap, even at the lowest quality"
+    return "the picture reader on this machine could not process it, so it could not be checked"
+
+
 class _Scrubber:
     def __init__(self, allow_images: bool, pdf_to_text: PdfToText,
                  image_to_text: ImageToText | None = None,
@@ -136,11 +147,27 @@ class _Scrubber:
             self.counts["image_allowed"] += 1
             return block
         # Anthropic's image block only: the copy goes back in the same shape (an OpenAI image_url stays text only).
+        held_back: tuple[str, int] | None = None
         if self.picture is not None and raw and media in ACCEPTED_IMAGE_TYPES and block.get("type") == "image":
             sent = self._redacted(raw)
-            if sent is not None:
+            if not isinstance(sent, tuple):
                 return sent
+            held_back = sent
         text = self._read(self._read_image(raw, media) or "")
+        if held_back is not None:
+            # D246 (Brad, 2026-11-16): a picture that was to go redacted and did not says why - it read as though the
+            # Text only setting had been applied. Which reason, logged with counts only.
+            reason, hidden = held_back
+            log.info("a redacted picture went as its text: reason=%s blacked_out=%d text_chars=%d",
+                     reason, hidden, len(text))
+            why = withheld_reason(reason, hidden)
+            if text:
+                self.counts["image_read"] += 1
+                return _notice(f"[aicleaner: the picture was not sent: {why}, so only its text (filtered) follows.]"
+                               f"\n\n{text}")
+            self.counts["image_withheld"] += 1
+            return _notice(f"[aicleaner: the picture was not sent: {why}; no text could be read from it either. "
+                           "Describe it, or paste its text.]")
         if text:
             self.counts["image_read"] += 1
             return _notice("[aicleaner: an image was read on this machine and replaced by its text, which is "
@@ -149,9 +176,10 @@ class _Scrubber:
         return _notice(f"[aicleaner: an image ({media or 'unknown type'}) was withheld: images are not sent to "
                        "the AI service. Describe it, or paste its text.]")
 
-    def _redacted(self, raw: bytes) -> list[dict[str, Any]] | None:
+    def _redacted(self, raw: bytes) -> list[dict[str, Any]] | tuple[str, int]:
         """Feature 114: the picture with client names blacked out, and its text (filtered with the rest of the
-        request), or None to fall back to text only (the reader failed, or a name stayed legible)."""
+        request); or, to fall back to text only, (reason, boxes blacked out) - D246: the reader failed ("failed"), a
+        name or identifier stayed legible ("legible"), or no copy fitted the size cap ("too_large")."""
         try:
             result = self.picture(raw)
         except (ConversionError, OSError, ValueError) as exc:
@@ -159,16 +187,16 @@ class _Scrubber:
             # redaction had only ever worked for a picture with exactly one box to fill.
             log.warning("redacting a picture failed, so it went as its text: %s", exc)
             self.counts["image_redaction_failed"] += 1
-            return None
+            return ("failed", 0)
         if result.image is None:
             if getattr(result, "too_large", False):
                 # Brad, 2026-11-10: never an over-cap picture; its text goes instead, and that is said in the log.
                 log.warning("a redacted picture could not be made small enough, so it went as its text: %s",
                             result.withheld)
                 self.counts["image_redaction_too_large"] += 1
-            else:
-                self.counts["image_redaction_refused"] += 1
-            return None
+                return ("too_large", int(result.hidden or 0))
+            self.counts["image_redaction_refused"] += 1
+            return ("legible", int(result.hidden or 0))
         self.counts["image_redacted" if result.hidden else "image_clean"] += 1
         said = (f"[aicleaner: this image was sent with {result.hidden} real name(s) or identifier(s) blacked out; "
                 "its readable text follows.]" if result.hidden else
@@ -196,7 +224,7 @@ class _Scrubber:
         blocks: list[dict[str, Any]] = []
         for page in pages:
             sent = self._redacted(page)
-            if sent is None:
+            if not isinstance(sent, list):
                 return None
             blocks.extend(sent)
         self.counts["pdf_redacted"] += 1

@@ -92,6 +92,17 @@ def _flag(section: dict[str, Any], key: str, default: bool, name: str) -> bool:
                 str(default).lower())
     return default
 
+_RETIRED_SAID: set[str] = set()
+
+
+def _note_retired(name: str, why: str) -> None:
+    """A setting no longer read, found in the config file: logged the first time only, not on every reload."""
+    if name in _RETIRED_SAID:
+        return
+    _RETIRED_SAID.add(name)
+    log.info("%s in aicleaner-config.json is ignored: %s", name, why)
+
+
 # Unknown identifiers of these kinds are held back as placeholders (high-confidence detector kinds);
 # "name" is low confidence and stays queue-only unless chosen.
 DEFAULT_PLACEHOLDER_KINDS = ("email", "tenant", "sharepoint", "domain", "ip", "devops-org",
@@ -735,6 +746,10 @@ class Config:
         cfg.session_auto_titles = _flag(ses, "auto_titles", True, "session.auto_titles")
         cfg.session_job_cleanup = _flag(ses, "job_cleanup", False, "session.job_cleanup")
         cfg.session_show_thinking = _flag(ses, "show_thinking", True, "session.show_thinking")
+        # f180 (Brad, 2026-11-15): the files menu's "text labels" setting (f178) is gone - the menu always shows its
+        # words. A value left in an older config file is ignored, said once.
+        if "files_menu_labels" in ses:
+            _note_retired("session.files_menu_labels", "the files menu always shows its labels (f180)")
         cfg.session_turn_summary = _flag(ses, "turn_summary", False, "session.turn_summary")
         cfg.session_review_files = _flag(ses, "review_files", True, "session.review_files")
         # D208's caps: missing or not a number = the default, never "no cap" by accident.

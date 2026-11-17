@@ -42,15 +42,17 @@ function shareForm(cid, share, label, slot) {
     current || 'No project assets folder set'), row];
 }
 
+// What a project assets folder is: the (i) beside "Project assets folder" in the profile editor (f184).
+export const SHARE_WHY = 'The topic\'s OneDrive folder that files cross through between this machine and the one you '
+  + 'drive a session from. It shows first in the Files tree, and the session can read and write it. One per topic, '
+  + 'kept on this machine only; choosing a folder saves it at once.';
+
 // Fills `slot` with the share control for one client. Nothing when the page has no proxy behind it.
 export async function fillShare(slot, cid, label) {
   try {
     const share = await getJSON(`/api/clients/${encodeURIComponent(cid)}/share`);
-    slot.replaceChildren(
-      h('p', { class: 'hint' }, `Project assets folder for ${label}: the OneDrive folder files cross through between this `
-        + 'machine and the one you drive a session from. It shows first in the Files tree, and the session '
-        + 'can read and write it. Kept on this machine only.'),
-      ...shareForm(cid, share, label, slot));
+    // f184: what the folder is lives in the (i) beside the block's label (SHARE_WHY), not a paragraph here.
+    slot.replaceChildren(...shareForm(cid, share, label, slot));
   } catch (error) {
     slot.replaceChildren();
   }

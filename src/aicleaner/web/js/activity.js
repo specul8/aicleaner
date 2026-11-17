@@ -46,7 +46,7 @@ function drop(key) {
 // The session the notice is about (D118). It was the page alone - "#/session" - so Open went to
 // the page without saying which session, and did nothing at all when that page was already open.
 function sessionHref(name) {
-  // `/chat`: straight down to its conversation, as "Start chatting" does (the user, 2026-10-06).
+  // `/chat`: straight down to its conversation (the user, 2026-10-06).
   return `#/session/${encodeURIComponent(name)}/chat`;
 }
 

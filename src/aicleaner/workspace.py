@@ -378,9 +378,22 @@ def home_of(workspaces: list[str], projects: list[str], override: str = "") -> d
     return {**derived, "derived": derived["folder"], "overridden": False}
 
 
-def profile_tree(workspaces: list[str], projects: list[str], allowed: list[Path] | None = None) -> list[str]:
-    """Every folder of every workspace file that exists and lies inside the allowed roots, then
-    the manual folders - in order, each once."""
+def _usable(folder: str | Path, allowed: list[Path]) -> bool:
+    """is_usable, False for a path that cannot even be read as one."""
+    from .folders import FolderError, is_usable
+
+    try:
+        return is_usable(folder, allowed)
+    except (FolderError, OSError, ValueError):
+        return False
+
+
+def profile_tree(workspaces: list[str], projects: list[str], allowed: list[Path] | None = None,
+                 home: str = "") -> list[str]:
+    """The home folder (f181), then every folder of every workspace file that exists and lies inside
+    the allowed roots, in each file's order, then the manual folders in their saved order (those too
+    inside the roots when any are set, D245) - each once. The home leads only when it is shown at
+    all: one of these, or a folder inside the allowed roots."""
     from .folders import is_usable
 
     out: list[str] = []
@@ -393,9 +406,36 @@ def profile_tree(workspaces: list[str], projects: list[str], allowed: list[Path]
         for _name, folder in workspace_folders(ws):
             if folder.is_dir() and allowed and is_usable(folder, allowed):
                 add(folder)
+    # D245: the profile's own folders were checked when saved, but the allowed folders can narrow since, and a
+    # tree root is a folder the session reaches - so they are held to the roots here too (when any are set).
     for folder in projects:
-        if str(folder).strip():
+        if str(folder).strip() and (not allowed or _usable(folder, allowed)):
             add(folder)
+    if str(home).strip():
+        shown = next((known for known in out if _same(known, home)), "")
+        if shown:
+            out.remove(shown)
+            out.insert(0, shown)
+        elif Path(home).is_dir() and allowed and is_usable(home, allowed):
+            out.insert(0, str(home))
+    return out
+
+
+def editor_order(workspaces: list[str], projects: list[str], home: str = "") -> list[str]:
+    """The order the profile editor lists its folders in (f181): the tree's order, without the
+    allowed-roots check (every folder named here was checked when it was saved)."""
+    out: list[str] = []
+
+    def add(folder: str | Path) -> None:
+        if str(folder).strip() and not any(_same(folder, known) for known in out):
+            out.append(str(folder))
+
+    add(home)
+    for ws in [w for w in workspaces if str(w).strip()]:
+        for _name, folder in workspace_folders(ws):
+            add(folder)
+    for folder in projects:
+        add(folder)
     return out
 
 
@@ -436,3 +476,390 @@ def write_new_workspace(path: str | Path, text: str) -> None:
         raise ValueError(f"{p.name} already exists; it is not replaced")
     _loads(text)                                 # proved readable before it is written
     p.write_text(text, encoding="utf-8")
+
+
+# ---- the home folder leads the workspace file (f181) --------------------------------------------
+#
+# Brad, 2026-11-15: the home folder is always the workspace file's first folder and its terminal
+# working directory, and the folders are in the order he sets. The file is JSON with comments
+# (JSONC) and it is the person's own, so it is never re-serialised: its folder entries are moved as
+# pieces of text, each with its own comments, and the one setting is replaced in place.
+
+class WorkspaceRewriteError(ValueError):
+    """A workspace file that was left alone, with why, for the person to read."""
+
+
+BACKUPS_KEPT = 10                    # per workspace file, in AI Cleaner's state folder
+
+
+def stamp_of(raw: bytes) -> str:
+    """What the file held when it was read, short: compared before it is written (changed on disk)."""
+    import hashlib
+
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def file_stamp(path: str | Path) -> str:
+    try:
+        return stamp_of(Path(path).read_bytes())
+    except OSError:
+        return ""
+
+
+def _tokens(text: str) -> list[tuple[str, int, int]]:
+    """The significant tokens of a JSONC text, (kind, start, end): kinds `{ } [ ] , :`, `str` and
+    `lit`. Whitespace and comments are skipped - they stay in the text between the tokens."""
+    out: list[tuple[str, int, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in " \t\r\n" or c == "﻿":
+            i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            j = text.find("*/", i + 2)
+            if j < 0:
+                raise ValueError("a comment is not closed")
+            i = j + 2
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            if j >= n:
+                raise ValueError("a string is not closed")
+            out.append(("str", i, j + 1))
+            i = j + 1
+        elif c in "{}[],:":
+            out.append((c, i, i + 1))
+            i += 1
+        else:
+            j = i
+            while j < n and text[j] not in ' \t\r\n{}[],:"/':
+                j += 1
+            if j == i:
+                raise ValueError(f"unexpected {c!r}")
+            out.append(("lit", i, j))
+            i = j
+    return out
+
+
+def _close(toks: list, i: int) -> int:
+    depth = 0
+    for k in range(i, len(toks)):
+        if toks[k][0] in "{[":
+            depth += 1
+        elif toks[k][0] in "}]":
+            depth -= 1
+            if depth == 0:
+                return k
+    raise ValueError("a bracket is not closed")
+
+
+def _value_end(toks: list, k: int) -> int:
+    return _close(toks, k) if toks[k][0] in "{[" else k
+
+
+def _members(text: str, toks: list, i: int) -> dict[str, tuple[int, int, int]]:
+    """An object's own members: key -> (key token, value's first token, value's last token)."""
+    end, k, out = _close(toks, i), i + 1, {}
+    while k < end:
+        if toks[k][0] == ",":
+            k += 1
+            continue
+        if toks[k][0] != "str" or k + 2 > end or toks[k + 1][0] != ":":
+            raise ValueError("not a JSON object")
+        last = _value_end(toks, k + 2)
+        out.setdefault(json.loads(text[toks[k][1]:toks[k][2]]), (k, k + 2, last))
+        k = last + 1
+    return out
+
+
+_SAME_LINE_NOTE = re.compile(r"[ \t]*(//[^\r\n]*|/\*.*?\*/)", re.S)
+
+
+def _array_pieces(text: str, toks: list, i: int) -> dict:
+    """The folders array as pieces: each element's leading text (whitespace and comments above it),
+    its body, and a note on its own line after it; the text before `]`, and whether the last element
+    has a trailing comma."""
+    end = _close(toks, i)
+    items, k = [], i + 1
+    while k < end:
+        if toks[k][0] == ",":
+            k += 1
+            continue
+        last = _value_end(toks, k)
+        items.append((k, last))
+        k = last + 1
+    leads: list[str] = []
+    bodies: list[str] = []
+    tails: list[str] = []
+    at = toks[i][2]
+    trailing = False
+    for index, (first, last) in enumerate(items):
+        lead = text[at:toks[first][1]]
+        if index:
+            note = _SAME_LINE_NOTE.match(lead)
+            if note:
+                tails[-1] += lead[:note.end()]
+                lead = lead[note.end():]
+        leads.append(lead)
+        bodies.append(text[toks[first][1]:toks[last][2]])
+        tails.append("")
+        if last + 1 < end and toks[last + 1][0] == ",":
+            at = toks[last + 1][2]
+            trailing = index == len(items) - 1
+        else:
+            at = toks[last][2]
+    closing = text[at:toks[end][1]]
+    if items:
+        note = _SAME_LINE_NOTE.match(closing)
+        if note:
+            tails[-1] += closing[:note.end()]
+            closing = closing[note.end():]
+    return {"leads": leads, "bodies": bodies, "tails": tails, "closing": closing,
+            "trailing": trailing, "start": toks[i][1], "end": toks[end][2]}
+
+
+def _new_body(template: str, rel: str, newline: str) -> str:
+    """A new folder entry written as the file writes its first one: on several lines, or on one."""
+    if "\n" in template:
+        inner = re.search(r"\n([ \t]*)\"", template)
+        outer = re.search(r"\n([ \t]*)\}\s*$", template)
+        return ("{" + newline + (inner.group(1) if inner else "  ") + '"path": ' + json.dumps(rel)
+                + newline + (outer.group(1) if outer else "") + "}")
+    return '{ "path": ' + json.dumps(rel) + " }"
+
+
+def unique_folders(folders: list[str]) -> list[str]:
+    """The folders in order, each once, blanks dropped."""
+    out: list[str] = []
+    for folder in folders:
+        if str(folder).strip() and not any(_same(folder, known) for known in out):
+            out.append(str(folder).strip())
+    return out
+
+
+def plan_order(entries: list[Path | None], folders: list[str]) -> list:
+    """The folders array's new content (f181, Brad 2026-11-15 19:35: the file's folder list is
+    exactly the editor's list): an existing element by its index - so its own text, name, comments
+    and relative path go with it - or a new folder by its path. A folder the list no longer has is
+    left out; an element that is not a folder entry at all is kept, after the folders."""
+    def find(folder: str) -> int | None:
+        return next((i for i, p in enumerate(entries) if p is not None and _same(p, folder)), None)
+
+    final: list = []
+    for folder in unique_folders(folders):
+        index = find(folder)
+        final.append(index if index is not None else folder)
+    return final + [i for i, p in enumerate(entries) if p is None]
+
+
+def reorder_within(full: list[str], shown: list[str]) -> list[str]:
+    """`full` with the folders that are in `shown` put in `shown`'s order, each in a place one of
+    them held; the rest (a folder the tree does not show - not on this disk, say) keep their places.
+    The first of `shown` then leads, since first place is the home (f181)."""
+    full = unique_folders(full)
+    shown = [f for f in unique_folders(shown) if any(_same(f, k) for k in full)]
+    queue = list(shown)
+    out = [queue.pop(0) if any(_same(f, s) for s in shown) else f for f in full]
+    if shown:
+        out = [shown[0]] + [f for f in out if not _same(f, shown[0])]
+    return out
+
+
+def _cwd_value(old: str, home_name: str, home: Path, file_dir: Path) -> str | None:
+    """The terminal working directory, pointing at the home in the form the file already uses; None
+    when the file's value is some other variable, which then decides nothing (D99) and stays."""
+    import os
+
+    if _FOLDER_REF.match(old):
+        value = "${workspaceFolder:" + home_name + "}"
+        if not _CWD_VALUE.match(value):
+            raise WorkspaceRewriteError(f"the folder name {home_name!r} cannot be written as the terminal's working directory")
+        return value
+    if "${" in old:
+        return None
+    if Path(old).is_absolute():
+        return str(home)
+    try:
+        return Path(os.path.relpath(home, file_dir)).as_posix()
+    except ValueError:
+        return str(home)
+
+
+def _holds_repos(file_dir: Path, entries: list[Path | None]) -> bool:
+    """The file's own folder holds folders the file lists (D131): a multi-repo parent."""
+    own = str(file_dir.resolve()).lower().rstrip("\\/")
+    return any(p is not None and str(p).lower().startswith(own + ("\\" if "\\" in own else "/"))
+               for p in entries)
+
+
+def lead_text(text: str, file_dir: Path, folders: list[str]) -> str:
+    """The workspace file's text with exactly these folders, in this order - the first is the home,
+    and the terminal working directory points at it when the file sets one - and nothing else
+    changed. No writing. WorkspaceRewriteError when it cannot be done safely."""
+    import os
+
+    folders = unique_folders(folders)
+    if not folders:
+        raise WorkspaceRewriteError("a workspace file needs at least one folder")
+    home = folders[0]
+
+    try:
+        toks = _tokens(text)
+        if not toks or toks[0][0] != "{":
+            raise ValueError("it is not a JSON object")
+        top = _members(text, toks, 0)
+    except ValueError as exc:
+        raise WorkspaceRewriteError(f"it could not be read ({exc})") from exc
+    if "folders" not in top or toks[top["folders"][1]][0] != "[":
+        raise WorkspaceRewriteError("it has no folders list")
+    pieces = _array_pieces(text, toks, top["folders"][1])
+    entries: list[Path | None] = []
+    names: list[str] = []
+    relative = not pieces["bodies"]
+    for body in pieces["bodies"]:
+        try:
+            value = _loads(body) if body.lstrip().startswith("{") else {}
+        except ValueError:
+            value = {}
+        raw = str(value.get("path", "")).strip()
+        entries.append(_resolve(file_dir, raw) if raw else None)
+        names.append(str(value.get("name") or "").strip())
+        if raw and not Path(raw).is_absolute():
+            relative = True
+    if _same(Path(home).resolve(), file_dir.resolve()) and _holds_repos(file_dir, entries):
+        raise WorkspaceRewriteError("the home folder is the folder that holds the workspace's repos, "
+                                    "which is never a home (D131)")
+    final = plan_order(entries, folders)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    leads = pieces["leads"]
+    found_lead = re.search(r"\r?\n[ \t]*$", leads[1] if len(leads) > 1 else (leads[0] if leads else ""))
+    default_lead = found_lead.group(0) if found_lead else (newline + "    ")
+    template = pieces["bodies"][0] if pieces["bodies"] else ""
+
+    def path_text(folder: str) -> str:
+        if relative:
+            try:
+                return Path(os.path.relpath(Path(folder), file_dir)).as_posix()
+            except ValueError:                   # another drive: it can only be written in full
+                pass
+        return str(Path(folder))
+
+    parts = ["["]
+    for k, item in enumerate(final):
+        if isinstance(item, int):
+            parts.append(leads[item] + pieces["bodies"][item])
+            tail = pieces["tails"][item]
+        else:
+            parts.append(default_lead + _new_body(template, path_text(item), newline))
+            tail = ""
+        if k < len(final) - 1 or pieces["trailing"]:
+            parts.append(",")
+        parts.append(tail)
+    parts.append(pieces["closing"] + "]")
+    new = text[:pieces["start"]] + "".join(parts) + text[pieces["end"]:]
+    # The terminal's working directory, in place, when the file sets one (D99 reads it before the
+    # first folder). With none, the first folder decides - which is now the home.
+    if "settings" in top and toks[top["settings"][1]][0] == "{":
+        toks2 = _tokens(new)
+        inner = _members(new, toks2, _members(new, toks2, 0)["settings"][1])
+        if CWD_KEY in inner and toks2[inner[CWD_KEY][1]][0] == "str":
+            value_tok = toks2[inner[CWD_KEY][1]]
+            old = str(json.loads(new[value_tok[1]:value_tok[2]]))
+            home_index = final[0] if isinstance(final[0], int) else None
+            home_name = (names[home_index] if home_index is not None else "") or Path(home).resolve().name
+            value = _cwd_value(old, home_name, Path(home), file_dir)
+            if value is not None and value != old:
+                new = new[:value_tok[1]] + json.dumps(value) + new[value_tok[2]:]
+    return new
+
+
+def glob_escape(text: str) -> str:
+    return re.sub(r"([*?\[])", r"[\1]", text)
+
+
+def _backup(path: Path, raw: bytes, backup_dir: Path) -> Path:
+    """A copy of the file as it was, in AI Cleaner's state folder - never beside it, where a repo
+    would pick it up. The newest BACKUPS_KEPT per file are kept."""
+    import time
+
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    target = backup_dir / f"{path.stem}.{stamp}{path.suffix}"
+    n = 1
+    while target.exists():
+        n += 1
+        target = backup_dir / f"{path.stem}.{stamp}-{n}{path.suffix}"
+    target.write_bytes(raw)
+    older = sorted(backup_dir.glob(f"{glob_escape(path.stem)}.*{path.suffix}"), key=lambda f: f.name)
+    for stale in older[:-BACKUPS_KEPT]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    return target
+
+
+def lead_with(path: str | Path, folders: list[str], *, expect: str = "",
+              backup_dir: str | Path | None = None, allowed: list[Path] | None = None) -> dict:
+    """Make this workspace file list exactly these folders, the first (the home) leading (f181).
+
+    {"changed": bool, "backup": path or ""}. Refused - WorkspaceRewriteError, the file untouched -
+    when it is outside the allowed folders, read-only, not readable as a workspace file, or changed
+    on disk since it was read (`expect`, the stamp the page was given; and again just before the
+    write). Backed up first; written to a temporary file beside it, proved, then moved over it.
+    """
+    import os
+
+    from .folders import is_usable
+
+    p = Path(path)
+    if allowed is not None and not is_usable(p.parent, allowed):
+        raise WorkspaceRewriteError(f"{p.parent} is outside the folders AI Cleaner may reach")
+    # D245: nor is a folder outside them ever written into the file - the file names what a session reaches.
+    for folder in unique_folders(folders) if allowed is not None else []:
+        if not _usable(folder, allowed):
+            raise WorkspaceRewriteError(f"{folder} is outside the folders AI Cleaner may reach, so it is not "
+                                        "written into the file")
+    try:
+        raw = p.read_bytes()
+    except OSError as exc:
+        raise WorkspaceRewriteError(f"it could not be read ({exc})") from exc
+    if expect and expect != stamp_of(raw):
+        raise WorkspaceRewriteError("it changed on disk since this page read it - reload the page and save again")
+    bom = raw.startswith(b"\xef\xbb\xbf")
+    try:
+        text = raw[3 if bom else 0:].decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise WorkspaceRewriteError("it is not UTF-8 text") from exc
+    new = lead_text(text, p.parent, folders)
+    home = unique_folders(folders)[0]
+    if new == text:
+        return {"changed": False, "backup": ""}
+    if not os.access(p, os.W_OK):
+        raise WorkspaceRewriteError("it is read-only")
+    tmp = p.with_name(p.name + ".aicleaner-tmp")
+    backup = None
+    try:
+        tmp.write_bytes((b"\xef\xbb\xbf" if bom else b"") + new.encode("utf-8"))
+        # Proved before it replaces anything: still a workspace file, and its home the one asked for.
+        _loads(new)
+        if not _same(derived_home([str(tmp)], [])["folder"], Path(home).resolve()):
+            raise WorkspaceRewriteError("the result would not make it the home folder")
+        if p.read_bytes() != raw:
+            raise WorkspaceRewriteError("it changed on disk while it was being rewritten - nothing was written")
+        backup = _backup(p, raw, Path(backup_dir)) if backup_dir else None
+        os.replace(tmp, p)
+    except (OSError, ValueError) as exc:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        if isinstance(exc, WorkspaceRewriteError):
+            raise
+        raise WorkspaceRewriteError(str(exc)) from exc
+    log.info("workspace file %s now leads with %s (backup %s)", p, home, backup)
+    return {"changed": True, "backup": str(backup) if backup else ""}

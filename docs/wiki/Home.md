@@ -24,6 +24,8 @@ This wiki describes what AI Cleaner does today (v0.9.165). The registers in the 
 | [Cloudflare tunnel](Cloudflare-Tunnel.md) | Deciding about remote access: what you get, why it is safe, what it needs |
 | [Moving DNS from cPanel](Repoint-DNS-cPanel.md) | Pointing a domain's DNS at Cloudflare without disturbing email or the website |
 | [Remote access](Remote-access.md) | Using AI Cleaner from another device, and the encrypted tunnel |
+| [Remote desktops](Remote-desktops.md) | A computer's Windows desktop in a browser tab: adding a computer, connecting |
+| [Add-ons](Add-ons.md) | Features installed separately that plug into AI Cleaner, and how they are checked |
 | [Sharing a topic with a team](Sharing.md) | One topic folder per engagement, in OneDrive |
 | [Security model](Security-model.md) | What is protected, what is not, and why |
 | [Architecture](Architecture.md) | How AI Cleaner is built: the stack, its parts, one request's path, where data lives, releases |

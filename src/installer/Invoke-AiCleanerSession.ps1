@@ -6,12 +6,15 @@
 .DESCRIPTION
     Talks to the AI Cleaner running on this machine (http://127.0.0.1:8787 by default) through its local API.
 
-    Run a prompt (-Session, -Prompt):
-      - the session is not running: it is started (a new conversation, titled -Title) and sent the prompt;
-      - it is running and in use - a turn running, a question waiting, prompts queued, or anything within the last
-        -IdleMinutes - the prompt is queued in it, so a conversation Brad has open is never switched away;
-      - it is running and idle: with -NewConversation a new conversation is started in it first; without, the prompt
-        goes into the open conversation.
+    Run a prompt (-Session, -Prompt) - D241, AI Cleaner 1.2.2:
+      - the session is running (idle or busy): the prompt goes into the conversation it has open - queued there when a
+        turn is running - and never into a new conversation, so a conversation Brad is in keeps its context;
+      - it is not running: it is started on a new conversation, titled -Title, and sent the prompt; once that work is
+        finished - the turn that answers it has ended, nothing else was queued after it, no question is waiting and no
+        background task of the session is still running - AI Cleaner stops the session again. AI Cleaner keeps that
+        "stop when done" itself, so it holds after this script has exited; anyone else's prompt into the session
+        meanwhile (Brad typing in that conversation), an interrupt or a stop cancels it, and the session stays running.
+        -LeaveRunning sends the prompt without it.
       A run that cannot start the session (the cap on sessions running at once, memory nearly full, AI Cleaner not
       answering) raises an amber alert saying so, unless -NoFailureAlert.
     Raise an alert (-Alert): a persistent alert on every AI Cleaner page and device until dismissed.
@@ -29,9 +32,12 @@
 .PARAMETER Title
     Title of a new conversation; {date} becomes today's date.
 .PARAMETER NewConversation
-    Start a new conversation when the session is running but idle (a stopped session always starts a new one).
+    Kept for compatibility (tasks registered before 1.2.2 pass it): a new conversation is started only when the session
+    is started, which is always so now. A running session always keeps its open conversation.
+.PARAMETER LeaveRunning
+    Leave a session this run started running when the work is done (by default it is stopped again).
 .PARAMETER IdleMinutes
-    A running session with anything in the last this-many minutes counts as in use. Default 30.
+    Kept for compatibility; no longer used (a running session, idle or not, gets the prompt in its open conversation).
 .PARAMETER NoFailureAlert
     Do not raise an alert when the run cannot reach or start the session.
 .PARAMETER Alert
@@ -52,7 +58,7 @@
     The alert id to dismiss.
 .PARAMETER RegisterTask
     Register (or update) the daily scheduled task that runs this script with -Session, -Prompt, -Title,
-    -NewConversation and -IdleMinutes.
+    -NewConversation, -LeaveRunning and -IdleMinutes.
 .PARAMETER UnregisterTask
     Remove the scheduled task named -TaskName.
 .PARAMETER TaskName
@@ -68,10 +74,10 @@
     the newest 30 kept); '' turns logging off.
 
 .EXAMPLE
-    .\Invoke-AiCleanerSession.ps1 -Session "BIOS - Accounting" -Prompt "run the due jobs" -Title "Scheduled - due jobs {date}" -NewConversation
+    .\Invoke-AiCleanerSession.ps1 -Session "BIOS - Accounting" -Prompt "run the due jobs" -Title "Scheduled - due jobs {date}"
 
 .EXAMPLE
-    .\Invoke-AiCleanerSession.ps1 -RegisterTask -Session "BIOS - Accounting" -Prompt "run the due jobs" -Title "Scheduled - due jobs {date}" -NewConversation -At 18:00
+    .\Invoke-AiCleanerSession.ps1 -RegisterTask -Session "BIOS - Accounting" -Prompt "run the due jobs" -Title "Scheduled - due jobs {date}" -At 18:00
 
 .EXAMPLE
     .\Invoke-AiCleanerSession.ps1 -Alert -AlertTitle "Daily close needs you" -SummaryFile .\summary.txt -Session "BIOS - Accounting" -Key daily-close-2026-11-04
@@ -80,7 +86,7 @@
     .\Invoke-AiCleanerSession.ps1 -Dismiss -Key daily-close-2026-11-04
 
 .NOTES
-    AI Cleaner feature 161, 2026-11-04. Windows PowerShell 5.1 or PowerShell 7. Runs as the user AI Cleaner runs as.
+    AI Cleaner feature 161, 2026-11-04; D241 (keep the open conversation, stop when done), 2026-11-14. Windows PowerShell 5.1 or PowerShell 7. Runs as the user AI Cleaner runs as.
     Exit codes: 0 done, 1 AI Cleaner not answering, 2 refused (the reason is printed and logged), 3 wrong parameters.
 #>
 #Requires -Version 5.1
@@ -91,6 +97,7 @@ param(
     [string]$Prompt = '',
     [string]$Title = '',
     [switch]$NewConversation,
+    [switch]$LeaveRunning,
     [ValidateRange(0, 1440)][int]$IdleMinutes = 30,
     [switch]$NoFailureAlert,
     [switch]$Alert,
@@ -245,25 +252,22 @@ function Get-SessionActivity {
     return $null
 }
 
-function Test-SessionInUse {
-    # In use: a turn running, a question waiting, prompts queued, or anything happened within the last IdleMinutes.
-    param($Activity, [int]$Minutes)
-    if ((Get-Field -Object $Activity -Name 'busy' -Default $false) -or ((Get-Field -Object $Activity -Name 'waiting' -Default 0) -gt 0) -or
-        ((Get-Field -Object $Activity -Name 'queued' -Default 0) -gt 0)) {
-        return $true
-    }
-    $lastAt = [double](Get-Field -Object $Activity -Name 'last_at' -Default 0)
-    if ($lastAt -le 0) { return $false }
-    $now = ([DateTimeOffset]::UtcNow).ToUnixTimeMilliseconds() / 1000.0
-    return (($now - $lastAt) -lt ($Minutes * 60))
+function Test-SessionBusy {
+    # Busy: a turn running, a question waiting or prompts queued - the prompt then waits its turn in the open conversation.
+    param($Activity)
+    return ((Get-Field -Object $Activity -Name 'busy' -Default $false) -or ((Get-Field -Object $Activity -Name 'waiting' -Default 0) -gt 0) -or
+        ((Get-Field -Object $Activity -Name 'queued' -Default 0) -gt 0))
 }
 
 function Send-Prompt {
-    # A freshly started session may take a moment before it takes input: tried for up to a minute.
-    param([string]$Api, [string]$Name, [string]$Text)
+    # A freshly started session may take a moment before it takes input: tried for up to a minute. StopWhenDone (D241):
+    # AI Cleaner stops the session once this prompt's work is done, unless someone else uses it meanwhile.
+    param([string]$Api, [string]$Name, [string]$Text, [bool]$StopWhenDone = $false)
+    $body = @{ name = $Name; text = $Text }
+    if ($StopWhenDone) { $body.stop_when_done = $true }
     $answer = $null
     for ($attempt = 1; $attempt -le 12; $attempt++) {
-        $answer = Invoke-AiCleanerApi -Api $Api -Method POST -Path '/api/session/prompt' -Body @{ name = $Name; text = $Text }
+        $answer = Invoke-AiCleanerApi -Api $Api -Method POST -Path '/api/session/prompt' -Body $body
         if ($answer.Ok) { return $answer }
         if ((Get-ErrorText $answer) -notmatch 'no session is running') { return $answer }
         Start-Sleep -Seconds 5
@@ -272,7 +276,7 @@ function Send-Prompt {
 }
 
 function Invoke-ScheduledRun {
-    param([string]$Api, [string]$Name, [string]$Text, [string]$RunTitle, [bool]$Fresh, [int]$Minutes, [bool]$AlertOnFailure)
+    param([string]$Api, [string]$Name, [string]$Text, [string]$RunTitle, [bool]$KeepRunning, [bool]$AlertOnFailure)
     $today = Get-Date -Format 'yyyy-MM-dd'
     Write-Step "Scheduled run for '$Name'"
     if (-not (Test-AiCleaner -Api $Api)) {
@@ -281,8 +285,12 @@ function Invoke-ScheduledRun {
     }
     $activity = Get-SessionActivity -Api $Api -Name $Name
     $running = ($null -ne $activity) -and (Get-Field -Object $activity -Name 'running' -Default $false)
+    $stopWhenDone = $false
     if (-not $running) {
-        Write-Detail 'Not running: starting it on a new conversation'
+        $stopWhenDone = -not $KeepRunning
+        $after = if ($stopWhenDone) { '; it is stopped again once the work is done' } else { '' }
+        Write-Detail "Not running: starting it on a new conversation$after"
+        if ($RunTitle) { Write-Detail "Title: $RunTitle" }
         $started = Invoke-AiCleanerApi -Api $Api -Method POST -Path '/api/session/start' -Body @{ name = $Name; title = $RunTitle }
         if (-not $started.Ok) {
             $why = Get-ErrorText $started
@@ -294,19 +302,13 @@ function Invoke-ScheduledRun {
             }
             return 2
         }
-    } elseif (Test-SessionInUse -Activity $activity -Minutes $Minutes) {
-        Write-Detail 'Running and in use: the prompt is queued in the open conversation'
-    } elseif ($Fresh) {
-        Write-Detail 'Running and idle: a new conversation first'
-        $switched = Invoke-AiCleanerApi -Api $Api -Method POST -Path '/api/session/switch' -Body @{ name = $Name; title = $RunTitle }
-        if (-not $switched.Ok) {
-            # Refused when work started in the meantime: the prompt then queues in the open conversation.
-            Write-Warning "No new conversation ($(Get-ErrorText $switched)); the prompt goes to the open one"
-        }
+    } elseif (Test-SessionBusy -Activity $activity) {
+        # D241: never a new conversation in a running session - Brad may be in the middle of it.
+        Write-Detail 'Running and busy: the prompt is queued in the open conversation'
     } else {
         Write-Detail 'Running and idle: the prompt goes to the open conversation'
     }
-    $sent = Send-Prompt -Api $Api -Name $Name -Text $Text
+    $sent = Send-Prompt -Api $Api -Name $Name -Text $Text -StopWhenDone $stopWhenDone
     if (-not $sent.Ok) {
         $why = Get-ErrorText $sent
         Write-Fail "The prompt was refused: $why"
@@ -317,6 +319,7 @@ function Invoke-ScheduledRun {
         return 2
     }
     Write-Done "Prompt $(Get-Field -Object $sent.Body -Name 'outcome' -Default 'sent') to '$Name'"
+    if ($stopWhenDone) { Write-Detail 'AI Cleaner stops the session once the work is done, unless someone uses it meanwhile' }
     return 0
 }
 
@@ -327,11 +330,13 @@ function Format-Quoted([string]$Text) {
 
 function Get-TaskArgument {
     # What the scheduled task passes back to this script: only the run parameters, quoted for the command line.
-    param([string]$ScriptPath, [string]$Api, [string]$Name, [string]$Text, [string]$RunTitle, [bool]$Fresh, [int]$Minutes)
+    param([string]$ScriptPath, [string]$Api, [string]$Name, [string]$Text, [string]$RunTitle, [bool]$Fresh, [bool]$KeepRunning,
+        [int]$Minutes)
     $parts = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Format-Quoted $ScriptPath),
         '-Session', (Format-Quoted $Name), '-Prompt', (Format-Quoted $Text), '-IdleMinutes', $Minutes)
     if ($RunTitle) { $parts += @('-Title', (Format-Quoted $RunTitle)) }
-    if ($Fresh) { $parts += '-NewConversation' }
+    if ($Fresh) { $parts += '-NewConversation' }                 # compatibility only (D241)
+    if ($KeepRunning) { $parts += '-LeaveRunning' }
     if ($Api -ne 'http://127.0.0.1:8787') { $parts += @('-BaseUrl', (Format-Quoted $Api)) }
     return ($parts -join ' ')
 }
@@ -441,13 +446,13 @@ try {
         if (-not $Session -or -not $Prompt) { Write-Fail '-RegisterTask needs -Session and -Prompt'; $exitCode = 3 }
         else {
             $argument = Get-TaskArgument -ScriptPath $PSCommandPath -Api $BaseUrl -Name $Session -Text $Prompt -RunTitle $Title `
-                -Fresh $NewConversation.IsPresent -Minutes $IdleMinutes
+                -Fresh $NewConversation.IsPresent -KeepRunning $LeaveRunning.IsPresent -Minutes $IdleMinutes
             $exitCode = Register-RunTask -Name $TaskName -Argument $argument -WorkFolder (Split-Path -Parent $PSCommandPath) -Time $At `
                 -Replace $Force.IsPresent -Description "AI Cleaner feature 161: sends '$Prompt' to the session '$Session'."
         }
     } elseif ($Session -and $Prompt) {
         $exitCode = Invoke-ScheduledRun -Api $BaseUrl -Name $Session -Text $Prompt -RunTitle $Title.Replace('{date}', (Get-Date -Format 'yyyy-MM-dd')) `
-            -Fresh $NewConversation.IsPresent -Minutes $IdleMinutes -AlertOnFailure (-not $NoFailureAlert)
+            -KeepRunning $LeaveRunning.IsPresent -AlertOnFailure (-not $NoFailureAlert)
     } else {
         Write-Fail 'Give -Session and -Prompt, or -Alert, -Dismiss, -RegisterTask or -UnregisterTask (Get-Help .\Invoke-AiCleanerSession.ps1 -Full)'
         $exitCode = 3

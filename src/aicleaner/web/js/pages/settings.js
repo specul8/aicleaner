@@ -15,7 +15,8 @@ import { arrangeSheet } from '../sheet.js';
 import { deviceName } from '../device.js';
 import { askAgainWhichDevice } from '../remotedesktop.js';
 
-const view = { main: null, ctx: null, config: null, host: null, cards: [], group: null, side: null };
+const view = { main: null, ctx: null, config: null, host: null, cards: [], group: null, side: null, addons: [],
+  addonsError: '' };
 
 // The groups down the left, in this order, and the cards in each, in this order (Brad, 2026-10-27:
 // "a sidebar of groups, like Windows Settings"). A card is named by its data-card key, which never
@@ -25,7 +26,7 @@ const view = { main: null, ctx: null, config: null, host: null, cards: [], group
 // is a filtering choice first, so it lives in Filtering and keeps its red state there.
 const GROUPS = [
   { key: 'aicleaner', label: 'aicleaner',
-    cards: ['setup', 'updates', 'service', 'restart', 'contact', 'feedback', 'menu-layout', 'importexport'] },
+    cards: ['setup', 'updates', 'service', 'restart', 'contact', 'feedback', 'menu-layout', 'importexport', 'addons'] },
   // Feature 163 (Brad, 2026-11-05): a subheading of its own for how the page behaves for the person reading it.
   { key: 'accessibility', label: 'Accessibility', cards: ['animations'] },
   { key: 'sessions', label: 'Sessions', cards: ['session', 'editor', 'autocorrect', 'highlight', 'notifications'] },
@@ -54,6 +55,7 @@ const BUILTIN_WORDS = {
   'menu-layout': ['navigation', 'sidebar', 'top bar', 'menu position'],
   animations: ['motion', 'reduced motion', 'animation effects', 'pulse', 'highlight', 'smooth scroll'],
   importexport: ['backup', 'restore', 'migrate', 'transfer', 'download'],
+  addons: ['add-on', 'addon', 'plugin', 'extension', 'private'],
   session: ['chat sessions', 'project sessions', 'conversations', 'claude code', 'permissions', 'profiles'],
   editor: ['code editor', 'monaco', 'minimap', 'completion', 'suggestions', 'markdown preview'],
   autocorrect: ['spelling', 'spell check', 'typos', 'replacements', 'dictionary'],
@@ -88,9 +90,14 @@ const BUILTIN_WORDS = {
   uninspected: ['unchecked', 'non-JSON', 'endpoints', 'paths not filtered', 'allow list'],
 };
 
+// f185: an add-on's card says which group it belongs in and brings its own words (addon.json).
+const ADDON_CARDS = new Map();
+
 function groupOf(cardKey) {
   const found = GROUPS.find((group) => group.cards.includes(cardKey));
-  return found ? found.key : FALLBACK_GROUP;
+  if (found) return found.key;
+  const addon = ADDON_CARDS.get(cardKey);
+  return addon && GROUPS.some((group) => group.key === addon.group) ? addon.group : FALLBACK_GROUP;
 }
 
 function groupLabel(groupKey) {
@@ -151,7 +158,7 @@ function ownWords(cardKey) {
 }
 
 function builtinWords(cardKey) {
-  return BUILTIN_WORDS[cardKey] || [];
+  return BUILTIN_WORDS[cardKey] || (ADDON_CARDS.get(cardKey) || {}).words || [];
 }
 
 // Every word typed has to be on the card or in one of its keywords, in any order. Returns null for
@@ -474,7 +481,10 @@ function paintCards() {
     toolsCard(s), routingCard(), restartCard(),
     view.config.windows ? serviceCard() : null,    // feature 107: shown remotely too, locked there
     updatesCard(s), feedbackCard(),
-    foldersCard(s), remoteDesktopCard(s), scanMarkersCard(s),
+    foldersCard(s), remoteDesktopCard(s),
+    // f185: each loaded add-on's cards (its own module draws them), and the list of add-ons when any are registered.
+    ...addonCards(), addonsCard(),
+    scanMarkersCard(s),
     uninspectedCard(view.config.allow_non_json_paths), importExportCard(status), publicListCard(),
     contactCard(status.contact), editorCard(s), autocorrectCard(s), voiceCard(s), diagnosticsCard(s, status),
     advancedCard(status, view.config, view.config.dialects || []),
@@ -487,6 +497,63 @@ function paintCards() {
   view.cards = [...everyday, ...dangerous].filter(Boolean);   // a card with nothing to show is null
   for (const section of view.cards) paintWords(section);
   placeCards();
+}
+
+// f185: an add-on's card. A stand-in first (the page is drawn at once), then the add-on's own module - served by AI
+// Cleaner from the add-on's verified release - draws the card and takes the stand-in's place. It is given what the
+// built-in cards use, so it imports nothing from the page itself.
+function addonCards() {
+  const cards = [];
+  for (const addon of view.addons) {
+    for (const spec of addon.cards || []) {
+      if (!spec.key || BUILTIN_WORDS[spec.key]) continue;      // never in place of a built-in card
+      ADDON_CARDS.set(spec.key, spec);
+      const stand = h('section', { class: 'card addon-card', dataset: { card: spec.key, addon: addon.name } },
+        h('h2', {}, spec.title || addon.title), h('p', { class: 'hint' }, 'Loading...'));
+      cards.push(stand);
+      if (spec.style && !document.querySelector(`link[data-addon-style="${spec.style}"]`)) {
+        document.head.append(h('link', { rel: 'stylesheet', href: spec.style, dataset: { addonStyle: spec.style } }));
+      }
+      import(spec.module).then((module) => {
+        const drawn = module.card({ remote: Boolean(view.config.remote), localOnly: LOCAL_ONLY, adminCommandNote,
+          getJSON, postJSON, say, sayError, h, base: `/api/addons/${addon.name}` });
+        drawn.classList.add('addon-card');
+        drawn.dataset.card = spec.key;
+        drawn.dataset.addon = addon.name;
+        drawn.hidden = stand.hidden;
+        stand.replaceWith(drawn);
+        view.cards = view.cards.map((section) => (section === stand ? drawn : section));
+        paintWords(drawn);
+      }).catch((error) => {
+        stand.querySelector('p.hint').textContent = `The ${addon.title} add-on's card could not be drawn: ${error.message || error}`;
+      });
+    }
+  }
+  return cards;
+}
+
+// The add-ons listed in AI Cleaner's registry, with each one's version and whether it loaded. Shown only when there
+// are any: with none, nothing on this page says add-ons exist.
+function addonsCard() {
+  if (!view.addons.length && !view.addonsError) return null;
+  const chip = (addon) => {
+    if (addon.state === 'loaded' && !addon.error) return 'ok';
+    return addon.state === 'disabled' ? '' : 'bad';
+  };
+  const rows = view.addons.map((addon) => h('tr', { dataset: { addon: addon.name } },
+    h('td', {}, addon.title || addon.name, h('div', { class: 'muted small mono' }, addon.name)),
+    h('td', {}, addon.version || ''),
+    h('td', {}, h('span', { class: `chip ${chip(addon)}` }, addon.state)),
+    h('td', { class: 'muted' }, addon.error || '')));
+  return card('addons', 'Add-ons',
+    'Features installed separately and loaded into AI Cleaner from aicleaner-addons.json in its folder, each checked '
+    + 'against its release before it runs. Each add-on\'s own installer adds, updates, turns off or removes it.',
+    // D247: a registry that cannot be read or is not sealed by an installer loads nothing - and says why here.
+    [view.addonsError ? h('p', { class: 'callout addons-error' }, h('b', {}, 'No add-on was loaded: '), view.addonsError)
+      : null,
+    h('table', { class: 'addons-list' },
+      h('thead', {}, h('tr', {}, h('th', {}, 'Add-on'), h('th', {}, 'Version'), h('th', {}, 'State'), h('th', {}, ''))),
+      h('tbody', {}, ...rows))], null);
 }
 
 // Where the menu sits (the user, 2026-10-15: moved here from the header's display button). A choice
@@ -1588,8 +1655,22 @@ function askService(on) {
   });
 }
 
+// D239: AI Cleaner run as the start-up task with nobody signed in has no desktop to show an administrator prompt on,
+// so the server answers with the command to run by hand. Shown under the card's controls, with Copy.
+export function adminCommandNote(slot, error) {
+  if (!error || !error.command) { slot.replaceChildren(); return false; }
+  const copy = h('button', { type: 'button', class: 'link admin-command-copy' }, 'Copy');
+  copy.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(error.command); say('Copied.', 'ok'); } catch (e) { sayError(e); }
+  });
+  slot.replaceChildren(h('div', { class: 'callout warn admin-command' },
+    h('p', {}, error.message), h('pre', { class: 'mono admin-command-text' }, error.command), copy));
+  return true;
+}
+
 function serviceCard() {
   const remote = Boolean(view.config.remote);
+  const manual = h('div', { class: 'service-manual' });
   const status = h('p', { class: 'service-status' }, 'Checking...');
   const box = h('input', { type: 'checkbox', name: 'run_as_service', disabled: true });
   const label = h('label', { class: 'check' }, box, ' ', 'Start AI Cleaner when this computer starts, before anyone signs in');
@@ -1627,25 +1708,29 @@ function serviceCard() {
   const load = () => getJSON('/api/service').then(show)
     .catch((error) => { status.textContent = `Could not check: ${error.message || error}`; });
   const ask = async (on) => {
+    manual.replaceChildren();
     const result = await postJSON('/api/service', { on });
     say(result.said, 'ok');
-    status.textContent = on ? 'Waiting for the administrator prompt and your password on this machine...'
-      : 'Waiting for the administrator prompt on this machine...';
+    const where = /your desktop/.test(result.said || '') ? 'on your desktop' : 'on this machine';
+    status.textContent = on ? `Waiting for the administrator prompt and your password ${where}...`
+      : `Waiting for the administrator prompt ${where}...`;
   };
+  // Nobody signed in (D239): the command is shown instead of a toast that would vanish.
+  const failed = (error) => { if (!adminCommandNote(manual, error)) sayError(error); };
   box.addEventListener('change', async () => {
     const on = box.checked;
     box.checked = !on;                   // stays as it was until the change is confirmed
     if (!(await askService(on))) return;
     box.checked = on;
-    try { await ask(on); } catch (error) { box.checked = !on; sayError(error); }
+    try { await ask(on); } catch (error) { box.checked = !on; failed(error); }
   });
   again.addEventListener('click', async () => {
-    try { await ask(true); } catch (error) { sayError(error); }
+    try { await ask(true); } catch (error) { failed(error); }
   });
   load();
   const section = card('service', 'Start with the computer',
     'Normally AI Cleaner starts when you sign in. It can start with the computer instead, before anyone signs in, still as you - so remote access works after a reboot. Changed on this machine only: Windows asks for administrator and your password.',
-    [status, h('div', { class: 'form-row' }, label), elevated, problem, resave, h('div', { class: 'form-row' }, again)], null);
+    [status, h('div', { class: 'form-row' }, label), elevated, problem, resave, h('div', { class: 'form-row' }, again), manual], null);
   if (remote) {
     section.classList.add('local-only');
     section.title = LOCAL_ONLY;
@@ -1946,6 +2031,15 @@ export async function render(main, ctx) {
   } catch (error) {
     sayError(error);
     return;
+  }
+  // f185: the add-ons AI Cleaner loaded - none listed, none shown (an older AI Cleaner, or an error: none either).
+  try {
+    const listed = await getJSON('/api/addons');
+    view.addons = listed.addons || [];
+    view.addonsError = listed.problem || '';     // D247: not `error`, which getJSON would throw on
+  } catch (error) {
+    view.addons = [];
+    view.addonsError = '';
   }
   // One column of cards beside the groups. Two columns were tried for the whole page; with a
   // group open there are two to eight cards, read top to bottom, and the wide ones (the AI tools

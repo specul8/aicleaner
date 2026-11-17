@@ -56,6 +56,10 @@ log = logging.getLogger("aicleaner.session")
 SHELL_TOOLS = frozenset({"Bash", "PowerShell"})
 SHELL_TASK_TYPES = frozenset({"local_bash"})
 ANSWER_SETTLE_S = 3.0
+# D241 (Brad, 2026-11-14): a scheduled prompt that started its session stops it once the work is done. How long the
+# session must stay done - turn ended, nothing queued, no question, no background task - before it is stopped: a
+# background task the turn started is listed a moment after its `result`, and a person may be about to type.
+STOP_WHEN_DONE_GRACE_S = 10.0
 # A picture with a prompt that has to wait is saved at once under the session's state folder, for Claude to Read when
 # the prompt is handed over between tool calls; kept a day.
 ATTACHED_KEEP_S = 24 * 60 * 60
@@ -473,6 +477,13 @@ def file_kind(name: str) -> tuple[str, str]:
     return kind, "download"
 
 
+def created_time(stat: os.stat_result) -> float:
+    """When a file was made (f180's file-tab info line): its birth time where the system keeps one (Python 3.12+ on
+    Windows and macOS), else st_ctime - which on Windows is the creation time and elsewhere the last metadata change."""
+    born = getattr(stat, "st_birthtime", None)
+    return float(born) if born else float(stat.st_ctime)
+
+
 def inline_type(name: str) -> str:
     """The Content-Type for showing a file in the page, or "" when it must not be shown inline."""
     suffix = Path(name).suffix.lower()
@@ -680,6 +691,10 @@ class Profile:
     worktree: dict[str, str] = field(default_factory=dict)
     # The AI service its conversations use (item K): claude, copilot or codex.
     agent: str = "claude"
+    # f185: a session an add-on made (addons.py) - the add-on's name, and the group the Session page lists it under.
+    # Never counted against session.max_running: the add-on keeps its own limit.
+    addon: str = ""
+    group: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {"name": self.name, "client": self.client, "label": self.label or self.name,
@@ -687,7 +702,8 @@ class Profile:
                 "share": str(self.share) if self.share else "",
                 "workspaces": [str(w) for w in self.workspaces], "home_override": self.home_override,
                 "homes_before": list(self.homes_before), "agent": self.agent,
-                "worktree_of": self.worktree_of, "worktree": dict(self.worktree)}
+                "worktree_of": self.worktree_of, "worktree": dict(self.worktree),
+                "addon": self.addon, "group": self.group}
 
 
 @dataclass
@@ -853,6 +869,13 @@ class Session(_FindsClaude):
         # True while a re-attached broker replays what it kept (D179): a turn ending in the replay is
         # history, so it sends nothing; the end of the replay decides.
         self._replaying = False
+        # D241: stop this session once the scheduled prompt's work is done - armed by a prompt sent with
+        # stop_when_done, cancelled by anyone else's prompt, an interrupt, a stop or a new start. `on_done` is the
+        # host's stop (titled as any stop); without a host, the session stops itself.
+        self.stop_when_done = False
+        self._stop_after_turns = 0
+        self._done_check: asyncio.Task | None = None
+        self.on_done: Any = None
 
     # ---- what the UI asks for ---------------------------------------------------------
 
@@ -869,7 +892,8 @@ class Session(_FindsClaude):
                 "review_n": self.review_n, "reviews": list(self.reviews)[-5:],
                 # For a scheduled run (feature 161): prompts waiting their turn, and when anything last happened.
                 "queued": len(self.queued),
-                "last_at": (self.events[-1].get("at") or 0.0) if self.events else 0.0}
+                "last_at": (self.events[-1].get("at") or 0.0) if self.events else 0.0,
+                "stop_when_done": self.stop_when_done}         # D241: it stops itself once the scheduled work is done
 
     def mark_seen(self, turns: int) -> None:
         """A page looked at this session with `turns` finished (D200). Only moves forward, and never
@@ -956,6 +980,7 @@ class Session(_FindsClaude):
             "switch_blocked": work_in_progress(self) if self.running else "",
             "doing": self.doing,
             "queued": self.queued_view(),
+            "stop_when_done": self.stop_when_done,     # D241
             "events": list(self.events),
             "error": self.last_error,
         }
@@ -1091,6 +1116,10 @@ class Session(_FindsClaude):
         self.last_error = ""
         self._briefed = False
         self._replaying = False
+        # A new process has no turn running. A process that died mid-turn with its output closed before its exit was
+        # known never sent `exited`, so `busy` stayed set and the next start looked busy for ever (found 2026-11-14).
+        self.busy = False
+        self.cancel_stop_when_done("a new start")       # D241: armed only by the prompt that follows a start
         self.project = str(folder)
         self.started_at = time.time()
         command = self._command(folder, resume, model)
@@ -1293,9 +1322,11 @@ class Session(_FindsClaude):
 
         target = self.locate_file(root, path)
         kind, view = file_kind(target.name)
+        # f180: an empty file of any type is text to a double-click in the tree - it opens in a tab to be written in.
+        empty = target.stat().st_size == 0
         if kind != "other" or view != "download":
-            return {"text": False, "known": True}
-        return {"text": sniff_file(target) is not None, "known": False}
+            return {"text": False, "known": True, "empty": empty}
+        return {"text": sniff_file(target) is not None, "known": False, "empty": empty}
 
     def read_file(self, root: str, path: str, as_text: bool = False) -> dict[str, Any]:
         """What a file tab shows (DECISIONS 50): its text when it is text and small enough, and
@@ -1310,8 +1341,12 @@ class Session(_FindsClaude):
         stat = target.stat()
         kind, view = file_kind(target.name)
         answer: dict[str, Any] = {"name": target.name, "path": path, "root": root, "size": stat.st_size,
-                                  "modified": stat.st_mtime, "read_at": time.time(), "kind": kind, "view": view}
+                                  "created": created_time(stat), "modified": stat.st_mtime, "read_at": time.time(),
+                                  "kind": kind, "view": view}
         encoding = sniff_file(target) if kind == "other" and view == "download" else None
+        # f180: an empty file asked for as text is text, whatever its type says (a double-click opens it to write in).
+        if as_text and stat.st_size == 0 and view != "text":
+            view, encoding = "download", "utf-8"
         if view == "download" and not (as_text and encoding):
             return {**answer, "download_only": True, **({"text_ok": bool(encoding)} if kind == "other" else {})}
         if view == "download":
@@ -1467,10 +1502,12 @@ class Session(_FindsClaude):
             raise SessionError("no project folders are configured (session.projects)")
         return SearchWalk(needle, self._allowed_roots(share)[1])
 
-    async def prompt(self, text: str, images: list[dict[str, str]] | None = None) -> str:
+    async def prompt(self, text: str, images: list[dict[str, str]] | None = None,
+                     mark: dict[str, Any] | None = None, stop_when_done: bool = False) -> str:
         """Send one user message; the reply arrives as events. While a turn is running it waits
         in `queued` instead (D176) and goes when the turn ends. Returns "sent" or "queued".
-        `images`: pictures attached on the page (D216), already checked (promptpictures.checked)."""
+        `images`: pictures attached on the page (D216), already checked (promptpictures.checked).
+        `stop_when_done` (D241): stop the session once this prompt's work is done; any other prompt cancels that."""
         if not self.running or self._process is None or self._process.stdin is None:
             raise SessionError("no session is running")
         images = list(images or [])
@@ -1483,8 +1520,15 @@ class Session(_FindsClaude):
         if images and self.agent != "claude":
             raise SessionError("pictures can be attached in a Claude Code session only - remove them, or choose "
                                "Convert to text under Settings, Pictures, On the Session page")
+        if stop_when_done:
+            self.stop_when_done = True
+            self._stop_after_turns = self.turns     # done once a turn ends after this one is sent
+        else:
+            self.cancel_stop_when_done("another prompt")    # Brad (or anyone) is using it: it stays running
         if self.busy:
             item: dict[str, Any] = {"id": uuid.uuid4().hex[:12], "text": text, "at": time.time(), "held": False}
+            if mark:
+                item["from"] = dict(mark)        # f185: a message from someone else (an add-on's), drawn as one
             if images:
                 item["images"] = images          # kept with it in queued.json, across a proxy restart
                 # D233: saved at once, so the prompt need not wait for the turn's end - at the next slot Claude is
@@ -1495,8 +1539,52 @@ class Session(_FindsClaude):
             self.queued.append(item)
             self._queue_changed()
             return "queued"
-        await self._send(text, images)
+        await self._send(text, images, mark)
         return "sent"
+
+    # ---- D241: stop once the scheduled prompt's work is done -----------------------------------------
+
+    def cancel_stop_when_done(self, why: str) -> None:
+        """Someone else is using this session (or it stopped, or started afresh): it is not stopped for them."""
+        if self.stop_when_done:
+            log.info("%s: stop-when-done cancelled (%s)", self.profile.name if self.profile else "a session", why)
+        self.stop_when_done = False
+        check = self._done_check
+        self._done_check = None
+        if check is not None and not check.done() and check is not _current_task():
+            check.cancel()
+
+    def _work_done(self) -> bool:
+        """The armed prompt has been answered and nothing is left: no turn, nothing queued, no question waiting, no
+        background task (D202) still running."""
+        return (self.stop_when_done and self.running and self.turns > self._stop_after_turns and not self.busy
+                and not self.queued and not self.pending and not self.background)
+
+    def _check_done_soon(self) -> None:
+        """A turn ended or the background list emptied: if the work is done, stop after the grace - checked again then,
+        since a background task or a person's prompt may have arrived meanwhile."""
+        if not self._work_done() or (self._done_check is not None and not self._done_check.done()):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._done_check = loop.create_task(self._stop_if_done())
+
+    async def _stop_if_done(self) -> None:
+        await asyncio.sleep(STOP_WHEN_DONE_GRACE_S)
+        if not self._work_done():
+            return                       # more work arrived; the next turn's end or background change asks again
+        self.stop_when_done = False
+        name = self.profile.name if self.profile else "a session"
+        log.info("%s: the scheduled work is done - stopping the session (stop-when-done)", name)
+        try:
+            if self.on_done is not None:
+                await self.on_done(self)
+            else:
+                await self.stop("scheduled-done")
+        except Exception as exc:  # noqa: BLE001 - said in the log; the session is left running
+            log.warning("%s: stopping after the scheduled work failed: %s", name, exc)
 
     def queued_view(self) -> list[dict[str, Any]]:
         """The waiting prompts as the page sees them: a picture by its name, never its bytes (D216), nor where it was
@@ -1594,6 +1682,8 @@ class Session(_FindsClaude):
             if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("id"):
                 kept = {"id": str(item["id"]), "text": item["text"],
                         "at": float(item.get("at") or 0), "held": bool(item.get("held"))}
+                if isinstance(item.get("from"), dict):
+                    kept["from"] = item["from"]
                 if item.get("images"):
                     # Checked again: the file is on disk, and a picture the API would refuse costs the turn (D216).
                     try:
@@ -1612,6 +1702,7 @@ class Session(_FindsClaude):
         found = [item for item in self.queued if item["id"] == item_id]
         if not found:
             raise SessionError("that prompt is no longer waiting")
+        self.cancel_stop_when_done("a waiting prompt cancelled")     # D241: someone is at the session
         self.queued = [item for item in self.queued if item["id"] != item_id]
         self._queue_changed()
         self._remove_pictures(list(found[0].get("paths") or []))       # D233: nobody will read them now
@@ -1637,6 +1728,7 @@ class Session(_FindsClaude):
             return "already_sent"
         if not found:
             raise SessionError("that prompt is no longer waiting")
+        self.cancel_stop_when_done("Send now")          # D241: someone is at the session
         if self.busy and self.pending:
             # Interrupting now would reject the open question, and with it whatever has been chosen so far.
             raise SessionError("a question is waiting for an answer - answer or decline it first, then Send now; "
@@ -1728,7 +1820,8 @@ class Session(_FindsClaude):
             self._queue_changed()
             for item in taken:
                 self._emit({"type": "prompt", "text": item["text"], "between_tools": True,
-                            **({"images": names(item["images"])} if item.get("images") else {})})
+                            **({"images": names(item["images"])} if item.get("images") else {}),
+                            **({"from": item["from"]} if item.get("from") else {})})
         return [self._handed_over(item) for item in taken]
 
     def _flush_soon(self) -> None:
@@ -1758,7 +1851,7 @@ class Session(_FindsClaude):
         images = [picture for item in items for picture in item.get("images") or []]
         self._recently_sent.extend(item["id"] for item in items)
         try:
-            await self._send(text, images or None)
+            await self._send(text, images or None, next((i["from"] for i in items if i.get("from")), None))
         except (SessionError, OSError) as exc:
             # Put back rather than lost: it is still on screen, and Send now can try again.
             self.queued[0:0] = [{**item, "held": True} for item in items]
@@ -1773,7 +1866,8 @@ class Session(_FindsClaude):
         pictures = [p for item in [*items, nxt] for p in item.get("images") or []]
         return len(pictures) <= MAX_COUNT and sum(len(p.get("data", "")) for p in pictures) <= MAX_TOTAL
 
-    async def _send(self, text: str, images: list[dict[str, str]] | None = None) -> None:
+    async def _send(self, text: str, images: list[dict[str, str]] | None = None,
+                    mark: dict[str, Any] | None = None) -> None:
         if not self.running or self._process is None or self._process.stdin is None:
             raise SessionError("no session is running")
         sent = text
@@ -1794,14 +1888,17 @@ class Session(_FindsClaude):
             content.append({"type": "text", "text": sent})
         # Not with a slash command: sent as typed, or the CLI does not recognise it as one (the user,
         # 2026-10-18: /ralph-loop:help arrived as an ordinary message with the note after it).
-        if self.origin and not text.lstrip().startswith("/"):
+        # A message from someone else (an add-on's prompt, carries a `mark`) always says where it came from, even if it
+        # starts with "/" (security review, 2026-11-14): text from outside must never run as an unmarked command.
+        if self.origin and (mark or not text.lstrip().startswith("/")):
             # Where it was typed (origin.py, 2026-10-18): a block of its own, left out of the page's view.
             content.append({"type": "text", "text": self.origin})
         message = {"type": "user", "message": {"role": "user", "content": content}}
         self._process.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8"))
         await self._process.stdin.drain()
         # The page hears the pictures' names, never their bytes: the event is kept and polled.
-        self._emit({"type": "prompt", "text": text, **({"images": names(images)} if images else {})})
+        self._emit({"type": "prompt", "text": text, **({"images": names(images)} if images else {}),
+                    **({"from": dict(mark)} if mark else {})})
 
     async def interrupt(self, cancel_queued: bool = True) -> None:
         """Stop the turn that is running, and keep the session alive.
@@ -1827,6 +1924,7 @@ class Session(_FindsClaude):
         then cut the turn off a few seconds later with nothing on the page to say why - which
         looked exactly like a dropped connection. The late answer is now reported when it lands.
         """
+        self.cancel_stop_when_done("interrupted")       # D241: Escape means someone is at the session
         if self._interrupt_pending is not None and not self._interrupt_pending.done():
             return "pending"
         try:
@@ -1958,6 +2056,7 @@ class Session(_FindsClaude):
         """Stop's work. Returns how it ended - "graceful" (it left within the wait), "killed", or "" when there
         was nothing running."""
         process, self._process = self._process, None
+        self.cancel_stop_when_done("stopped")
         if self._reader is not None:
             self._reader.cancel()
             self._reader = None
@@ -2195,8 +2294,12 @@ class Session(_FindsClaude):
                 self._flush_soon()             # the next waiting prompt, if any (D176)
                 if self.on_reply is not None:
                     self.on_reply(self)        # a new conversation's title (E3 part 10)
+                self._check_done_soon()        # D241: a scheduled prompt's work may be done
         elif event.get("type") in ("exited", "stopped"):
             self.busy = False
+        if event.get("type") == "system" and event.get("subtype") == "background_tasks_changed" \
+                and not event.get("tasks") and not self._replaying:
+            self._check_done_soon()            # D241: the last background task ended
         if not self._replaying:
             try:
                 self._note_review(event)
@@ -2360,6 +2463,14 @@ SWITCH_FINISH_MESSAGE = ("Please finish what you are doing now - wrap up and sto
 SWITCH_FINISH_WAIT_S = 2 * 60 * 60
 
 
+def _current_task() -> "asyncio.Task | None":
+    """The task running now, or None outside a running loop."""
+    try:
+        return asyncio.current_task()
+    except RuntimeError:
+        return None
+
+
 def switch_ready(session: Any) -> bool:
     """Nothing in progress, background tasks included: a switch asked to wait for a wrap-up goes now."""
     return not work_in_progress(session) and not getattr(session, "background", 0)
@@ -2479,8 +2590,16 @@ class SessionHost(_FindsClaude):
                           permission_mode=self.permission_mode, approve_timeout_s=self.approve_timeout_s,
                           approve_url=self.approve_url, profile=profile, sessions_dir=self.sessions_dir,
                           thinking_display=self.thinking_display)
+        session.on_done = self._stop_when_done        # D241: stopped through the host, titled as any stop
         self.sessions[profile.name] = session
         return session
+
+    async def _stop_when_done(self, session: "Session") -> None:
+        """D241: a scheduled prompt's work is done - the session it started is stopped."""
+        if session.profile is not None and self.sessions.get(session.profile.name) is session:
+            await self.stop(session.profile.name, reason="scheduled-done")
+        else:
+            await session.stop("scheduled-done")
 
     # ---- surviving a proxy restart (DECISIONS 49) ----------------------------------------
 
@@ -2642,9 +2761,15 @@ class SessionHost(_FindsClaude):
         cache[key] = (now, value)
         return copy.deepcopy(value)
 
+    def forget_roots(self) -> None:
+        """Every profile's tree and home worked out afresh (f181): a workspace file AI Cleaner has just
+        rewritten changes them without changing anything the cache is keyed on."""
+        self.__dict__.pop("_roots_cache", None)
+
     def tree_of(self, profile: Profile) -> list[str]:
-        """The folders a profile's file tree shows (D99): every folder of every workspace file,
-        then the manual folders, each once. Best effort - a workspace file must never cost the page."""
+        """The folders a profile's file tree shows (D99): the home folder (f181), then every folder of
+        every workspace file in its order, then the manual folders in theirs, each once. Best effort - a
+        workspace file must never cost the page."""
         return self._cached_roots("tree", profile, lambda: self._tree_of(profile))
 
     def _tree_of(self, profile: Profile) -> list[str]:
@@ -2652,10 +2777,16 @@ class SessionHost(_FindsClaude):
 
         folders = [str(p) for p in profile.projects]
         try:
-            return profile_tree(self.workspaces_of(profile), folders, self.allowed_roots())
+            home = str(self.home_of(profile).get("folder") or "")
+            return profile_tree(self.workspaces_of(profile), folders, self.allowed_roots(), home)
         except Exception as exc:  # noqa: BLE001 - a hint, never a failure
             log.debug("tree roots for %s: %s", profile.name, exc)
-            return folders
+            # D245: the fallback answers to the allowed folders as the tree does.
+            try:
+                roots = self.allowed_roots()
+            except Exception:  # noqa: BLE001 - no roots known: the profile's own folders, as before
+                roots = []
+            return profile_tree([], folders, roots)
 
     def home_of(self, profile: Profile) -> dict[str, Any]:
         """Where this profile's work is homed (D99): derived from the first workspace file, or the
@@ -2761,8 +2892,9 @@ class SessionHost(_FindsClaude):
             if not resume or resume == existing.session_id:
                 return existing.state()
             raise SessionError(f"{profile.name} is already running a different conversation; stop it first")
-        running = sum(1 for s in self.sessions.values() if s.running)
-        if self.max_running and running >= self.max_running:      # 0 = no cap (2026-10-16)
+        # An add-on's sessions (f185) have the add-on's own limit and never count here.
+        running = sum(1 for s in self.sessions.values() if s.running and not getattr(s.profile, "addon", ""))
+        if self.max_running and running >= self.max_running and not profile.addon:   # 0 = no cap
             raise SessionError(
                 f"{running} sessions are already running and the limit is {self.max_running} "
                 "(session.max_running - Settings, Session page card); stop one first")
@@ -2939,11 +3071,12 @@ class SessionHost(_FindsClaude):
         return {"ok": True, "to": target.name, "home": str(home), "files_moved": moved_files, "files_left": left_files}
 
     async def prompt(self, text: str, name: str = "", origin: str = "",
-                     images: list[dict[str, str]] | None = None) -> str:
+                     images: list[dict[str, str]] | None = None, mark: dict[str, Any] | None = None,
+                     stop_when_done: bool = False) -> str:
         session = self._session(name)
         if origin:
             session.origin = origin
-        return await session.prompt(text, images)
+        return await session.prompt(text, images, mark, stop_when_done=stop_when_done)
 
     def picture_note(self, name: str, text: str) -> None:
         """What the proxy did with a picture this session sent, when it is not what was asked (D216): kept back
@@ -3351,6 +3484,58 @@ class SessionHost(_FindsClaude):
         if not _inside(target, chosen):
             raise SessionError(f"{path} leads through a link or junction; nothing is copied through one")
         return target
+
+    # ---- f178: New file, Rename and Delete from the files panel ------------------------------------------------
+
+    def _menu_target(self, name: str, root: str, path: str, root_ok: bool = False) -> tuple[Path, Path]:
+        """(root, the item) for a change made from the files menu: through the tree's own allow-list, at the place the
+        path names - not where a link or junction would lead (D171) - and not a root unless `root_ok`."""
+        _roots, chosen, target = self._browser(name)._locate(root, path)
+        literal = Path(os.path.normpath(chosen / path)) if path else chosen
+        if os.path.normcase(str(literal)) != os.path.normcase(str(target)) or not _inside(target, chosen):
+            raise SessionError(f"{path} leads through a link or junction; nothing is changed through one")
+        if not root_ok and target == chosen:
+            raise SessionError("a root folder of the session cannot be renamed or deleted here")
+        return chosen, target
+
+    @staticmethod
+    def _under(chosen: Path, target: Path) -> str:
+        return target.relative_to(chosen).as_posix()
+
+    def new_file(self, name: str, root: str, folder: str, file_name: str) -> dict[str, Any]:
+        from . import filemenu
+        chosen, place = self._menu_target(name, root, folder, root_ok=True)
+        if not place.is_dir():
+            raise filemenu.FileMenuError(f"{folder or place.name} is not a folder")
+        made = filemenu.new_file(place, file_name)
+        return {"ok": True, "root": root, "path": self._under(chosen, made), "name": made.name}
+
+    def rename_item(self, name: str, root: str, path: str, to: str) -> dict[str, Any]:
+        from . import filemenu
+        chosen, target = self._menu_target(name, root, path)
+        if not target.exists():
+            raise filemenu.NotThere(f"{target.name} is no longer there")
+        moved = filemenu.rename(target, to)
+        return {"ok": True, "root": root, "path": self._under(chosen, moved), "name": moved.name}
+
+    def delete_items(self, name: str, items: list[dict[str, str]]) -> dict[str, Any]:
+        """Every item checked before any is touched; then all of them to the Recycle Bin together."""
+        from . import filemenu
+        if not items:
+            raise filemenu.FileMenuError("nothing to delete")
+        if len(items) > filemenu.MAX_DELETE:
+            raise filemenu.FileMenuError(f"{len(items)} items is more than one Delete takes ({filemenu.MAX_DELETE})")
+        targets: list[Path] = []
+        for item in items:
+            _chosen, target = self._menu_target(name, str(item.get("root", "")), str(item.get("path", "")))
+            if not target.exists():
+                raise filemenu.NotThere(f"{target.name} is no longer there - nothing was deleted")
+            if all(os.path.normcase(str(target)) != os.path.normcase(str(t)) for t in targets):
+                targets.append(target)
+        # A folder and something inside it, both chosen: the folder takes it with it.
+        targets = [t for t in targets if not any(t != other and _inside(t, other) for other in targets)]
+        filemenu.recycle(targets)
+        return {"ok": True, "deleted": len(targets)}
 
     def locate_items(self, name: str, items: list[dict[str, str]]) -> list[tuple[Path, Path]]:
         """(root, target) for each of many files or folders (feature 97's zip), every one through

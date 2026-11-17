@@ -67,7 +67,8 @@ export function attachTreeDrag({ source, area, conversation, prompt, open, sessi
   };
   source.addEventListener('dragstart', (event) => {
     const button = event.target.closest && event.target.closest('button.tree-name');
-    if (!button || button.disabled) return;
+    // A root's drag reorders the roots (f181, folderlist.js attachRootDrag) - it carries nothing out.
+    if (!button || button.disabled || button.classList.contains('tree-root-name')) return;
     dragging = draggedItems(button);
     event.dataTransfer.effectAllowed = 'copy';
     event.dataTransfer.setData(DRAG_TYPE, JSON.stringify(dragging));

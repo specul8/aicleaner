@@ -16,6 +16,22 @@ import re
 
 OPEN, CLOSE = "<aicleaner-origin>", "</aicleaner-origin>"
 NOTE = re.compile(re.escape(OPEN) + r".*?" + re.escape(CLOSE), re.S)
+# The note's own tag, opening or closing, in any case and with any whitespace inside it (`< / AICleaner-Origin >`):
+# text from outside (a LAN message's source, summary or words, a sender's name) that holds it could forge a note or
+# close the real one early, so it is refused where such text comes in (security review, 2026-11-14).
+TAG = re.compile(r"<\s*/?\s*aicleaner\s*-\s*origin", re.I)
+
+
+def forges_note(text: str) -> bool:
+    """Whether this text holds the origin note's tag (opening or closing), so it could forge or end a note."""
+    return isinstance(text, str) and bool(TAG.search(text))
+
+
+def quoted(text: str) -> str:
+    """Text from outside, quoted for a note: in double quotes, with quotes, backslashes and angle brackets escaped,
+    so it cannot end the quote or open or close a tag."""
+    return '"' + (str(text).replace("\\", "\\\\").replace('"', '\\"').replace("<", "\\u003c")
+                  .replace(">", "\\u003e")) + '"'
 
 
 def device(user_agent: str) -> str:

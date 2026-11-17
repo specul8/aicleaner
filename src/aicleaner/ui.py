@@ -20,8 +20,11 @@ API (JSON; writes need Content-Type application/json):
   POST /api/clients/<id>/share             {path} use a folder, {create: true} make one, {path: ""} forget it
   GET  /api/session                        every profile, and the state of each session (?name=)
   POST /api/session/start                  {name, project, resume?, model?}
-  POST /api/session/prompt                 {name, text, images?: [{name, media_type, data}]}
+  POST /api/session/prompt                 {name, text, images?: [{name, media_type, data}], stop_when_done?}
   POST /api/session/stop                   {name} end that session
+  POST /api/session/file/new               {name, root, path, file} an empty file in a folder (f178)
+  POST /api/session/file/rename            {name, root, path, to} rename in place (f178)
+  POST /api/session/files/delete           {name, items: [{root, path}]} to the Recycle Bin (f178)
   POST /api/session/interrupt              {name} stop the turn, keep the session
   POST /api/session/queue/send             {name, id} send a waiting prompt now (D176)
   POST /api/session/queue/cancel           {name, id} drop a waiting prompt (D176)
@@ -39,6 +42,7 @@ API (JSON; writes need Content-Type application/json):
   GET  /api/session/events                 server-sent events for one session (?name=)
   GET  /api/session/profiles               the profiles, and the clients one can be pointed at
   POST /api/session/profiles               {profiles: [...]} replace them (validate, then commit)
+  POST /api/session/root-order             {name, roots} the Files panel's roots reordered (f181)
   GET  /api/session/presets                Start Work / Start Personal and the current run (feature 152)
   POST /api/session/presets                {presets: [...]} save them, at most max_running - 1 projects each
   POST /api/session/preset/go              {id} start a run: the set started, the rest stopped when idle
@@ -395,6 +399,109 @@ def _settle_homes_and_shares(wanted: list, stored: list, shares: dict | None) ->
     return notes
 
 
+def _one_workspace(entry: dict) -> list[str]:
+    """f181 (Brad, 2026-11-15 19:35): one workspace file per project session. A profile saved with
+    several keeps the first; the rest are named in the notice. No file on disk is touched."""
+    kept = [str(w).strip() for w in entry.get("workspaces") or [] if str(w).strip()]
+    if len(kept) <= 1:
+        return []
+    entry["workspaces"] = kept[:1]
+    return [f"{entry.get('name')}: a project session has one workspace file now - kept {kept[0]}; "
+            f"dropped {', '.join(kept[1:])} (the files themselves are not touched)."]
+
+
+def _arrange_entry(entry: dict, allowed: list | None, backup_dir: Path | None, expect: str = "",
+                   share: str = "") -> list[str]:
+    """f181: the editor's folder list, in place - the first is the home (Brad: first place = home,
+    everywhere). With a workspace file, the file is made to list exactly these folders in this
+    order, the home first and its terminal working directory (a backup in AI Cleaner's state folder
+    first); the project assets folder (`share`) is never written into it. A file that cannot be
+    changed is left alone and said; the home then stays what the list says, as a choice. Returns
+    what was done, in words."""
+    from . import workspace
+
+    name = entry.get("name") or "a project session"
+    folders = workspace.unique_folders(list(entry.get("projects") or []))
+    chosen = str(entry.get("home_override") or "").strip()
+    if chosen:
+        folders = [chosen] + [f for f in folders if not workspace._same(f, chosen)]
+    if not folders:
+        return []
+    entry["projects"] = folders
+    home = folders[0]
+    workspaces = [w for w in entry.get("workspaces") or [] if str(w).strip()]
+    notes: list[str] = []
+    written = [f for f in folders if not (share and workspace._same(f, share))]
+    if workspaces and written:
+        file = Path(workspaces[0])
+        try:
+            done = workspace.lead_with(file, written, expect=expect, backup_dir=backup_dir, allowed=allowed)
+        except (OSError, workspace.WorkspaceRewriteError) as exc:
+            entry["home_override"] = home
+            entry["home_derived_was"] = workspace.derived_home(workspaces, folders)["folder"]
+            return [f"{name}: {file.name} was not changed - {exc}. The home folder is still {home}, "
+                    "as a choice of this project session."]
+        if done["changed"]:
+            notes.append(f"{name}: {file.name} now lists these folders in this order, with {Path(written[0]).name} "
+                         f"first and as its home (the file as it was is kept in {Path(done['backup']).parent})."
+                         if done["backup"] else f"{name}: {file.name} now lists these folders in this order.")
+    derived = workspace.derived_home(workspaces, folders)["folder"]
+    if workspace._same(derived, home):
+        entry["home_override"] = ""
+        entry["home_derived_was"] = ""
+    else:
+        entry["home_override"] = home
+        entry["home_derived_was"] = derived
+    return notes
+
+
+def _root_order_check(folder: str, roots: list, what: str) -> None:
+    """D245: one folder a Files-panel move would persist, held to the allowed folders as a save is
+    (session_profiles_save). FolderError (FolderOutside when outside) naming it; existence is not
+    required - a folder not on this disk keeps its place."""
+    from .folders import check_usable
+
+    check_usable(folder, roots, what, must_exist=False)
+
+
+def _root_order_lists(entry: dict, roots: list, share: str) -> tuple[list[str], list[str]]:
+    """D245: (the workspace files, every folder of the profile's list in the editor's order) for a
+    Files-panel move, each checked against the allowed folders. A workspace file the profile names
+    must itself be inside them, or the move is refused; one only found inside a folder (an older
+    profile) is used - and later saved - only when it is. Every folder the list would hold (the
+    workspace file's, the profile's and the home) must be inside them too: refused, naming the first
+    that is not, never silently dropped. FolderError on refusal."""
+    from . import workspace
+    from .folders import FolderError
+
+    projects = list(entry.get("projects") or [])
+    own = [str(w) for w in entry.get("workspaces") or [] if str(w).strip()]
+    for ws in own:
+        _root_order_check(str(Path(ws).parent), roots, "workspace file's folder")
+    wss = own
+    if not own:
+        wss = []
+        for ws in workspace.implicit_workspaces(projects):
+            try:
+                _root_order_check(str(Path(ws).parent), roots, "workspace file's folder")
+            except FolderError:
+                continue
+            wss.append(ws)
+    home = workspace.home_of(wss, projects, str(entry.get("home_override") or ""))
+    full = workspace.editor_order(wss, projects, home.get("folder", ""))
+    full = [f for f in full if not (share and workspace._same(f, share))]
+    for folder in full:
+        try:
+            _root_order_check(folder, roots, "folder")
+        except FolderError as problem:
+            source = next((ws for ws in wss if any(workspace._same(folder, f)
+                                                   for _n, f in workspace.workspace_folders(ws))), "")
+            where = f" (listed in {Path(source).name})" if source else ""
+            raise type(problem)(f"{problem}{where} - it is not moved or saved; remove it from the project "
+                                "session or allow its location, then move again") from problem
+    return wss, full
+
+
 def _share_hint(entry: dict, shares: dict | None, folders: list, home: str) -> dict:
     from . import workspace
 
@@ -449,6 +556,13 @@ def _workspace_view(entries: list, mf: MappingStore | None = None, shares: dict 
                 "setup": _setup_findings(entry, shares, folders, home.get("folder", ""), workspaces),
                 # The old names, kept for the page while it moves over.
                 "folder": home.get("folder", ""), "how": home.get("how", ""),
+                # f181: the editor's one list - every folder the Files panel shows, home first - what the
+                # workspace file lists (in its order, and its own home), and its stamp, so a save can tell
+                # the file changed on disk since the page read it.
+                "order": workspace.editor_order(workspaces, folders, home.get("folder", "")),
+                "listed": [str(f) for _n, f in workspace.workspace_folders(first)] if first else [],
+                "file_home": workspace.derived_home([first], [])["folder"] if first else "",
+                "stamp": workspace.file_stamp(first) if first else "",
             }
         except Exception as exc:  # noqa: BLE001
             log.debug("workspace hint for %s failed: %s", entry.get("name"), exc)
@@ -664,14 +778,113 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             for ws in entry.get("workspaces") or []:
                 if str(ws).strip() and not Path(str(ws)).is_file():
                     return err(ValueError(f"{entry.get('name', 'profile')}: {ws} does not exist"))
-        notes = await asyncio.to_thread(_settle_homes_and_shares, wanted, proxy.read_profiles(),
-                                        proxy.share_store.load())
+        notes: list[str] = []
+        for entry in wanted:
+            if isinstance(entry, dict):
+                notes += _one_workspace(entry)
+        notes += await asyncio.to_thread(_arrange_saved, wanted, body, roots)
+        notes += await asyncio.to_thread(_settle_homes_and_shares, wanted, proxy.read_profiles(),
+                                         proxy.share_store.load())
         try:
             saved = proxy.profile_store.save(wanted, set(proxy.client_labels()))
         except (ProfileError, OSError) as problem:
             return err(problem)
         proxy.reload_profiles()
+        forget_roots()
         return web.json_response({"profiles": saved, "notes": notes})
+
+    def workspace_backups() -> Path:
+        """Where a workspace file is copied before AI Cleaner changes it (f181): its own state folder,
+        never beside the file, where a repo would pick the copy up."""
+        return Path(getattr(proxy.cfg, "state_dir", "") or Path.home() / ".aicleaner") / "workspace-backups"
+
+    def forget_roots() -> None:
+        host = getattr(proxy, "session", None)
+        if host is not None and hasattr(host, "forget_roots"):
+            host.forget_roots()
+
+    def _arrange_saved(wanted: list, body: dict, roots: list) -> list[str]:
+        """f181: the profile being saved from the editor (`arrange`, its name) is arranged - its home
+        leads its folder list and its workspace file. Without the name (an older page), any profile
+        whose folders, workspace file or home choice differ from what is stored. The others go back
+        as they are stored and are never rewritten."""
+        from . import workspace
+
+        stored = {str(e.get("name", "")).lower(): e for e in proxy.read_profiles()}
+        named = str(body.get("arrange") or "").strip().lower()
+        stamp = body.get("workspace_stamp") if isinstance(body.get("workspace_stamp"), dict) else {}
+        shares = proxy.share_store.load()
+        notes: list[str] = []
+        for entry in wanted:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("name", "")).lower()
+            if named:
+                if key != named:
+                    continue
+            else:
+                old = stored.get(key) or {}
+                if all(old.get(k) == entry.get(k) for k in ("projects", "workspaces", "home_override")):
+                    continue
+            first = next((str(w) for w in entry.get("workspaces") or [] if str(w).strip()), "")
+            expect = str(stamp.get("stamp") or "") if first and workspace._same(str(stamp.get("path") or ""), first) else ""
+            notes += _arrange_entry(entry, roots, workspace_backups(), expect, _share_of(entry, shares))
+        return notes
+
+    async def session_root_order(request: web.Request) -> web.Response:
+        """f181: the Files panel's roots in a new order (dragged, or Move up / Move down). The first is
+        the home; with a workspace file the file is made to list the folders in this order; without
+        one the profile keeps it. Folders the tree does not show (not on this disk) keep their places.
+        Only a reorder of the roots the tree shows now - never a way to add or remove one."""
+        from .folders import FolderError
+        from .profiles import ProfileError
+        from .session import SessionError
+        from . import workspace
+
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        order = [str(r) for r in body.get("roots") or [] if str(r).strip()]
+        try:
+            host = session_host()
+            profile = host.profile(name)
+        except SessionError as problem:
+            return err(problem, status=404)
+        share = str(profile.share or "")
+        shown = [r for r in host.tree_of(profile) if not (share and workspace._same(r, share))]
+        order = [r for r in order if not (share and workspace._same(r, share))]
+        entries = proxy.read_profiles()
+        entry = next((e for e in entries if e.get("name") == profile.name), None)
+        if entry is None:
+            return err(ValueError(f"no project session named {name!r}"), status=404)
+        # D245: everything this move persists - the folder list, the home (its first) and the workspace file
+        # - answers to the allowed folders exactly as a save from the editor does (session_profiles_save). A
+        # workspace file can name any folder, so its folders are never promoted into the profile unchecked.
+        roots = folder_roots()
+        try:
+            wss, full = _root_order_lists(entry, roots, share)
+            for folder in order:
+                if not any(workspace._same(folder, known) for known in full):
+                    raise FolderError(f"{folder} is not one of this project session's folders - moving a folder "
+                                      "only reorders them, it never adds one")
+                _root_order_check(folder, roots, "folder")
+        except FolderError as problem:
+            return err(ValueError(f"{profile.name}: {problem}"))
+        if len(order) != len(shown) or not all(any(workspace._same(r, s) for s in shown) for r in order):
+            return err(ValueError("the Files panel's folders changed - refresh it and move the folder again"), status=409)
+        entry["projects"] = workspace.reorder_within(full, order)
+        entry["home_override"] = ""
+        if wss and not entry.get("workspaces"):
+            entry["workspaces"] = wss[:1]
+        notes = await asyncio.to_thread(_arrange_entry, entry, roots, workspace_backups(), "", share)
+        notes += await asyncio.to_thread(_settle_homes_and_shares, entries, proxy.read_profiles(),
+                                         proxy.share_store.load())
+        try:
+            proxy.profile_store.save(entries, set(proxy.client_labels()))
+        except (ProfileError, OSError) as problem:
+            return err(problem)
+        proxy.reload_profiles()
+        forget_roots()
+        return web.json_response({"ok": True, "notes": notes, "tree": host.tree_of(host.profile(profile.name))})
 
     async def session_profile_add_folder(request: web.Request) -> web.Response:
         """Add one of the client's folders to a profile, from Continue (feature 50).
@@ -1391,6 +1604,33 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return web.json_response({"error": str(problem)}, status=403)
         return web.json_response(answer)
 
+    async def session_file_menu(request: web.Request) -> web.Response:
+        """f178: New file, Rename and Delete from the files panel's menu - through the tree's own allow-list (403
+        outside it, through a link, or on a root), a name Windows would refuse 400, gone meanwhile 404."""
+        from .filemenu import FileMenuError, NotThere
+        from .session import SessionError
+
+        action = request.match_info["action"]
+        body = await json_or_empty(request)
+        name, root, path = str(body.get("name", "")), str(body.get("root", "")), str(body.get("path", ""))
+        host = session_host()
+        try:
+            if action == "new":
+                answer = await asyncio.to_thread(host.new_file, name, root, path, str(body.get("file", "")))
+            elif action == "rename":
+                answer = await asyncio.to_thread(host.rename_item, name, root, path, str(body.get("to", "")))
+            else:
+                items = body.get("items") if isinstance(body.get("items"), list) else []
+                answer = await asyncio.to_thread(host.delete_items, name,
+                                                 [i for i in items if isinstance(i, dict)])
+        except NotThere as gone:
+            return web.json_response({"error": str(gone)}, status=404)
+        except FileMenuError as refused:
+            return web.json_response({"error": str(refused)}, status=400)
+        except (SessionError, OSError) as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        return web.json_response(answer)
+
     reading: dict[str, asyncio.Lock] = {}
 
     async def session_read_image(request: web.Request) -> web.Response:
@@ -2071,8 +2311,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # Where it was typed, said to Claude (the user, 2026-10-18): remote access or this machine.
             note = page_note(bool(request.get(REMOTE)), request.host or "", request.headers.get("User-Agent", ""),
                              str(body.get("device") or ""))
+            # D241: a scheduled run that started the session asks for it to be stopped once the work is done.
             outcome = await session_host().prompt(str(body.get("text", "")), name=str(body.get("name", "")), origin=note,
-                                                  images=images)
+                                                  images=images, stop_when_done=body.get("stop_when_done") is True)
         except SessionError as exc:
             return err(exc)
         return web.json_response({"ok": True, "outcome": outcome})
@@ -3363,8 +3604,13 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(ValueError("expected JSON with on: true or false"))
         if not isinstance(body, dict) or not isinstance(body.get("on"), bool):
             return err(ValueError("expected JSON with on: true or false"))
+        from .deskrun import NoDesktop
         try:
-            said = service_module.change(root, body["on"], proxy.cfg.port)
+            # D239: run as the start-up task (session 0), the step is handed to the signed-in desktop.
+            said = await asyncio.to_thread(service_module.change, root, body["on"], proxy.cfg.port,
+                                           folder=proxy._state_path() / "state" / "desktop")
+        except NoDesktop as exc:
+            return web.json_response({"error": str(exc), "command": exc.command, "no_desktop": True}, status=409)
         except service_module.ServiceError as exc:
             return err(exc, status=409)
         return web.json_response({"ok": True, "said": said})
@@ -4112,6 +4358,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         page = (WEB / "index.html").read_text(encoding="utf-8")
         page = page.replace('<meta charset="utf-8">',
                             f'<meta charset="utf-8">\n<meta name="aicleaner-style-nonce" content="{nonce}">', 1)
+        # f182: the version this page's code is, so it can tell when AI Cleaner has been updated under it (api.js).
+        from . import __version__
+        page = page.replace('<meta charset="utf-8">',
+                            f'<meta charset="utf-8">\n<meta name="aicleaner-version" content="{__version__}">', 1)
         # H2 (1.1): the page on this machine is given the API key it sends with every change (api.js). Never through
         # the tunnel - there the Access sign-in is the gate, and the key is no business of another device.
         key = getattr(getattr(proxy, "cfg", None), "api_key", "")
@@ -4197,6 +4447,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get("/api/editor/powershell/parameters", editor_ps_parameters)
         app.router.add_get("/api/session/file", session_file)
         app.router.add_post("/api/session/file/write", session_file_write)
+        app.router.add_post("/api/session/file/{action:new|rename}", session_file_menu)        # f178
+        app.router.add_post("/api/session/files/{action:delete}", session_file_menu)           # f178
         app.router.add_post("/api/session/read-image", session_read_image)
         app.router.add_get("/api/session/file/raw", session_file_raw)
         app.router.add_get("/api/session/file/download", session_file_download)
@@ -4233,6 +4485,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_get("/api/tunnel/secret", tunnel_secret)
         app.router.add_post("/api/tunnel/secret", tunnel_secret_set)
         app.router.add_post("/api/session/profile/add-folder", session_profile_add_folder)
+        app.router.add_post("/api/session/root-order", session_root_order)
         app.router.add_get("/api/session/commands", session_commands)
         app.router.add_get("/api/session/profiles", session_profiles)
         app.router.add_post("/api/session/profiles", session_profiles_save)
@@ -4329,3 +4582,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_post("/api/ignore", ignore_add)
     app.router.add_post("/api/ignore/delete", ignore_delete)
     app.router.add_post("/api/ignore/tokenise", ignore_tokenise)
+    # f185: GET /api/addons, and each loaded add-on's routes under /api/addons/<name>/ (none when none are listed).
+    addons = getattr(proxy, "addons", None) if proxy is not None else None
+    if addons is not None:
+        addons.mount(app)
+    else:
+        async def no_addons(request: web.Request) -> web.Response:
+            return web.json_response({"addons": [], "error": ""})
+        app.router.add_get("/api/addons", no_addons)

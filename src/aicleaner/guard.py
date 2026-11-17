@@ -156,6 +156,12 @@ def is_loopback_listen(listen: str) -> bool:
         return False
 
 
+def _version() -> str:
+    from . import __version__
+
+    return __version__
+
+
 def is_ui_path(path: str) -> bool:
     return path in UI_EXACT or path.startswith(("/api/", "/web/"))
 
@@ -246,6 +252,8 @@ def make_guard(listen: str, remote_hostname: str = "", verifier: Any = None, api
             # and the remote browser each kept a copy, and a released page stayed invisible there while
             # this machine showed it. The files are small and local; nothing is gained by keeping them.
             response.headers["Cache-Control"] = "no-store"
+            # f182: which version answered, so a page loaded before an update can say it is out of date (api.js).
+            response.headers["X-AICleaner-Version"] = _version()
         return response
 
     return guard

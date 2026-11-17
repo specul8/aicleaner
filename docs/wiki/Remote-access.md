@@ -9,6 +9,8 @@ still runs on the AI Cleaner machine, and every request it makes is still filter
 Claude Code's own Remote Control relays a session through Anthropic's servers, which is what
 AI Cleaner exists to avoid (and it does not work behind a gateway). This is the replacement.
 
+To reach a computer's whole Windows desktop as well, see [Remote desktops](Remote-desktops.md).
+
 ## How it fits together
 
 ```
@@ -163,15 +165,9 @@ On the AI Cleaner machine itself nothing changes.
 
 ## Remote desktops
 
-Settings > [Remote desktops](Settings.md#card-remote-desktop) lists the machines whose Windows desktop you can open from AI
-Cleaner's menu, one per line as `Name = https://address`. Each becomes a menu entry that opens that machine's page in
-a new tab: its own address, behind the same Cloudflare sign-in, sealed end to end like the encrypted tunnel. Nothing is
-embedded in AI Cleaner's page.
-
-The desktop page itself is **aicleaner-rdp**, a separate bolt-on installed on each machine whose desktop you want to
-reach; its installer adds its own machine to this list when AI Cleaner runs beside it. An address must be `https://`
-and may not hold a user name or password; at most 20. The list is changed on the AI Cleaner machine - through remote
-access it is shown, not changed.
+A computer's whole Windows desktop can be opened in a browser tab too, behind the same sign-in and sealed with the same
+tunnel code. That is the aicleaner-rdp bolt-on, installed on each computer you want to reach: see
+[Remote desktops](Remote-desktops.md) for how it fits together, adding a computer, connecting, and the menu list.
 
 ## If it is not acceptable for an engagement
 

@@ -14,40 +14,72 @@ stops every AI session running from it. If the CLI cannot be found, the page say
 ## Project sessions
 
 Work is organised by engagement, not by folder. A **project session** is one engagement, and every
-AI session is named after its project session. Project sessions are edited on the page itself
-(**Edit project sessions**, a tab per project session) and stored in `profiles.json` beside
-`_global.json` in the app folder - never in the shared topic folder, because a project session names
-folders on *this* machine.
+AI session is named after its project session. Project sessions are edited on the page itself and
+stored in `profiles.json` beside `_global.json` in the app folder - never in the shared topic folder,
+because a project session names folders on *this* machine.
+
+**Edit project sessions**, in the list on the left, opens **Project sessions** right under the conversation panel, in
+the same column and as wide: a tab per project session (and **+**), the open tab's form, **Add a project session**, and
+**Delete** / **Save** / **Close**. It opens on the tab you last chose, else the project session on screen. The link then
+reads **Close project sessions**; it, or **Close**, closes the panel again, asking first when a tab has unsaved changes.
+On a narrow screen the panel sits under the conversation panel.
+
+The editor's controls are in blocks that sit side by side on a wide screen and one under another, in this order, on a
+narrow one: **Basics** (Name, Topic, Model); **Folders appearing in the Files panel** (the widest); **Workspace file**
+(with the terminal working directory note); **Project assets folder**; **Standing brief**, folded. Any notices, and
+**Add a project session** / **Delete** / **Save** / **Close**, run across the bottom. The (i) beside **Workspace file** and **Project assets folder**
+says what each is for.
 
 | Field | What it does |
 |---|---|
 | Name | How the session is known everywhere: the picker, the menu, notifications, the page address. Up to 40 characters; no slash, `?`, `#` or `%`. Locked while its AI session runs |
 | Topic | The topic the work is for, or **None (Global only)**. Shown as the topic's label, never its id |
-| Workspace files | `.code-workspace` files, one per line. Their folders make up the file tree; the first sets the home folder |
-| Folders added by hand | Extra folders, one per line, chosen with the folder picker |
-| Home folder | Where sessions start. Derived from the first workspace file (or the first folder); you can choose another, and Reset goes back to the derived one |
-| Project assets folder | The topic's project assets folder in OneDrive, saved per topic on this machine (`client-shares.json`), not with the project session |
 | Model | A drop-down of known models, **Default** (Claude Code's own choice), or **Other...** to type a name |
-| Standing brief | Text sent with the first prompt of each session, for example "Landing zone work for Contoso. Terraform only." |
+| Folders appearing in the Files panel | Every folder the Files panel shows, in its order: the topic's project assets folder first (fixed), then the home folder, then the rest. Each is an entry with a drag handle at its left, **Move up** / **Move down** buttons (for the keyboard and touch) and **Remove** (x) at its right; **Add a folder** adds one at the end. With a workspace file, each is marked **workspace** (in the file) or **added** (not yet: Save writes it in) |
+| Home folder | Where sessions start: always the first folder in the list, marked **home** (hover it for what that means). To change it, drag another folder first or use **Move up**. Removing the home makes the next one the home, and the page says so before you save. On a project session with no folders yet, the first folder added that holds a `.code-workspace` file connects that file instead, and the file's folders become the list, its home first |
+| Workspace file | One `.code-workspace` file per project session: **Connect to a workspace file** chooses it; it shows as a single entry with **Disconnect**. Its folders join the list above. A project session saved with several keeps the first and names the others it dropped (the files themselves are never touched) |
+| Project assets folder | The topic's project assets folder in OneDrive, saved per topic on this machine (`client-shares.json`), not with the project session. Shown only once a topic is chosen |
+| Standing brief | Text sent with the first prompt of each session, for example "Landing zone work for Contoso. Terraform only." Folded to one line showing its first line; open it to edit |
 
 Folders must sit inside the allowed folder locations (`folders.roots`, set in
 [Folders the pages can open](Settings.md#card-folders)). A project session naming a topic that is not in the mapping is refused when
 you save it. Edits to a project session apply from the AI session's next start.
+
+**The workspace file follows the list.** With a workspace file, saving makes the file list exactly the folders in
+the list, in that order (never the project assets folder) - so a folder you added by hand, or had before you connected
+the file, is written into it too: the first folder - the home - becomes its first entry,
+and its `terminal.integrated.cwd` setting, when it has one, points at it (in the form it already uses - a
+`${workspaceFolder:<name>}` reference or a path). Nothing else in the file changes: comments, other settings,
+names and relative paths stay as they were. A copy of the file as it was is kept first in
+`%USERPROFILE%\.aicleaner\workspace-backups\` (the newest 10 per file - never beside the file, where a repository
+would pick it up). The file is left alone, with a note saying why, when it is read-only, outside the allowed folder
+locations, or changed on disk since the page read it (reload the page and save again); the home folder is then still
+the one you chose. Without a workspace file, the project session keeps the folders and their order itself.
+This works the same through remote access as on the machine itself.
 
 **Naming a session does not narrow the filter.** Every topic's terms are replaced in every
 session; a Contoso session that mentions Fabrikam still has Fabrikam replaced.
 
 ## Starting, continuing and stopping
 
-Pick a project in **Pick a Project to chat about...**, then use the session card:
+Pick a project in **Pick a Project to chat about...**, then use the session card. Its first row has the project
+session's name, its topic, the home folder (hover it for the whole path), whether it is running, and **Start** /
+**Stop**; the second the conversation to continue, **All** and **Conversation actions**, with **Create a worktree**
+under it; the third **Asks**.
 
 - **Start** launches Claude Code in the home folder. Every other folder of the project session,
   and the topic's project assets folder, is passed with `--add-dir`, so Claude can reach them (prompts still apply).
-- **Continue** lists earlier conversations held in the project session's folders, newest first, each shown
-  by its first prompt. Choosing one starts with `--resume`. A tick-box also lists conversations
-  started by programs (automated reviews). A transcript written to in the last few minutes is
-  flagged as possibly open elsewhere.
-- **Start chatting** scrolls down to the prompt box of a running session.
+- **Continue** (the drop-down) lists earlier conversations held in the project session's folders, newest first, each
+  shown by its title or first prompt. Choosing one starts with `--resume`. The **All** tick (Show all conversations)
+  lists every one, not just the newest 25. A transcript written to in the last few minutes is flagged as possibly open
+  elsewhere.
+- **Conversation actions** opens a panel from the right edge of the window, over the page (nothing under it moves).
+  Each action has a line saying what it does: **Search conversations** (also Ctrl+K) and **Suggest titles**;
+  **Rename**, **Retitle**, **Move to another session** and **New conversation from existing ones**; then **Recently
+  deleted** and **Delete**. Choosing one closes the panel. Escape, the close button or a click outside it close it
+  too; the arrow keys move through it.
+- Start also scrolls down to the conversation; so does opening a running session from the menu or a notice's
+  **Open**. (The separate **Start chatting** button went in 1.2.4.)
 - **Stop** ends the AI session: its process, context and permission grants go.
 - **Escape** (or **Interrupt**, shown beside a slow request) stops the current turn and keeps the
   session.
@@ -71,7 +103,8 @@ that is already running reconnects to it rather than starting a second copy.
 ## Permission modes and approvals
 
 The **Asks** control sets how the session asks before acting. It can be changed while a session is
-running, and the choice is remembered as the default for the next one (`session.permission_mode`).
+running, and the choice is remembered as the default for the next one (`session.permission_mode`). The **(i)** beside
+it says what the chosen mode means - hover it, tab to it, or tap it.
 
 | Mode | Shown as | Meaning |
 |---|---|---|
@@ -126,13 +159,39 @@ Settings > [Prompt autocorrect](Settings.md#card-autocorrect).
 ## Files
 
 The file tree (toggle with **Files**) shows the project session's folders, with the topic's project
-assets folder pinned at the top. Clicking a file offers:
+assets folder pinned at the top, then the home folder, then the rest in the workspace file's order, then any other
+folders in the project session's order - each once.
 
-- **Open in a tab** - beside the conversation tab. Text and code are editable with autosave; a save
-  is refused if the file changed on disk since it was opened, offering Reload, Overwrite, or copy
-  yours then reload. Markdown has a preview.
-- **Download** - for Word, PowerPoint and anything a tab cannot show.
-- **Put the path in the prompt**.
+**Reordering the folders.** Drag a project folder's name up or down among the others: a line shows the gap it will
+land in (it never drops *into* a folder, and it is not the drag that copies files or saves them to your device).
+From the keyboard, its right-click menu has **Move up** and **Move down**. The new order is written to the workspace
+file (or kept in the project session, with none), as when you save the list above; moving a folder into first place
+makes it the home folder. The project assets folder stays first and cannot be moved.
+
+The mouse works as in File Explorer:
+
+- **Click** chooses a file or folder (a folder also opens or closes).
+- **Click a chosen name again**, slowly (not a double-click), to rename it in place: **Enter** or clicking
+  anywhere else renames it, **Escape** cancels, and a name Windows would refuse says why and stays open to
+  correct. The project folders themselves cannot be renamed.
+- **Double-click a file** to open it: a text file (or an empty one) opens in a tab, ready to edit; anything
+  else - a Word document, a zip, a picture - downloads, so the device you are using opens it with its own
+  program. A Markdown file opens in **Preview**; **Source** is a click away. Double-click a folder to open
+  or close it.
+- **Right-click** (on a tablet, press and hold; on a keyboard, the menu key or Shift+F10) for the menu, one
+  action per line: **Prompt** (the path into the prompt), **Read text** / **Attach**, **View** (open in a
+  tab; text and code are editable with autosave, and a save is refused if the file changed on disk since it
+  was opened, offering Reload, Overwrite, or copy yours then reload), **Download**, and then **New file**
+  (a folder's menu), **Rename** and **Delete** (to the Recycle Bin, asking first). Arrow keys move through
+  it, Enter runs an item, Escape closes it.
+
+A file tab's heading has two lines: the file's path (with **Source** / **Preview** for Markdown) and, at the right
+end, whether your edits are saved; beneath it, small, its size and when it was created and last modified. There is
+no Reload or Download there: a file changed on disk is read again by itself (unless you have unsaved edits, when the
+bar above the editor offers Reload, Overwrite or a copy), and Download is in the file's right-click menu.
+
+After AI Cleaner is updated, a page that was already open keeps running the version it loaded until it is reloaded;
+it says so ("AI Cleaner has been updated to ...") with a **Reload** button.
 
 **Files Claude asks you to read.** When a reply asks you to read or review a Markdown file Claude has just
 written ("please review spec.md", "spec.md is ready for your review", "have a look at spec.md"), the file opens
@@ -141,7 +200,7 @@ in Preview in a tab behind the one in front, and the menu bar and a notification
 brings that file's tab forward. A file Claude only writes or mentions raises nothing. In [Settings](Settings.md#card-session),
 **Open files for review** turns this off.
 
-Right-click opens the same menu without opening or closing a folder. A folder's menu also has
+Right-click never opens or closes a folder. A folder's menu also has
 **View files (N)** - each of its own files that a tab can show - and **Download (zip)**, the folder
 and everything in it.
 
@@ -247,7 +306,8 @@ next up. Running it again with the same settings changes nothing; `-UnregisterTa
 Two Claude Codes in one working tree commit over each other, so a project has one session at a
 time. For a second, use a git **worktree**: a second checkout of the same repo on its own branch.
 
-1. On a project's session card, choose **Create a worktree**.
+1. On a project's session card, choose **Create a worktree** (under **Conversation actions**; hover it for what a
+   worktree is for).
 2. Pick one of the project session's repos (**Branch from**) - or a plain folder outside OneDrive, which is
    made a git repo with a first commit - and keep or change the name (default `wt-1`, `wt-2`...).
 3. **Create** runs `git worktree add` into `<repo>.worktrees\<name>`, beside the repo, on a branch
@@ -258,7 +318,7 @@ A worktree session uses the project session's topic, model and brief, but its on
 worktree: it cannot write to the original repo. It is saved with its project session and appears in the picker like
 any other session.
 
-When the worktree session is stopped, its card offers:
+When the worktree session is stopped, its card offers, under its rows:
 
 - **Merge** - merges the branch into the repo's current branch. Refused if either side has
   uncommitted changes; a conflict is reported and the merge undone, nothing merged.

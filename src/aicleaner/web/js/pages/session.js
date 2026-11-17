@@ -13,7 +13,7 @@ import { pane } from '../panes.js';
 import { downloadLink, fileTabs, viewAsTextItem } from '../filetabs.js';
 import { caretRect, onFirstRow, onLastRow } from '../caretrow.js';
 import { confirmLeave, forget, rebase, track } from '../unsaved.js';
-import { fillShare, shareSlot } from '../sharecard.js';
+import { fillShare, SHARE_WHY, shareSlot } from '../sharecard.js';
 import { handOverWheel } from '../wheelchain.js';
 import { isSealed } from '../sealed.js';
 import { renderMarkdown } from '../markdown.js';
@@ -31,13 +31,17 @@ import { askSwitch } from '../switchask.js';
 import { openClaudeImport } from '../claudeimport.js';
 import { attachFileDrop } from '../filedrop.js';
 import { attachTreeDrag } from '../treedrag.js';
+import { attachRootDrag, moved, pillList } from '../folderlist.js';
 import { loadMonaco } from '../monacoedit.js';
 import { watchTitles } from '../titleprogress.js';
 import { findSnippets, languageForFile, makeSnippet, nextSnippetNumber, snippetTitle, splitPrompt } from '../snippets.js';
 import { promptParts } from '../promptparts.js';
 import { clearSelection, groupMenu, isSelected, itemOf, MANY_TABS, menuItems, needsZip, selectedItems, selectOnly, selectRange, toggleOne,
   viewableFiles } from '../treeselect.js';
+import { changeItems, deleteQuestion, nameBox, selectStem } from '../filemenu.js';
 import { arrangeSheet } from '../sheet.js';
+import { conversationDrawer } from '../convdrawer.js';
+import { infoTip } from '../infotip.js';
 import { mountPresets } from '../presets.js';
 import { scrollToChat } from '../chatscroll.js';
 import { smoothIntoView } from '../motion.js';
@@ -586,7 +590,15 @@ function transcript(events, { after = null, placeholder = true } = {}) {
         h('span', { class: 'who' }, ''), h('div', {}, 'resumed here')));
     }
     wasReplayed = Boolean(event.replayed);
-    if (event.type === 'prompt') {
+    if (event.type === 'prompt' && event.from) {
+      // f185: a message from someone else (an add-on's prompt with a mark), never mistaken for something typed here.
+      const from = event.from;
+      lines.push(h('div', { class: 'turn you marked-message', title: `Sent by ${from.sender || 'someone else'}${from.address ? ` at ${from.address}` : ''}` },
+        h('span', { class: 'who' }, 'message'),
+        h('div', {}, h('p', { class: 'marked-message-from muted' }, `Message from ${from.sender}`
+          + (from.source ? ` - ${from.source}` : '') + (from.summary ? ` (${from.summary})` : '')),
+        promptWithPictures(event))));
+    } else if (event.type === 'prompt') {
       lines.push(h('div', { class: 'turn you' }, h('span', { class: 'who' }, 'you'), promptWithPictures(event)));
     } else if (event.type === 'picture_note') {
       // What the proxy did with an attached picture, when it is not what was asked (D216).
@@ -1164,6 +1176,13 @@ function entryRow(listing, entry, depth) {
   // its `parent`, which is what a Shift range stays within.
   const about = { full, root: listing.root, path: relative, name: entry.name, parent: `${listing.root}|${listing.path || ''}`,
     kind: entry.dir ? 'dir' : 'file', view: entry.dir ? '' : (entry.view || 'download') };
+  // f178: being renamed - the name is a box in the row's place until Enter or Escape.
+  const editing = tree.editing;
+  if (editing && editing.mode === 'rename' && editing.root === listing.root && editing.path === relative) {
+    return h('div', { class: 'tree-row tree-editing', dataset: { depth: String(Math.min(depth, 6)) } },
+      h('span', { class: 'tree-toggle-space', 'aria-hidden': 'true' }, h('span', { class: 'tree-chev' }, '')),
+      mark, nameBox(editing));
+  }
   const label = h('button', { type: 'button', class: `tree-name ${entry.dir ? 'dir' : 'file'}`, dataset: about, draggable: blocked ? 'false' : 'true' },
     mark, h('span', { class: 'tree-text' }, entry.name));
   if (isSelected(full)) label.classList.add('selected');
@@ -1190,12 +1209,39 @@ function entryRow(listing, entry, depth) {
 // What to do with a file or folder, shown under its name and over the row below it (DECISIONS 50).
 // A folder: Prompt. A file a tab can show: Prompt, View, Download. A download-only file (Word,
 // PowerPoint, anything a tab cannot show): Prompt, and Download in View's place - no View at all.
+// f181: a root's Move up / Move down - the keyboard's way to do what dragging a root does. Not for the project assets
+// folder (always first). Moving a folder into first place makes it the home folder.
+function rootMoves(item) {
+  if (item.parent !== '#roots') return [];
+  const order = tree.rootOrder || [];
+  const at = order.indexOf(item.root);
+  if (at < 0 || order.length < 2) return [];
+  // Only the moves there are: no Move up on the first, no Move down on the last.
+  const one = (cls, glyph, words, to, why) => (to < 0 || to >= order.length ? null
+    : h('button', { type: 'button', class: `tree-root-move ${cls}`, role: 'menuitem', 'aria-label': `${words}: ${item.root}`,
+      title: why, dataset: { root: item.root, to: String(to) } }, h('span', { 'aria-hidden': 'true' }, glyph), ` ${words}`));
+  return [
+    one('tree-root-up', '▲', 'Move up', at - 1, at === 1 ? 'Move it to first place: it becomes the home folder' : 'Move it up one place'),
+    one('tree-root-down', '▼', 'Move down', at + 1, 'Move it down one place'),
+  ].filter(Boolean);
+}
+
 function treeMenu(name, full, file, about = null) {
-  // Opened where the name was tapped (D143) - set from script, which the page's policy allows.
-  const placed = (menu) => { if (tree.menuAt) menu.style.left = `${Math.round(tree.menuAt)}px`; return menu; };
+  // f178: New file, Rename and Delete after the menu's own items (a row of the tree only, not a search result).
+  const self = about ? { ...about, dir: about.kind === 'dir' } : null;
+  const changes = self ? [...rootMoves(self), ...changeItems(self, menuItems(self))] : [];
+  // Opened where the name was right-clicked (D143) - set from script, which the page's policy allows.
+  const placed = (menu) => {
+    // f180 (Brad, 2026-11-15): one action per row, icon then words - a list down the page, as a context menu is. The
+    // changes follow the menu's own items after a line.
+    if (changes.length) menu.append(h('div', { class: 'tree-menu-sep', role: 'separator' }), ...changes);
+    menu.setAttribute('tabindex', '-1');
+    menu.setAttribute('aria-label', `Actions for ${name}`);
+    if (tree.menuAt) menu.style.left = `${Math.round(tree.menuAt)}px`;
+    return menu;
+  };
   // Several selected, or a folder: the group menu - Prompt, View, Download - for all of them (feature 97).
-  if (about) {
-    const self = { ...about, dir: about.kind === 'dir' };
+  if (self) {
     const items = menuItems(self);
     if (items.length > 1 || self.dir) return placed(groupMenu(items, ownFiles, isSealed()));
   }
@@ -1296,6 +1342,13 @@ async function treeRows(name, root, relative, depth) {
   const found = await listing(name, root, relative);
   tree.separator = found.separator;
   const rows = [];
+  // f178: a new file's name being typed, at the top of its folder.
+  const editing = tree.editing;
+  if (editing && editing.mode === 'new' && editing.root === root && editing.path === (relative || '')) {
+    rows.push(h('div', { class: 'tree-row tree-editing', dataset: { depth: String(Math.min(depth, 6)) } },
+      h('span', { class: 'tree-toggle-space', 'aria-hidden': 'true' }, h('span', { class: 'tree-chev' }, '')),
+      nameBox(editing)));
+  }
   for (const entry of found.entries) {
     rows.push(entryRow(found, entry, depth));
     const childRelative = found.path ? `${found.path}/${entry.name}` : entry.name;
@@ -1323,13 +1376,17 @@ async function treeRows(name, root, relative, depth) {
 // toggle and the same open-set key (`root|` with an empty path), so D73's remembered state covers
 // roots as well as what is inside them. It used to draw its first level unconditionally, so the
 // list of roots was buried under the contents of the first one.
+// f181: every root but the project assets folder can be dragged among the others by its name (folderlist.js
+// attachRootDrag), or moved with Move up / Move down in its menu; first place is the home folder.
 function rootRow(label, path, extraClass) {
   const open = tree.open.has(`${path}|`);
   const about = { path: '', root: path, full: path, name: label, parent: '#roots', kind: 'dir', view: '' };
-  return h('div', { class: `tree-root${extraClass ? ` ${extraClass}` : ''}` },
+  const movable = !extraClass;
+  return h('div', { class: `tree-root${extraClass ? ` ${extraClass}` : ''}`, dataset: movable ? { root: path, movable: '1' } : {} },
     treeToggle(label, path, '', open),
     h('button', { type: 'button', class: `tree-name dir tree-root-name${isSelected(path) ? ' selected' : ''}`,
-                  'aria-expanded': String(open), dataset: about },
+                  'aria-expanded': String(open), dataset: about, draggable: movable ? 'true' : null,
+                  title: movable ? 'Drag between the other folders to reorder them (the first is the home folder)' : null },
       h('span', { class: 'tree-text' }, label)),
     tree.menu === path ? treeMenu(label, path, null, about) : null);
 }
@@ -1371,8 +1428,10 @@ function searchRow(result) {
   const separator = /^[A-Za-z]:/.test(result.root) ? '\\' : '/';
   const full = `${result.root.replace(/[\\/]+$/, '')}${separator}${result.path.split('/').join(separator)}`;
   const mark = h('span', { class: 'tree-mark', 'aria-hidden': 'true' }, result.dir ? '📁' : '📄');
+  // f180: a file found carries where it is too, so a double-click can open it.
   const label = h('button', { type: 'button', class: `tree-name ${result.dir ? 'dir' : 'file'}`,
-    dataset: result.dir ? { full, root: result.root, path: result.path } : { full } },
+    dataset: result.dir ? { full, root: result.root, path: result.path }
+      : { full, root: result.root, path: result.path, name: result.name, kind: 'file', view: result.view || 'download' } },
   mark, h('span', { class: 'tree-text' }, full));
   return h('div', { class: 'tree-row search-hit', dataset: { depth: '0' } },
     h('span', { class: 'tree-toggle-space', 'aria-hidden': 'true' }, h('span', { class: 'tree-chev' }, '')), label,
@@ -1482,7 +1541,7 @@ async function renderTree(panel, name, roots, current, share) {
     h('div', { class: 'form-row tree-head' }, viewSwitch(panel, name), again),
     // Listings are remembered until this says otherwise, so a file written while the session runs
     // is not noticed on its own (D33). Refresh is how you ask.
-    h('p', { class: 'hint' }, 'Click (or right-click) a file or folder to view / download / put the path in the prompt. Shift+click selects a range in a folder; Ctrl+click adds or removes one.'
+    h('p', { class: 'hint' }, 'Right-click a file or folder for what you can do with it. Double-click a file to open it (text in a tab; anything else downloads). Click a chosen name again to rename it. Shift+click selects a range in a folder; Ctrl+click adds or removes one.'
       // Feature 169: said where it works, so a drag that does nothing remotely is not a surprise.
       + (isSealed() ? '' : ' Drag one out of the page (Edge, Chrome) to save it on this device.')),
   ];
@@ -1499,9 +1558,14 @@ async function renderTree(panel, name, roots, current, share) {
     sections.push({ head: h('div', { class: 'tree-root share none' }, 'No Project Assets Folder Configured') });
   }
   const seen = share ? [share] : [];
+  // f181: the roots that move, in order, each once (Move up / Move down and a drag work on this list).
+  tree.rootOrder = [];
   for (const root of roots) {
     if (seen.some((known) => same(known, root))) continue;
     seen.push(root);
+    tree.rootOrder.push(root);
+  }
+  for (const root of tree.rootOrder) {
     sections.push({ head: rootRow(same(root, current) ? `${root} (this session)` : root, root), root });
   }
 
@@ -1640,9 +1704,18 @@ function sessionList(state) {
   const profiles = state.profiles || [];
   const runningNames = new Set(state.running || []);
   const active = profiles.filter((p) => runningNames.has(p.name));
+  // f185: the sessions an add-on made are listed after the person's own, in a group per label the add-on gave.
+  const option = (p) => h('option', { value: p.name, selected: p.name === view.name ? true : null }, p.name);
+  const groups = new Map();
+  for (const p of profiles.filter((one) => one.addon)) {
+    const label = p.group || p.addon;
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(p);
+  }
   const picker = h('select', { id: 'session-pick', 'aria-label': PICK_PROMPT },
     h('option', { value: '' }, profiles.length ? PICK_PROMPT : 'No project sessions yet'),
-    ...profiles.map((p) => h('option', { value: p.name, selected: p.name === view.name ? true : null }, p.name)));
+    ...profiles.filter((p) => !p.addon).map(option),
+    ...[...groups].map(([label, members]) => h('optgroup', { label }, ...members.map(option))));
   // No Start beside the picker (the user, 2026-10-05). A project has one chat session at a time -
   // two Claude Codes in one working tree would commit over each other - and a Start here read as
   // "open another chat on this project" while one was running. Picking shows the project; the
@@ -1941,49 +2014,146 @@ function answersIn(card) {
 
 // ---- editing the profiles ---------------------------------------------------------------------
 
-// The folders a session may work in, with a picker under them. Browse adds a line rather than
-// replacing the box: a profile usually points at more than one folder, and replacing the list
-// would quietly drop the rest. Saving checks every line against the allowed folders anyway.
-// The workspace notes go in `notes`, refilled whenever the lists change (hintsFor).
-function foldersField(profile, notes, shareNow) {
-  const area = h('textarea', { class: 'p-projects', rows: '2' }, (profile.projects || []).join('\n'));
+// f181 (Brad, 2026-11-15): "Folders appearing in the Files panel" - every folder the Files panel shows, in its order:
+// the topic's project assets folder first and fixed, then the home folder (first place is the home, everywhere), then
+// the rest. Pills, each with a drag handle, move up / move down (keyboard and touch) and remove; "Add a folder" adds
+// one at the end. The paths live in the hidden .p-projects box, one per line, as the old text box held them. With a
+// workspace file, saving makes the file list exactly these folders (never the assets folder); without one, the
+// profile keeps them in this order.
+const sameFolder = (a, b) => String(a || '').replace(/[\\/]+$/, '').toLowerCase()
+  === String(b || '').replace(/[\\/]+$/, '').toLowerCase();
+
+// The list as the page first shows it: the Files panel's order (the server's `order` - home, the workspace file's
+// folders, then the profile's own), without the assets folder, which has its own fixed pill.
+function folderOrder(profile, workspace) {
+  const share = (workspace && workspace.share) || '';
+  const order = (workspace && workspace.order) || profile.projects || [];
+  const out = [];
+  for (const folder of order) {
+    if (share && sameFolder(folder, share)) continue;
+    if (!out.some((known) => sameFolder(known, folder))) out.push(folder);
+  }
+  return out;
+}
+
+function foldersField(profile, notes, workspace) {
+  const area = h('textarea', { class: 'p-projects', rows: '2', hidden: true, tabindex: '-1', 'aria-hidden': 'true' },
+    folderOrder(profile, workspace).join('\n'));
+  // The row this sits in, once it is in one; its workspace answer is refreshed as the lists change (hintsFor).
+  const rowOf = () => area.closest('[data-profile="row"]');
+  const shareNow = () => (((rowOf() && rowOf().workspace) || workspace || {}).share) || '';
   // The client's OneDrive share is always included, so it is not added here as well (DECISIONS 64).
-  const bare = (path) => String(path || '').replace(/[\\/]+$/, '').toLowerCase();
-  const refuse = (path) => (shareNow() && bare(path) === bare(shareNow())
+  const refuse = (path) => (shareNow() && sameFolder(path, shareNow())
     ? 'That is the topic\'s project assets folder, which is always included - it does not need adding here.' : '');
+  const homeMoved = h('p', { class: 'hint warn p-home-moved', role: 'status', hidden: true });
+  const list = pillList(area, {
+    label: 'Folders appearing in the Files panel',
+    fixed: () => (shareNow() ? [{ path: shareNow(), label: 'project assets folder',
+      title: 'The topic\'s project assets folder: always first in the Files panel; never written into the workspace file' }] : []),
+    badgeTitles: {
+      home: `The home folder. ${HOME_WHY} Drag another folder first, or use Move up, to change it.`,
+      workspace: 'Listed in the workspace file',
+      added: 'Not in the workspace file yet: Save writes it in',
+    },
+    badges: (path, i) => {
+      const row = rowOf();
+      const ws = (row && row.workspace) || workspace || null;
+      const hasFile = Boolean(row && linesOf(row.querySelector('.p-workspaces')).length);
+      const listed = ((ws && ws.listed) || []).some((f) => sameFolder(f, path));
+      return [i === 0 ? 'home' : null, hasFile ? (listed ? 'workspace' : 'added') : null];
+    },
+    // Removing the home makes the next folder the home - said before it is saved.
+    changed: (change) => {
+      const now = change.list[0] || '';
+      const was = change.before[0] || '';
+      if (was && !sameFolder(was, now)) {
+        homeMoved.textContent = now
+          ? `${lastSegment(was)} was the home folder; ${lastSegment(now)} is the home folder now. Save the project session to keep it.`
+          : `${lastSegment(was)} was the home folder, and no folder is left. Add one before saving.`;
+        homeMoved.hidden = false;
+      }
+    },
+  });
+  area.pills = list;
   return h('div', { class: 'p-places' },
-    h('label', { class: 'field' }, 'Folders added by hand (one per line)',
-      area, folderPicker(area, { append: true, label: 'Add a folder', refuse })),
+    h('div', { class: 'field p-folders' },
+      h('span', { class: 'p-list-label' }, 'Folders appearing in the Files panel'),
+      h('span', { class: 'hint' }, 'In the order the Files panel shows them. The first under the project assets folder is the '
+        + 'home folder, where sessions start.'),
+      area, list, homeMoved,
+      h('div', { class: 'p-folder-add' }, folderPicker(area, { append: true, label: 'Add a folder', refuse, firstRoot: true }))),
     notes);
 }
 
-// Workspace files (D99): every folder they list is in the Files tree, and the first one sets the
-// home folder. Browse picks a folder and adds the .code-workspace files in it. `hint` holds the
-// "found inside a folder" note, refilled with the others.
-// The offer to create a workspace file sits beside the list and its Yes under it, level with the
-// browse button (the user, 2026-10-05: tucked inside a closed <details> in the notices, its button
-// could not be found). Both are slots, refilled with the other hints.
+// f183: the Home folder block is gone (Option A) - the list's first folder is the home. What its "Choose a home folder"
+// did on a project session with nothing yet stays: the first folder added, when it holds a .code-workspace file,
+// connects that file, and the file's folders join the list (its home first).
+function firstFolderConnects(row) {
+  const area = row.querySelector('.p-projects');
+  let before = linesOf(area);
+  area.addEventListener('input', async () => {
+    const now = linesOf(area);
+    const was = before;
+    before = now;
+    const files = row.querySelector('.p-workspaces');
+    if (was.length || now.length !== 1 || linesOf(files).length) return;
+    let found = [];
+    try {
+      found = (await getJSON(`/api/session/workspace-files?folder=${encodeURIComponent(now[0])}`)).files || [];
+    } catch (error) { return; }             /* read as none: the folder is in the list either way */
+    if (!found.length || linesOf(files).length || linesOf(area).length !== 1) return;
+    // The folder was where the file is, as "Choose a home folder" took it: the file's own folders take its place.
+    area.value = '';
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+    files.value = found[0];
+    files.dispatchEvent(new Event('input', { bubbles: true }));
+    say(found.length > 1
+      ? `${lastSegment(now[0])} holds ${found.length} workspace files; connected to ${lastSegment(found[0])} (a project session has one).`
+      : `Connected to ${lastSegment(found[0])}, found in ${lastSegment(now[0])}: its folders are the list now. Save the `
+        + 'project session to keep it.', 'info');
+  });
+}
+
+// The workspace file (D99; one per project session since f181, Brad 2026-11-15 19:35): a single pill with Disconnect,
+// or "Connect to a workspace file" when there is none (f183, Brad 2026-11-16: there is only one, and every folder in
+// the list above - hand-added ones too - is written into it on Save). `hint` holds the "found inside a folder" note,
+// refilled with the others.
+// The offer to create a workspace file sits beside it and its Yes under it, level with the add button (the user,
+// 2026-10-05). Both are slots, refilled with the other hints.
 function workspacesField(profile, hint, homeNow) {
-  const own = profile.workspaces || [];
-  const area = h('textarea', { class: 'p-workspaces', rows: '2', id: `p-ws-${Math.random().toString(36).slice(2)}`,
-    placeholder: 'C:\\Repos\\client\\client.code-workspace' }, own.join('\n'));
-  // The picker chooses one .code-workspace file, and this adds it to the list.
+  const own = (profile.workspaces || []).slice(0, 1);
+  const area = h('textarea', { class: 'p-workspaces', rows: '1', hidden: true, tabindex: '-1', 'aria-hidden': 'true' },
+    own.join('\n'));
+  // The picker chooses one .code-workspace file, and it becomes the workspace file.
   const chosen = h('input', { type: 'hidden', class: 'p-workspace-file', 'data-unsaved-ignore': '' });
+  const pills = pillList(area, { what: 'workspace file', movable: false, label: 'Workspace file', removeText: 'Disconnect' });
+  const add = folderPicker(chosen, { label: 'Connect to a workspace file', workspaceFiles: true,
+    chooseLabel: 'Use this workspace file', start: () => besideHome(homeNow()) });
+  // What Save does with it, said while one is connected - in the (i) beside the label since f184.
+  const kept = h('span', { class: 'p-ws-kept' });
+  const showAdd = () => {
+    const file = linesOf(area)[0] || '';
+    add.hidden = Boolean(file);
+    kept.textContent = file ? `Saving writes every folder in the list above (not the project assets folder) into `
+      + `${lastSegment(file)}, in that order - a backup of the file is kept first.` : 'None connected: the project '
+      + 'session keeps its folders itself.';
+  };
+  area.addEventListener('input', showAdd);
+  showAdd();
   chosen.addEventListener('input', (event) => {
-    event.stopPropagation();          // the list's own input event follows, once it has changed
+    event.stopPropagation();          // the box's own input event follows, once it has changed
     const file = chosen.value.trim();
     chosen.value = '';
     if (!file) return;
-    const have = linesOf(area);
-    if (!have.some((f) => f.toLowerCase() === file.toLowerCase())) area.value = [...have, file].join('\n');
+    area.value = file;
     area.dispatchEvent(new Event('input', { bubbles: true }));
   });
   return h('div', { class: 'field p-ws' },
-    h('label', { for: area.id }, 'Workspace files (one per line; the first sets the home folder)'),
+    h('span', { class: 'p-list-label' }, 'Workspace file',
+      infoTip(kept, { label: 'What Save does with the workspace file' })),
     h('div', { class: 'p-ws-grid' },
-      area, h('div', { class: 'p-slot-create-ask' }),
-      h('div', {}, chosen, folderPicker(chosen, { label: 'Browse to workspace file', workspaceFiles: true,
-        chooseLabel: 'Add to workspace list', start: () => besideHome(homeNow()) })),
+      h('div', {}, area, pills), h('div', { class: 'p-slot-create-ask' }),
+      h('div', { class: 'p-ws-line' }, chosen, add),
       h('div', { class: 'p-slot-create-yes' })),
     hint);
 }
@@ -1996,92 +2166,11 @@ function linesOf(area) {
 function implicitHint(row, workspace) {
   if (linesOf(row.querySelector('.p-workspaces')).length) return null;
   if (!workspace || !workspace.implicit || !(workspace.workspaces || []).length) return null;
-  return h('p', { class: 'hint' }, `In use, found inside a folder: ${workspace.workspaces[0]}. Add it here to keep it.`);
+  return h('p', { class: 'hint' }, `In use, found inside a folder: ${workspace.workspaces[0]}. Connect to it here to keep it.`);
 }
 
 const HOME_WHY = 'Sessions start here, it is the one folder AI Cleaner writes Claude settings into, and a '
   + 'command that changes folder is brought back here when it ends - so Claude keeps working in the right repo.';
-
-// Where this profile's work is homed (D99): worked out from the first workspace file, or the
-// user's own choice. The override is saved with the profile; Reset clears it, and the derived
-// folder - worked out afresh each time - is what it goes back to. Two parts: the block (heading,
-// why, the folder, its buttons on one row) and any drift, which goes with the notices.
-function homeField(values, workspace, row) {
-  const home = (workspace && workspace.home) || {};
-  // Whether a workspace file decides the home, or (with none) the profile's first folder: the
-  // Reset button and the "how" both say which (the user, 2026-10-05).
-  const fromWorkspace = Boolean(workspace && (workspace.workspaces || []).length);
-  const derivedHow = fromWorkspace ? 'from workspace file' : 'first project session folder';
-  const howOf = () => {
-    if (home.overridden) return 'set by you';
-    if (/no longer exists/.test(home.how || '')) return home.how;
-    return derivedHow;
-  };
-  const override = h('input', { type: 'hidden', class: 'p-home-override', value: values.home_override || '' });
-  const was = h('input', { type: 'hidden', class: 'p-home-derived-was', value: values.home_derived_was || '' });
-  // The whole path, beside the heading, so it can be checked at a glance (the user, 2026-10-05).
-  const shown = h('span', { class: 'mono p-home' }, home.folder || '(none yet)');
-  const how = h('span', { class: 'p-home-how' }, home.folder ? ` (${howOf()})` : '');
-  // A profile with no folders yet (the user, 2026-10-15): the first home folder sets it up rather than
-  // recording an override. A workspace file in it goes into Workspace files - which brings its folders
-  // into the folders box (D132) and decides the home (its cwd, else its first folder) - otherwise the
-  // folder goes into the folders box, and as the first folder it is the home.
-  const noFolders = () => !linesOf(row.querySelector('.p-projects')).length
-    && !linesOf(row.querySelector('.p-workspaces')).length;
-  override.addEventListener('input', async () => {
-    if (noFolders() && override.value.trim()) {
-      const folder = override.value.trim();
-      override.value = '';
-      let files = [];
-      try {
-        files = (await getJSON(`/api/session/workspace-files?folder=${encodeURIComponent(folder)}`)).files || [];
-      } catch (error) { /* read as none: the folder still goes in */ }
-      const target = row.querySelector(files.length ? '.p-workspaces' : '.p-projects');
-      target.value = files.length ? files[0] : folder;
-      target.dispatchEvent(new Event('input', { bubbles: true }));
-      shown.textContent = files.length ? `(from ${lastSegment(files[0])})` : folder;
-      how.textContent = files.length ? ' (from workspace file - save the project session to use it)'
-        : ' (first project session folder - save the project session to use it)';
-      if (files.length > 1) say(`${lastSegment(folder)} holds ${files.length} workspace files; ${lastSegment(files[0])} was added. Add the others under Workspace files if they belong.`, 'info');
-      row.dispatchEvent(new Event('hints-stale'));
-      return;
-    }
-    was.value = home.derived || '';
-    shown.textContent = override.value;
-    how.textContent = ' (set by you - save the project session to use it)';
-    reset.hidden = false;
-  });
-  const reset = h('button', { type: 'button', class: 'p-home-reset', hidden: !home.overridden },
-    fromWorkspace ? 'Set to 1st workspace\'s Home' : 'Set to 1st project session folder');
-  reset.addEventListener('click', () => {
-    override.value = '';
-    was.value = '';
-    shown.textContent = home.derived || '(none yet)';
-    how.textContent = ` (${derivedHow} - save the project session to use it)`;
-    reset.hidden = true;
-    row.dispatchEvent(new Event('hints-stale'));
-  });
-  // Only a real disagreement: a choice that matches what the workspace file says now is not drift,
-  // however it read when the choice was made.
-  const drift = home.overridden && values.home_derived_was && home.derived && home.folder
-    && home.derived.toLowerCase() !== values.home_derived_was.toLowerCase()
-    && home.derived.toLowerCase() !== home.folder.toLowerCase()
-    ? h('p', { class: 'hint warn' }, `The workspace file now says ${lastSegment(home.derived)}; you chose `
-      + `${lastSegment(home.folder)} when it said ${lastSegment(values.home_derived_was)}.`)
-    : null;
-  return {
-    block: h('div', { class: 'p-home-row' },
-      h('div', { class: 'p-home-head' }, h('span', { class: 'p-home-label' }, 'Home folder - '), shown, how),
-      h('span', { class: 'hint p-home-why' }, HOME_WHY),
-      h('div', { class: 'p-home-line' }, override, was,
-        // Together, so the pair moves to the next line as one rather than splitting.
-        h('span', { class: 'p-home-buttons' },
-          folderPicker(override, { label: home.folder ? 'Choose another home folder' : 'Choose a home folder', firstRoot: true,
-            start: () => besideHome(workspace) }),
-          reset))),
-    drift,
-  };
-}
 
 // The folder that holds the home folder: where its sibling repos and, usually, the workspace file
 // are. Empty (the picker's own default) when there is no home yet.
@@ -2107,8 +2196,7 @@ function createOffer(name, workspace, row) {
       await postJSON('/api/session/workspace-create', { name });
       say(`${create.path} created and added to the project session.`, 'ok');
       const area = row.querySelector('.p-workspaces');
-      const have = linesOf(area).filter((f) => f.toLowerCase() !== create.path.toLowerCase());
-      area.value = [create.path, ...have].join('\n');
+      area.value = create.path;                // one workspace file per project session (f181)
       rebase(row);                      // saved by the server already
       view.profiles = await getJSON('/api/session/profiles');
       ask.replaceChildren(h('p', {}, `Created ${lastSegment(create.path)}.`));
@@ -2306,6 +2394,8 @@ function cwdOffer(name, workspace, row) {
       await postJSON('/api/session/workspace-cwd', { name, workspace: workspace.workspace, folder: pick.value });
       say(`${file} now keeps the terminal in ${pick.value}, and that is the home folder.`, 'ok');
       set.replaceWith(h('span', { class: 'hint' }, 'Added.'));
+      // f181: first place is the home - the folder the file now names goes to the top of the list.
+      if (row) row.followFileHome = true;
       if (row) row.dispatchEvent(new Event('hints-stale'));
     } catch (error) { sayError(error); }
   });
@@ -2314,26 +2404,24 @@ function cwdOffer(name, workspace, row) {
     + 'to add to it - it becomes the home folder: ', pick, ' ', set);
 }
 
-// A workspace file just added to the list brings the folders it lists into the folders box (D132),
-// once, without duplicates; one already in the list keeps its "Add N folders" offer instead.
+// A workspace file just added brings the folders it lists into the folder list (D132), once, without duplicates. Since
+// f181 they lead it, in the file's own order with the file's home first - the file is where the order came from - and
+// the folders already in the list follow (saving then writes those into the file too).
 function addNewWorkspaceFolders(row, workspace) {
   const pending = row.wsPending || new Set();
   row.wsPending = new Set();
-  if (!pending.size || !workspace) return;
+  if (!pending.size || !workspace || !workspace.workspace) return;
+  if (!pending.has(String(workspace.workspace).toLowerCase())) return;
   const area = row.querySelector('.p-projects');
   const have = linesOf(area);
-  const lower = new Set(have.map((f) => f.toLowerCase().replace(/\//g, '\\')));
-  const added = [];
-  for (const gap of workspace.missing || []) {
-    if (!pending.has(String(gap.in).toLowerCase())) continue;
-    for (const folder of gap.folders) {
-      const key = String(folder).toLowerCase().replace(/\//g, '\\');
-      if (!lower.has(key)) { lower.add(key); added.push(folder); }
-    }
-  }
-  if (!added.length) return;
-  area.value = [...have, ...added].join('\n');
-  say(`${added.length} folder(s) from the workspace file added. Save the project session to keep them.`, 'ok');
+  const share = workspace.share || '';
+  const fromFile = [workspace.file_home, ...(workspace.listed || [])]
+    .filter((f, i, all) => f && !(share && sameFolder(f, share)) && all.findIndex((g) => sameFolder(g, f)) === i);
+  const added = fromFile.filter((f) => !have.some((g) => sameFolder(g, f)));
+  const next = [...fromFile, ...have.filter((f) => !fromFile.some((g) => sameFolder(g, f)))];
+  if (next.join('\n') === have.join('\n')) return;
+  area.value = next.join('\n');
+  if (added.length) say(`${added.length} folder(s) from the workspace file added. Save the project session to keep them.`, 'ok');
   area.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
@@ -2352,7 +2440,7 @@ function shareNote(workspace) {
 
 function workspaceNotes(area, workspace) {
   if (!workspace) return [];
-  const notes = [];                     // the home folder has its own line now (homeField, D99)
+  const notes = [];
   for (const gap of workspace.missing || []) {
     const add = h('button', { type: 'button', class: 'add-workspace-folders' },
       `Add ${gap.folders.length} folder${gap.folders.length === 1 ? '' : 's'}`);
@@ -2379,17 +2467,24 @@ function workspaceNotes(area, workspace) {
 // user, 2026-10-04: a removed folder's workspace file was still offered).
 function hintsFor(row, workspace, values) {
   row.workspace = workspace;
+  // f181: what the workspace file held when this page first read it, sent with Save so a file changed on disk
+  // meanwhile is not overwritten. Kept per file: a later look at the same file does not move it on.
+  if (workspace && workspace.workspace && workspace.stamp
+    && !(row.wsStamp && sameFolder(row.wsStamp.path, workspace.workspace))) {
+    row.wsStamp = { path: workspace.workspace, stamp: workspace.stamp };
+  }
+  const pills = row.querySelector('.p-projects');
+  if (pills && pills.pills) pills.pills.redraw();      // the badges and the assets folder follow the answer
   const slot = (name) => row.querySelector(`.p-slot-${name}`);
   slot('implicit').replaceChildren(...[implicitHint(row, workspace)].filter(Boolean));
   slot('notes').replaceChildren(...workspaceNotes(row.querySelector('.p-projects'), workspace),
     ...shareNote(workspace));
-  const home = homeField(values || readProfile(row), workspace, row);
-  slot('home').replaceChildren(home.block);
   const name = row.dataset.was || '';
   const offer = createOffer(name, workspace, row);
   slot('create-ask').replaceChildren(...(offer ? [offer.ask] : []));
   slot('create-yes').replaceChildren(...(offer ? [offer.yes] : []));
-  const notices = [cwdOffer(name, workspace, row), home.drift, setupPanel(name, workspace, row)].filter(Boolean);
+  slot('cwd').replaceChildren(...[cwdOffer(name, workspace, row)].filter(Boolean));     // f184: in the workspace file block
+  const notices = [setupPanel(name, workspace, row)].filter(Boolean);
   slot('notices').replaceChildren(...notices);
   slot('notices').hidden = !notices.length;
 }
@@ -2406,6 +2501,17 @@ function watchHints(row) {
         const answer = await postJSON('/api/session/workspace-view', { profile: readProfile(row) });
         if (mine === asked) {
           addNewWorkspaceFolders(row, answer.workspace || null);
+          const fileHome = row.followFileHome && answer.workspace && answer.workspace.file_home;
+          row.followFileHome = false;
+          if (fileHome) {
+            const area = row.querySelector('.p-projects');
+            const lines = linesOf(area);
+            if (!sameFolder(lines[0], fileHome)) {
+              area.value = [fileHome, ...lines.filter((f) => !sameFolder(f, fileHome))].join('\n');
+              area.dispatchEvent(new Event('input', { bubbles: true }));    // asks again, with the new home
+              return;
+            }
+          }
           hintsFor(row, answer.workspace || null);
         }
       } catch (error) { /* the hints are a help, never a reason to interrupt */ }
@@ -2421,7 +2527,7 @@ function watchHints(row) {
       for (const line of now) if (!row.wsSeen.has(line)) row.wsPending.add(line);
       row.wsSeen = new Set(now);
     }
-    if (event.target.matches('.p-projects, .p-workspaces, .p-home-override')) again();
+    if (event.target.matches('.p-projects, .p-workspaces')) again();
   });
   row.addEventListener('hints-stale', again);
 }
@@ -2466,8 +2572,12 @@ function profileRow(profile, clients, workspace, running) {
   // (the user, 2026-10-04): locked, and saying why, until the session stops.
   const name = h('input', { class: 'p-name', value: profile.name || '', placeholder: 'ACME',
     disabled: running ? true : null, title: running ? RUNNING_LOCK : null });
+  // f184 (Brad, 2026-11-16 11:34): the controls in blocks that sit side by side on a wide screen and stack, in this order,
+  // on a narrow one - Basics; Folders appearing in the Files panel (the widest); Workspace file; Project assets folder;
+  // Standing brief. The notices span the whole width under them.
   const row = h('fieldset', { class: 'profile-row', dataset: { profile: 'row', was: profile.name || '' } },
-    h('div', { class: 'p-grid' },
+    h('div', { class: 'p-blocks' },
+      h('div', { class: 'p-block p-basics' },
       h('label', { class: 'field', title: running ? RUNNING_LOCK : null }, 'Name', name),
       h('label', { class: 'field' }, 'Topic', client),
       // A list, offered rather than enforced (feature 45). A name that does not exist used to be
@@ -2479,16 +2589,17 @@ function profileRow(profile, clients, workspace, running) {
       // text box stays the value; the drop-down only fills it, and is hidden while there is no list.
       h('label', { class: 'field' }, 'Model',
         h('select', { class: 'p-model-pick', hidden: true, 'aria-label': 'Model' }),
-        h('input', { class: 'p-model', value: profile.model || '', placeholder: 'default' })),
-      h('div', { class: 'p-half p-slot-home' }),
-      h('div', { class: 'p-half' },
-        workspacesField(profile, h('div', { class: 'p-slot-implicit' }), () => row.workspace)),
-      h('div', { class: 'p-half' },
-        foldersField(profile, h('div', { class: 'p-slot-notes' }), () => (row.workspace || {}).share || '')),
-      h('div', { class: 'p-half' }, share),
-      h('label', { class: 'field p-half' }, 'Standing brief',
-        h('textarea', { class: 'p-brief', rows: '2', placeholder: 'What this engagement is, and what not to touch.' },
-          profile.brief || '')),
+        h('input', { class: 'p-model', value: profile.model || '', placeholder: 'default' }))),
+      h('div', { class: 'p-block p-block-folders' },
+        foldersField(profile, h('div', { class: 'p-slot-notes' }), workspace)),
+      // The terminal working directory note belongs with the workspace file it is about.
+      h('div', { class: 'p-block p-block-ws' },
+        workspacesField(profile, h('div', { class: 'p-slot-implicit' }), () => row.workspace),
+        h('div', { class: 'p-slot-cwd' })),
+      h('div', { class: 'p-block p-share' },
+        h('span', { class: 'p-list-label' }, 'Project assets folder', infoTip(SHARE_WHY, { label: 'What the project assets folder is' })),
+        share),
+      h('div', { class: 'p-block p-block-brief' }, briefField(profile.brief || '')),
       h('div', { class: 'p-full p-notices p-slot-notices' })));
   row.running = Boolean(running);
   name.addEventListener('input', () => {        // the tab says the name as it is typed
@@ -2497,7 +2608,25 @@ function profileRow(profile, clients, workspace, running) {
   });
   hintsFor(row, workspace, profile);
   watchHints(row);
+  firstFolderConnects(row);
   return row;
+}
+
+// The standing brief, folded (f183, Option A): a summary line with its first line; opened, the box to edit it.
+function briefField(text) {
+  const box = h('textarea', { class: 'p-brief', rows: '3', placeholder: 'What this engagement is, and what not to touch.',
+    'aria-label': 'Standing brief' }, text);
+  const sum = h('span', { class: 'p-brief-sum' });
+  const show = () => {
+    const lines = box.value.split('\n').filter((line) => line.trim());
+    sum.textContent = lines.length
+      ? `${lines[0].trim()}${lines.length > 1 ? ` (${lines.length} lines)` : ''}` : 'None - sent with the first prompt of each session';
+  };
+  box.addEventListener('input', show);
+  show();
+  return h('details', { class: 'p-brief-fold' },
+    h('summary', {}, h('b', {}, 'Standing brief'), sum, h('span', { class: 'p-brief-edit' }, 'edit')),
+    box);
 }
 
 const MODEL_OTHER = '__other__';
@@ -2537,9 +2666,10 @@ function readProfile(row) {
     client: row.querySelector('.p-client').value === NEW_CLIENT ? '' : row.querySelector('.p-client').value,
     projects: linesOf(row.querySelector('.p-projects')),
     // D99: this machine's workspace files and home folder choice.
-    workspaces: linesOf(row.querySelector('.p-workspaces')),
-    home_override: row.querySelector('.p-home-override').value.trim(),
-    home_derived_was: row.querySelector('.p-home-derived-was').value.trim(),
+    workspaces: linesOf(row.querySelector('.p-workspaces')).slice(0, 1),
+    // f181: first place is the home. The server makes the workspace file agree when it saves.
+    home_override: linesOf(row.querySelector('.p-projects'))[0] || '',
+    home_derived_was: '',
     model: row.querySelector('.p-model').value.trim(),
     brief: row.querySelector('.p-brief').value,
     // The name it was saved under, so a rename keeps its earlier homes (the server decides).
@@ -2607,20 +2737,23 @@ function profileEditor(data) {
       why.hidden = false;
     }
   }).catch(() => {});      // the field works without them; that is the whole design
+  // f184, revised (Brad, 2026-11-16 16:25): this whole panel - the intro, the tabs, the form in blocks, Add a project
+  // session and Delete / Save / Close - sits right under the conversation panel, shown and hidden by Edit project sessions.
   return h('section', { class: 'card', id: 'session-profiles' },
     known, why,
     h('h3', {}, 'Project sessions'),
     h('p', { class: 'hint' },
       `A project session is one engagement: its topic is what it is labelled and logged as, and its folders are what the file tree shows. Filtering is the same in every session. Stored in ${data.path}.`),
     data.problem ? h('p', { class: 'chip warn' }, data.problem) : null,
-    h('div', { id: 'profile-tabs', class: 'p-tabs', role: 'tablist' }),
-    rows,
-    h('div', { class: 'form-row p-actions' },
-      h('button', { type: 'button', id: 'profile-add' }, 'Add a project session'),
-      h('span', { class: 'grow' }),
-      iconButton('trash', 'Delete this project session', { id: 'profile-delete', class: 'icon p-remove' }),
-      h('button', { type: 'button', id: 'profile-save', class: 'primary' }, 'Save'),
-      h('button', { type: 'button', id: 'profile-close' }, 'Close')));
+    h('div', { id: 'profile-editor', class: 'profile-editor' },
+      h('div', { id: 'profile-tabs', class: 'p-tabs', role: 'tablist' }),
+      rows,
+      h('div', { class: 'form-row p-actions' },
+        h('button', { type: 'button', id: 'profile-add' }, 'Add a project session'),
+        h('span', { class: 'grow' }),
+        iconButton('trash', 'Delete this project session', { id: 'profile-delete', class: 'icon p-remove' }),
+        h('button', { type: 'button', id: 'profile-save', class: 'primary' }, 'Save'),
+        h('button', { type: 'button', id: 'profile-close' }, 'Close'))));
 }
 
 // ---- the page ----------------------------------------------------------------------------------
@@ -2862,7 +2995,7 @@ export async function render(main, context = {}) {
 
   // Where every session of this profile starts (DECISIONS 64): shown, no longer chosen. It was a
   // drop-down, and a conversation resumed from another folder drew a blank page (D113).
-  const homeShown = h('div', { id: 'session-home', class: 'mono session-home' });
+  const homeShown = h('span', { id: 'session-home', class: 'mono session-home' });
   const resume = h('select', { id: 'session-resume', 'aria-label': 'Conversation to continue' });
   // A new conversation's name (E3 part 10, feedback #3; Brad 2026-10-19): shown under the list while
   // "Start a new conversation" is chosen; blank, the model writes one after the first reply and the fifth.
@@ -2876,9 +3009,12 @@ export async function render(main, context = {}) {
   // (2026-09-30). This shows the rest too, including Session-page ones from before that fix.
   // Every conversation you or AI Cleaner started, not just the newest 25 (the user, 2026-10-17). Ones a
   // program started are never listed.
-  const showAll = h('label', { class: 'check hint', id: 'session-show-all',
-    title: 'List every conversation in this project session, not just the newest 25 (ones a program started are never listed)' },
-    h('input', { type: 'checkbox' }), ' Show all conversations', h('span', { id: 'session-all-note', class: 'muted' }, ''));
+  // f183 (Brad, 2026-11-16): a small "All" tick in the selector's row; its full name is its tooltip and what a screen
+  // reader says.
+  const showAll = h('label', { class: 'check hint session-all', id: 'session-show-all',
+    title: 'Show all conversations: every conversation in this project session, not just the newest 25 (ones a program started are never listed)' },
+    h('input', { type: 'checkbox', 'aria-label': 'Show all conversations' }), ' All',
+    h('span', { id: 'session-all-note', class: 'muted' }, ''));
   // What "all" added, so ticking it visibly does something even when it finds nothing (D86).
   const allNote = showAll.querySelector('#session-all-note');
   const resumeLine = h('div', { class: 'hint warn', id: 'session-resume-hint' }, '');
@@ -3017,6 +3153,36 @@ export async function render(main, context = {}) {
     forgetListings();
     showTree();
   } });
+  // f181: a root moved among the others - dragged, or Move up / Move down in its menu. The server puts it in place in
+  // the workspace file (or the profile, with none); first place makes it the home folder. The tree shows the new
+  // order at once and the server's answer confirms it.
+  const moveRoot = async (path, to) => {
+    const order = tree.rootOrder || [];
+    const from = order.indexOf(path);
+    if (from < 0 || to < 0 || to >= order.length || to === from) return;
+    const next = moved(order, from, to);
+    const profile = profileOf(view.name);
+    const before = profile.tree;
+    profile.tree = next;
+    tree.menu = null;
+    tree.focusAfter = path;
+    showTree();
+    try {
+      const answer = await postJSON('/api/session/root-order', { name: view.name, roots: next });
+      profile.tree = answer.tree || next;
+      say(to === 0 ? `${lastSegment(path)} is the home folder now.` : `${lastSegment(path)} moved.`, 'ok');
+      for (const note of answer.notes || []) say(note);
+      // An editor open meanwhile saves the others from this copy: brought up to date (its own tab keeps what it holds;
+      // the workspace file's stamp then tells its Save that the file moved on).
+      if (view.profiles) view.profiles = await getJSON('/api/session/profiles');
+    } catch (error) {
+      profile.tree = before;
+      sayError(error);
+    }
+    showTree();
+    refresh().catch(() => {});
+  };
+  attachRootDrag(panel, { move: moveRoot });
   const cards = h('div', { id: 'session-permissions' });
   const heading = h('h2', { id: 'session-heading' }, view.name || 'No session');
   const clientChip = h('span', { id: 'session-client', class: 'chip' }, '');
@@ -3031,11 +3197,10 @@ export async function render(main, context = {}) {
   // reaches a running session over the control channel, with no restart.
   const modeSelect = h('select', { id: 'session-mode', 'aria-label': 'How it asks before it acts' },
     PERMISSION_MODES.map(([value, label]) => h('option', { value }, label)));
-  // A third of the controls row (D62), with what the chosen mode means under it rather than on a
-  // row of its own.
-  const modeField = h('div', { class: 'field' },
+  // Its own row (f183): what the chosen mode means is an (i) tooltip - hover, keyboard focus, or a tap.
+  const modeField = h('div', { class: 'form-row session-asks-row' },
     h('label', { for: 'session-mode' }, 'Asks'), modeSelect,
-    h('span', { class: 'hint', id: 'session-mode-why' }, ''));
+    infoTip(h('span', { id: 'session-mode-why' }, ''), { label: 'What this setting means' }));
   const editorSlot = h('div', { id: 'session-editor' });
   // Prompts waiting for the turn to end (D176), above the box they were typed in.
   const queueBox = h('div', { id: 'session-queue', hidden: true });
@@ -3149,7 +3314,7 @@ export async function render(main, context = {}) {
       part.hidden = !chosenProject;
     }
     resumeLine.hidden = !chosenProject;
-    paintWorktree(worktreeSlot, profile, Boolean(session.running), selectSession, refresh);
+    paintWorktree(worktreeSlot, profile, Boolean(session.running), selectSession, refresh, worktreeWide);
     // The client this work is for. It is a label on the session, not the scope of the filter:
     // every client's names are replaced in every session.
     // The binding is profile.client, not the label. Reading it off "the label differs from the
@@ -3162,9 +3327,10 @@ export async function render(main, context = {}) {
     // A running session shows where it did start; a stopped one, where the next one will.
     const homeFolder = session.running && session.project ? session.project : ((profile.home || {}).folder || '');
     homeShown.textContent = homeFolder || '(no folder yet - add one in Edit project sessions)';
-    homeShown.title = homeFolder;
+    homeShown.title = homeFolder ? `Starts in (home folder): ${homeFolder}` : '';
     const drawing = begin('paint.transcript', { events: (session.events || []).length });
     paintLog(log, session.events, view.name);
+    if (view.showPictureSaid) view.showPictureSaid(session.events);
     markTools(log, session.events, Boolean(session.running));
     // Through the tunnel there is no stream to say "thinking..." as it happens: the poll's state
     // carries what the session last saw instead (the user, 2026-10-12).
@@ -3227,8 +3393,6 @@ export async function render(main, context = {}) {
           client ? h('a', { href: `#/clients/${client}` }, 'Open the topic') : '');
       }
     }
-    // Start chatting only means something while the session is running (DECISIONS 35).
-    chat.disabled = !session.running;
     runningLine.textContent = session.running
       ? `running in ${session.project}` : (view.name ? 'not running' : 'nothing selected');
     {
@@ -3416,6 +3580,7 @@ export async function render(main, context = {}) {
       return;
     }
     noteActivity(event);
+    if (event.type === 'picture_note' && view.showPictureSaid) view.showPictureSaid([event]);
     // A turn has ended, which is exactly when files have just changed (D33): look at the open
     // folders again. Only open ones are fetched - collapsed roots are not listed (D70) - so this
     // costs a request per open folder, once per turn, not per fragment.
@@ -3647,11 +3812,12 @@ export async function render(main, context = {}) {
     }
   });
   const searchButton = h('button', { type: 'button', id: 'session-search-conversations', class: 'conv-action',
-    title: 'Find a conversation by what it was about (Ctrl+K)' }, 'Search conversations');
+    title: 'Find a conversation by what it was about (Ctrl+K)' }, 'Search conversations...');
   // Deleting a conversation (2026-10-16, item D): to Recently deleted for 30 days, put back from there.
-  const deleteButton = h('button', { type: 'button', id: 'session-delete-conversation', class: 'conv-action',
+  const deleteButton = h('button', { type: 'button', id: 'session-delete-conversation', class: 'conv-action danger',
     title: 'Choose conversations to move to Recently deleted (kept 30 days)' }, 'Delete...');
-  const binButton = h('button', { type: 'button', id: 'session-recently-deleted', class: 'conv-action' }, 'Recently deleted');
+  const binButton = h('button', { type: 'button', id: 'session-recently-deleted', class: 'conv-action',
+    title: 'Conversations deleted in the last 30 days, to put back' }, 'Recently deleted');
   // Delete opens the conversations with ticks and an All tick (the user, 2026-10-17), the one chosen
   // in Continue ticked already; then one question, and each goes to Recently deleted.
   const deleteConversations = async (chosen) => {
@@ -3688,7 +3854,7 @@ export async function render(main, context = {}) {
     title: 'Choose conversations for the model to title: every conversation listed, the unnamed ones ticked to start with' }, 'Suggest titles');
   // Move to another project session (J3, Brad 2026-10-20): from Casual chats to a client, mostly.
   const moveButton = h('button', { type: 'button', id: 'session-move-conversation', class: 'conv-action',
-    title: 'Move a conversation to another project session - from Casual chats to a topic, say' }, 'Move conversation');
+    title: 'Move a conversation to another project session - from Casual chats to a topic, say' }, 'Move to another session...');
   const chosenRow = () => (view.past || []).flatMap((entry) => entry.sessions || []).find((r) => r.id === resume.value);
   moveButton.addEventListener('click', async (event) => {
     event.preventDefault();
@@ -3860,9 +4026,17 @@ export async function render(main, context = {}) {
       panel.replaceChildren(h('h3', {}, 'Files'), h('p', { class: 'muted' }, 'Pick a project to see its files.'));
       return;
     }
+    // f180: a name being typed keeps its caret through a redraw (one comes at the end of every turn).
+    const typing = document.activeElement;
+    if (tree.editing && typing && typing.matches && typing.matches('input.tree-edit-name') && panel.contains(typing)) {
+      tree.editing.focus = true;
+      tree.editing.caret = [typing.selectionStart, typing.selectionEnd];
+    }
     renderTree(panel, view.name, roots, session.project || roots[0], profile.share || '')
       .then(async () => {
         keepMenuInView(panel);
+        focusNameBox();
+        focusMenu();
         // A group menu counting files of folders not yet read: read them, then count (feature 97).
         if (await listMenuFolders(panel)) showTree();
         // A remembered folder found unreadable while drawing: the saved list loses it too.
@@ -3924,37 +4098,45 @@ export async function render(main, context = {}) {
     switching.end({ events: (view.state && view.state.events || []).length });
   };
 
-  // Back to the working band on request (DECISIONS 35): what Start does on its own, for a session
-  // already running - arriving on the page never scrolls, so this is the way down. Enabled only
-  // while the selected session is running; there is nothing to chat to otherwise.
-  const chat = h('button', { type: 'button', id: 'session-chat', disabled: true }, 'Start chatting');
-  chat.addEventListener('click', () => {
-    scrollToChat();
-    box.focus({ preventScroll: true });
-  });
+  // "Start chatting" is gone (Brad, 2026-11-15 19:14): the way down to the conversation stays - Start scrolls there,
+  // and so does arriving with an explicit request for it (`/chat`: a notice's Open, a running session in the menu).
   // Nothing picked: the card says what the picker says, instead of controls for no project (the
   // user, 2026-10-05). Toggled in paint().
   const nonePicked = h('p', { class: 'muted session-none', hidden: true }, PICK_PROMPT);
-  // Create a worktree; Merge and Remove on a stopped worktree session (DECISIONS 66). Painted in paint().
+  // Create a worktree (under Conversation actions, f183); its form, and Merge and Remove on a stopped worktree session
+  // (DECISIONS 66), full width under the rows. Painted in paint().
   const worktreeSlot = h('div', { class: 'worktree-slot' });
+  const worktreeWide = h('div', { class: 'worktree-wide' });
+  // f183 (Brad, 2026-11-16 07:57; spec specs/2026-11-16-f183-session-panels.md): three rows. The eight buttons became
+  // a panel that slides in from the right (convdrawer.js), in groups, each with what it does.
+  const actionsButton = h('button', { type: 'button', id: 'session-conv-actions', class: 'btn session-conv-actions' },
+    'Conversation actions');
+  view.convDrawer = conversationDrawer(actionsButton, [
+    [{ button: searchButton, why: 'Find a conversation by what it was about (Ctrl+K)' },
+      { button: suggestButton, why: 'Let the model title the conversations you choose' }],
+    [{ button: renameButton, why: 'Give the chosen conversation your own title' },
+      { button: retitleButton, why: 'Ask the model for a title for the chosen conversation' },
+      { button: moveButton, why: 'File a conversation under a different project session' },
+      { button: consolidateButton, why: 'Start a new one from summaries of earlier ones' }],
+    [{ button: binButton, why: 'Put back a deleted conversation (kept 30 days)' },
+      { button: deleteButton, why: 'Move conversations to Recently deleted' }],
+  ]);
   const sessionCard = h('section', { class: 'card session-card', dataset: { card: 'session' } },
     nonePicked,
-    // Two rows where there were five (D62): who and whether it is running, with Start; then
-    // Continue | Folder | Asks in thirds.
-    h('div', { class: 'form-row session-head' }, heading, conversationTitle, clientChip, runningLine,
-      h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start'), chat),
+    // Row 1: who, for which topic, where it starts, and whether it is running, with Start / Stop.
+    h('div', { class: 'form-row session-head' }, heading, conversationTitle, clientChip, homeShown, runningLine,
+      h('button', { type: 'button', id: 'session-run', class: 'primary' }, 'Start')),
     idleOffer,
     h('div', { class: 'session-controls' },
-      h('label', { class: 'field' }, 'Continue', resume, newName, switchButton, showAll),
-      h('div', { class: 'field' }, h('span', {}, 'Starts in (home folder)'), homeShown),
+      // Row 2: the conversation, All, and the actions - with Create a worktree under them, its own control.
+      h('div', { class: 'session-pick-row' },
+        h('div', { class: 'session-pick' }, resume, newName, switchButton),
+        showAll,
+        h('div', { class: 'session-actions-col' }, actionsButton, worktreeSlot)),
+      // Row 3: how it asks.
       modeField),
-    // What can be done with conversations: buttons across the card's width, side by side first and then
-    // wrapping, a label on one or two lines each (the user, 2026-10-17). In the Continue field - a third
-    // of the card - they stood one under another.
-    h('div', { class: 'conv-actions' }, searchButton, renameButton, retitleButton, moveButton,
-      suggestButton, consolidateButton, deleteButton, binButton),
     resumeLine,
-    worktreeSlot);
+    worktreeWide);
   view.nonePicked = nonePicked;
   // Autocorrect (feature 94): its green marks sit in a layer behind the box, and its on/off button
   // to the left of the link indicator (the user, 2026-10-08).
@@ -4052,6 +4234,19 @@ export async function render(main, context = {}) {
   view.paintAgent = () => {
     if (!agentPick.disabled) agentPick.value = profileOf(view.name).agent || 'claude';
   };
+  const pictureSaid = h('span', { id: 'session-picture-said', class: 'hint picture-said', role: 'status', hidden: true });
+  // The last prompt's picture note (D216, D246), if any: shown until the next prompt is sent.
+  view.showPictureSaid = (events) => {
+    const list = events || [];
+    let note = null;
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      if (list[i].type === 'prompt') break;
+      if (list[i].type === 'picture_note') { note = list[i]; break; }
+    }
+    pictureSaid.textContent = note ? note.text : '';
+    pictureSaid.title = note ? note.text : '';
+    pictureSaid.hidden = !note;
+  };
   const promptPane = h('section', { class: 'card', id: 'prompt-pane' },
     codeSlot,
     prompt.element,
@@ -4065,7 +4260,9 @@ export async function render(main, context = {}) {
       agentPick,
       // Beside Send, because that is where the eye already is when waiting for a reply,
       // and waiting is when "is this thing still connected?" gets asked (feature 65).
-      h('span', { id: 'session-link', class: 'link-state', hidden: true })),
+      h('span', { id: 'session-link', class: 'link-state', hidden: true }),
+      // D246: a picture attached to the last prompt that went as its text, and why - on the line Send is on.
+      pictureSaid),
     // The model request itself (DECISIONS 47): "Connected" only ever meant the page could reach
     // AI Cleaner, and stayed green through an 82-minute stall.
     // What runs now (feature 173) moved to the line under the transcript in 1.1.2 (Brad, 2026-11-09).
@@ -4101,7 +4298,9 @@ export async function render(main, context = {}) {
   const presetsSlot = h('div', { id: 'session-presets', class: 'session-presets', hidden: true });
   if (view.presets) view.presets.stop();
   view.presets = mountPresets(presetsSlot, { onRun: () => { refresh().catch(() => {}); } });
-  const top = h('div', { class: 'session-top' }, h('div', { class: 'session-left' }, list, presetsSlot), sessionCard);
+  // f184 (revised 2026-11-16 16:25): Project sessions, while open, right under the conversation panel and as wide as it.
+  const top = h('div', { class: 'session-top' }, h('div', { class: 'session-left' }, list, presetsSlot),
+    h('div', { class: 'session-right' }, sessionCard, editorSlot));
   // Between the transcript and the prompt (the user, 2026-09-30): what was started in the
   // background, with Claude's questions and permission requests to its right.
   // File tabs over the transcript (DECISIONS 50): the conversation is the first tab; a file tab
@@ -4236,9 +4435,9 @@ export async function render(main, context = {}) {
     promptPane);
   const band = h('div', { class: `session-band${filesOpen ? ' rail-open' : ''}`, id: 'session-band' },
     rail, panel, filesBar, work);
-  // The profile editor opens between the session list and the band (the user, 2026-10-04): at the
-  // foot of the page, below a band a screen tall, it was easy never to see it open at all.
-  const shell = h('div', { class: 'session-shell' }, top, editorSlot, band);
+  // The profile editor opened between the session list and the band (the user, 2026-10-04): at the foot of the page,
+  // below a band a screen tall, it was easy never to see it open at all. Since f184 it opens under the conversation panel.
+  const shell = h('div', { class: 'session-shell' }, top, band);
   const setFilesOpen = (open, remember) => {
     band.classList.toggle('rail-open', open);
     rail.setAttribute('aria-expanded', String(open));
@@ -4494,7 +4693,7 @@ export async function render(main, context = {}) {
   });
   if (current().running) subscribe(view.name, refresh, applyEvent);
   // Asked for its chat - a notice's Open, a running session in the menu (the user, 2026-10-06):
-  // down to the conversation as "Start chatting" does. Only when asked: arriving on the page
+  // down to the conversation (what the Start chatting button did until 1.2.4). Only when asked: arriving on the page
   // otherwise does not scroll (DECISIONS 35). The address drops `/chat`, so a refresh does not.
   if (view.name) noteAddress(`#/session/${encodeURIComponent(view.name)}`);
   if (toChat && view.name) {
@@ -4582,6 +4781,10 @@ export async function render(main, context = {}) {
       } else {
         editorSlot.replaceChildren();
       }
+      // The list is not redrawn while it holds focus (repaint), and the click just gave the link focus: its text is
+      // said here, so it reads Close project sessions at once rather than when focus moves on.
+      const link = document.getElementById('session-edit-profiles');
+      if (link) link.textContent = view.editing ? 'Close project sessions' : 'Edit project sessions';
       paint();
       return;
     }
@@ -4639,8 +4842,11 @@ export async function render(main, context = {}) {
     if (!active) return;
     const saved = (view.profiles || {}).profiles || [];
     const was = active.dataset.was;
-    const commit = async (list, done) => {
-      const answer = await postJSON('/api/session/profiles', { profiles: list });
+    // f181: `arrange` names the one profile saved from here - only its workspace file may be rewritten - and
+    // `workspace_stamp` says what that file held when this page read it.
+    const commit = async (list, done, arrange = '') => {
+      const answer = await postJSON('/api/session/profiles', { profiles: list, arrange,
+        workspace_stamp: arrange ? (active.wsStamp || null) : null });
       view.profiles = await getJSON('/api/session/profiles');
       say(done, 'ok');
       for (const note of (answer && answer.notes) || []) say(note);
@@ -4654,10 +4860,22 @@ export async function render(main, context = {}) {
       } catch (error) { sayError(error); return; }
       try {
         await commit(was ? saved.map((p) => (p.name === was ? mine : p)) : [...saved, mine],
-          `Project session ${mine.name} saved.`);
+          `Project session ${mine.name} saved.`, mine.name);
         active.dataset.was = mine.name;
+        // f181: the list as saved - the server may have put the home first or dropped a second workspace file.
+        const stored = ((view.profiles || {}).profiles || []).find((p) => p.name === mine.name);
+        const answerView = (view.profiles.workspace || {})[mine.name] || null;
+        if (stored) {
+          const area = active.querySelector('.p-projects');
+          area.value = folderOrder(stored, answerView).join('\n');
+          active.querySelector('.p-workspaces').value = (stored.workspaces || []).slice(0, 1).join('\n');
+          for (const box of [area, active.querySelector('.p-workspaces')]) box.dispatchEvent(new Event('input'));
+        }
+        active.wsStamp = null;
+        const homeNote = active.querySelector('.p-home-moved');
+        if (homeNote) homeNote.hidden = true;
         rebase(active);                 // saved: nothing to lose on leaving this tab now (D98)
-        hintsFor(active, (view.profiles.workspace || {})[mine.name] || null);
+        hintsFor(active, answerView);
         showTab(profileRows().indexOf(active));
       } catch (error) { sayError(error); }
       return;
@@ -4870,6 +5088,113 @@ export async function render(main, context = {}) {
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     } catch (error) { sayError(error); }
   };
+  // ---- f178: New file, Rename and Delete (spec 2026-11-14-f178-files-menu.md) ----------------------------------
+  // tree.editing: { mode: 'new' | 'rename', root, path (the folder, or the item renamed), name, value, error, focus }.
+
+  // The box just drawn gets the caret once - when it opens, and after a refused name - not on every redraw.
+  function focusNameBox() {
+    const input = panel.querySelector('input.tree-edit-name');
+    if (!input || !tree.editing || !tree.editing.focus) return;
+    tree.editing.focus = false;
+    input.focus();
+    const caret = tree.editing.caret;
+    tree.editing.caret = null;
+    if (caret) input.setSelectionRange(caret[0], caret[1]);
+    else if (tree.editing.mode === 'rename' && !tree.editing.selected) { tree.editing.selected = true; selectStem(input); }
+    else input.setSelectionRange(input.value.length, input.value.length);
+  }
+
+  // f180: a menu just opened takes the focus - its first item when opened from the keyboard, the menu itself on a
+  // right-click (so the arrow keys work at once) - and a menu put away gives it back to the name it was for.
+  function focusMenu() {
+    const wanted = tree.menuFocus;
+    tree.menuFocus = null;
+    const menu = panel.querySelector('.tree-menu');
+    if (wanted && menu) {
+      const first = menu.querySelector('[role="menuitem"]');
+      (wanted === 'first' && first ? first : menu).focus({ preventScroll: true });
+      return;
+    }
+    const back = tree.focusAfter;
+    tree.focusAfter = null;
+    if (back && !menu) {
+      const name = [...panel.querySelectorAll('button.tree-name')].find((b) => b.dataset.full === back);
+      if (name) name.focus({ preventScroll: true });
+    }
+  }
+
+  async function startChange(button) {
+    const d = button.dataset;
+    const own = button.closest('.tree-row, .tree-root');
+    const ownName = own && own.querySelector('button.tree-name');
+    tree.menu = null;
+    if (button.classList.contains('tree-new-file')) {
+      tree.open.set(`${d.root}|${d.path || ''}`, true);       // the folder opens, so the box can be seen
+      saveTreeState();
+      tree.editing = { mode: 'new', root: d.root, path: d.path || '', name: '', value: '', error: '', focus: true };
+      showTree();
+      return;
+    }
+    if (button.classList.contains('tree-rename')) {
+      tree.editing = { mode: 'rename', root: d.root, path: d.path, name: d.name, value: d.name, error: '', focus: true };
+      showTree();
+      return;
+    }
+    const items = ownName ? menuItems(itemOf(ownName)) : [];
+    showTree();
+    if (!items.length || !window.confirm(deleteQuestion(items))) return;
+    try {
+      const done = await postJSON('/api/session/files/delete',
+        { name: view.name, items: items.map((i) => ({ root: i.root, path: i.path })) });
+      clearSelection();
+      forgetListings();
+      say(`${done.deleted === 1 ? '1 item' : `${done.deleted} items`} moved to the Recycle Bin.`, 'ok');
+    } catch (error) { sayError(error); }
+    showTree();
+  }
+
+  // Enter: the name sent; the server checks it (the box stays open, saying why, when it is refused).
+  async function finishName() {
+    const editing = tree.editing;
+    if (!editing || editing.busy) return;
+    const typed = editing.value.trim();
+    if (!typed || (editing.mode === 'rename' && typed === editing.name)) { cancelName(); return; }
+    editing.busy = true;
+    // f180: saved by a click elsewhere, that click's choice stands; otherwise the renamed (or new) item is chosen.
+    const chosen = () => selectedItems().map((i) => i.full).join('|');
+    const chosenBefore = chosen();
+    try {
+      const done = editing.mode === 'new'
+        ? await postJSON('/api/session/file/new', { name: view.name, root: editing.root, path: editing.path, file: typed })
+        : await postJSON('/api/session/file/rename', { name: view.name, root: editing.root, path: editing.path, to: typed });
+      tree.editing = null;
+      forgetListings();
+      const parent = done.path.includes('/') ? done.path.slice(0, done.path.lastIndexOf('/')) : '';
+      // The file made (or the item renamed) is chosen, as Explorer leaves it.
+      if (chosen() === chosenBefore) selectOnly({ full: joinPath(done.root, parent, done.name, tree.separator), root: done.root, path: done.path,
+        parent: `${done.root}|${parent}`, dir: false, view: '', name: done.name });
+    } catch (error) {
+      editing.busy = false;
+      editing.error = String(error.message || error);
+      editing.focus = true;
+    }
+    showTree();
+  }
+
+  function cancelName() {
+    tree.editing = null;
+    showTree();
+  }
+
+  panel.addEventListener('input', (event) => {
+    if (event.target.matches('input.tree-edit-name') && tree.editing) tree.editing.value = event.target.value;
+  });
+  panel.addEventListener('keydown', (event) => {
+    if (!event.target.matches('input.tree-edit-name')) return;
+    if (event.key === 'Enter') { event.preventDefault(); finishName(); }
+    else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); cancelName(); }
+  });
+
   panel.addEventListener('click', async (event) => {
     const insert = event.target.closest('button.tree-insert');
     if (insert) { insertAtCursor(box, insert.dataset.insert); tree.menu = null; showTree(); return; }
@@ -4910,6 +5235,13 @@ export async function render(main, context = {}) {
       setTimeout(() => { tree.menu = null; showTree(); }, 0);
       return;
     }
+    // f181: a root's Move up / Move down.
+    const rootMove = event.target.closest('button.tree-root-move');
+    if (rootMove) { await moveRoot(rootMove.dataset.root, Number(rootMove.dataset.to)); return; }
+    // f178: New file, Rename, Delete.
+    const change = event.target.closest('button.tree-new-file, button.tree-rename, button.tree-delete');
+    if (change) { await startChange(change); return; }
+    if (event.target.closest('.tree-edit')) return;            // typing a name: clicks in the box stay there
     if (event.target.closest('.tree-menu')) return;
     // The triangle opens or closes its folder and does nothing else - no actions menu.
     const toggle = event.target.closest('button.tree-toggle');
@@ -4925,48 +5257,198 @@ export async function render(main, context = {}) {
       if (tree.menu || clearSelection()) { tree.menu = null; showTree(); }
       return;
     }
-    // Where in the row it was tapped, so the menu opens there (D143): a long path scrolled to the
-    // right had its menu at the row's left edge, out of view.
+    // f180 (Brad, 2026-11-15): a click never opens the menu - right-click does. It chooses the item, as Explorer does.
+    cancelRenameWait();
+    // The second click of a double-click: the double-click itself does the work (it opens, or a folder opens or closes).
+    if (event.detail >= 2) return;
+    const wasMenu = Boolean(tree.menu);
+    tree.menu = null;
+    // Where in the row it was clicked, kept for a menu opened from the keyboard next (D143).
     const row = name.closest('.tree-row, .tree-root');
     tree.menuAt = row ? Math.max(0, event.clientX - row.getBoundingClientRect().left - 12) : 0;
     // Shift or Ctrl/Cmd builds a selection (feature 97) and never opens or closes a folder. Search
     // results carry no folder of their own (`parent`), so they keep the one-item click.
     const item = itemOf(name);
     if (item.parent && (event.shiftKey || event.ctrlKey || event.metaKey)) {
-      let at = item.full;
       if (event.shiftKey) selectRange(panel, item);
-      else if (!toggleOne(item)) {
-        // Taken out: the menu stays, on the last of what is still chosen.
-        const left = selectedItems();
-        at = left.length ? left[left.length - 1].full : null;
-      }
-      tree.menu = at;
+      else toggleOne(item);
       showTree();
       return;
     }
+    // A second, slower click on the one item already chosen (not a root, not while the menu was open): its name becomes
+    // a box, once the double-click time has passed without a second click.
+    const alone = item.parent && isSelected(item.full) && selectedItems().length === 1;
+    // (A click from the keyboard or a script - detail 0 - only chooses: F2 renames from the keyboard.)
+    if (alone && item.path && !wasMenu && !name.disabled && !tree.editing && event.detail === 1) {
+      waitToRename(item);
+      return;
+    }
     if (item.parent) selectOnly(item);
-    // Tapping a name shows its menu, and tapping it again hides it; a folder also opens or closes.
-    tree.menu = tree.menu === name.dataset.full ? null : name.dataset.full;
+    // A folder chosen by a click also opens or closes, as before f180; a double-click does it once, not twice.
     if (name.classList.contains('dir')) {
-      const key = `${name.dataset.root}|${name.dataset.path}`;
-      if (tree.open.has(key)) { tree.open.delete(key); } else { tree.open.set(key, true); }
-      saveTreeState();
+      toggleFolder(name.dataset.root, name.dataset.path);
+      tree.toggledBy = { full: item.full, at: Date.now() };
     }
     showTree();
   });
-  // Right-click opens the same menu as a click - on a selected item, the selection's - without
-  // opening or closing a folder, and in place of the browser's own menu (feature 97).
+
+  // ---- f180: the menu on right-click only; a slow second click renames; a double-click opens ------------------------
+  const RENAME_WAIT_MS = 500;          // Windows' double-click time by default: a quicker second click is a double-click
+
+  function toggleFolder(root, path) {
+    const key = `${root}|${path || ''}`;
+    if (tree.open.has(key)) { tree.open.delete(key); } else { tree.open.set(key, true); }
+    saveTreeState();
+  }
+
+  function cancelRenameWait() {
+    if (tree.renameWait) clearTimeout(tree.renameWait);
+    tree.renameWait = null;
+  }
+
+  function waitToRename(item) {
+    cancelRenameWait();
+    tree.renameWait = setTimeout(() => {
+      tree.renameWait = null;
+      // Still the one item chosen, nothing else being named, no menu since.
+      const chosen = selectedItems();
+      if (tree.editing || tree.menu || chosen.length !== 1 || chosen[0].full !== item.full) return;
+      startRename(item);
+    }, RENAME_WAIT_MS);
+  }
+
+  function startRename(item) {
+    tree.menu = null;
+    tree.editing = { mode: 'rename', root: item.root, path: item.path, name: item.name, value: item.name, error: '',
+      focus: true };
+    showTree();
+  }
+
+  // A file opened by a double-click: text (or an empty file) in a tab, where it can be edited; anything else
+  // downloads, so the device it is read on opens it with its own program (Brad, 2026-11-15) - never on this machine's
+  // desktop. Text is the tree's own answer for the types it knows, and the server's look at the start of the file
+  // (feature 172, textsniff.py) for the rest.
+  async function openOnDouble(item) {
+    if (!item.root || !item.path) return;
+    let kind = item.view === 'text' ? 'text' : '';
+    if (!kind) {
+      try {
+        const query = new URLSearchParams({ name: view.name, root: item.root, path: item.path });
+        const found = await getJSON(`/api/session/file/sniff?${query}`);
+        if (found && (found.empty || found.text)) kind = 'plain';
+      } catch (error) { sayError(error); return; }
+    }
+    if (kind) { openInTab(item.root, item.path, item.name, kind); return; }
+    await downloadMany([{ ...item, dir: false }]);
+  }
+
+  function openInTab(root, path, fileName, kind) {
+    tabs.open(root, path, fileName, kind);
+    // On a phone the Files panel covers the band; the file goes where the transcript is, so the
+    // panel is put away to show it - for this file only, not remembered. Beside it on a wider
+    // screen, the panel stays as it was.
+    if (window.matchMedia(PHONE).matches && band.classList.contains('rail-open')) setFilesOpen(false, false);
+  }
+
+  panel.addEventListener('dblclick', (event) => {
+    const name = event.target.closest('button.tree-name');
+    cancelRenameWait();
+    if (!name || name.disabled || event.shiftKey || event.ctrlKey || event.metaKey) return;
+    const item = itemOf(name);
+    if (item.dir) {
+      // Opened or closed by the double-click's first click already, unless that click was waiting to rename.
+      const by = tree.toggledBy;
+      tree.toggledBy = null;
+      if (by && by.full === item.full && Date.now() - by.at < 2000) return;
+      toggleFolder(name.dataset.root, name.dataset.path);
+      showTree();
+      return;
+    }
+    openOnDouble(item);
+  });
+
+  // The menu, opened on what was right-clicked - on a selected item, the selection's - without opening or closing a
+  // folder, and in place of the browser's own menu (feature 97). On a tablet a long press raises the same contextmenu
+  // event, so it is the long press's menu there too.
+  function openMenuOn(name, clientX, fromKeyboard) {
+    cancelRenameWait();
+    const item = itemOf(name);
+    if (item.parent && !isSelected(item.full)) selectOnly(item);
+    const row = name.closest('.tree-row, .tree-root');
+    const rowLeft = row ? row.getBoundingClientRect().left : 0;
+    tree.menuAt = row && !fromKeyboard ? Math.max(0, clientX - rowLeft - 12) : 0;
+    tree.menu = item.full;
+    tree.menuFocus = fromKeyboard ? 'first' : 'menu';
+    showTree();
+  }
+
   panel.addEventListener('contextmenu', (event) => {
     const name = event.target.closest('button.tree-name');
     if (!name || name.disabled) return;
     event.preventDefault();
-    const item = itemOf(name);
-    if (item.parent && !isSelected(item.full)) selectOnly(item);
-    const row = name.closest('.tree-row, .tree-root');
-    tree.menuAt = row ? Math.max(0, event.clientX - row.getBoundingClientRect().left - 12) : 0;
-    tree.menu = item.full;
-    showTree();
+    // The context-menu key raises this too, with no pointer position: opened at the row's start, its first item focused.
+    const keyboard = event.clientX === 0 && event.clientY === 0;
+    openMenuOn(name, event.clientX, keyboard);
   });
+
+  // The menu from the keyboard (the context-menu key, Shift+F10), and moved through as a menu is: arrows, Home/End;
+  // Enter runs the item (a button's own); Escape closes it (below, at page level) and gives the name back its focus.
+  panel.addEventListener('keydown', (event) => {
+    const onName = event.target.closest && event.target.closest('button.tree-name');
+    if (onName && (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey))) {
+      event.preventDefault();
+      openMenuOn(onName, 0, true);
+      return;
+    }
+    // F2 renames the focused item, as in Explorer (not a project folder itself).
+    if (onName && event.key === 'F2' && !onName.disabled && !tree.editing) {
+      const item = itemOf(onName);
+      if (!item.parent || !item.path) return;
+      event.preventDefault();
+      cancelRenameWait();
+      selectOnly(item);
+      startRename(item);
+      return;
+    }
+    const menu = event.target.closest && event.target.closest('.tree-menu');
+    if (!menu) return;
+    const items = [...menu.querySelectorAll('[role="menuitem"]')].filter((i) => !i.disabled && !i.hidden);
+    if (!items.length) return;
+    const at = items.indexOf(event.target);
+    let next = null;
+    if (event.key === 'ArrowDown') next = items[(at + 1) % items.length];
+    else if (event.key === 'ArrowUp') next = items[at <= 0 ? items.length - 1 : at - 1];
+    else if (event.key === 'Home') next = items[0];
+    else if (event.key === 'End') next = items[items.length - 1];
+    else if (event.key === 'Tab') { event.preventDefault(); closeMenu(); return; }
+    if (!next) return;
+    event.preventDefault();
+    next.focus();
+  });
+
+  function closeMenu() {
+    if (!tree.menu) return;
+    tree.focusAfter = tree.menu;
+    tree.menu = null;
+    showTree();
+  }
+  tree.closeMenu = closeMenu;
+  tree.finishName = finishName;
+
+  // Clicking away from a name being typed saves it, as Explorer does (Enter does too; Escape cancels). On pointer-down,
+  // not on blur: the tree is redrawn at the end of every turn, and a redraw is no reason to save a half-typed name.
+  // At page level, once, calling whichever render of the page is current.
+  if (!tree.awayHooked) {
+    tree.awayHooked = true;
+    document.addEventListener('pointerdown', (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (tree.editing && !(target && target.closest('.tree-edit')) && tree.finishName) tree.finishName();
+      // A menu is put away by a press outside it and outside the files panel (inside, the click does it).
+      if (tree.menu && !(target && (target.closest('.tree-menu') || target.closest('#session-files'))) && tree.closeMenu) {
+        tree.closeMenu();
+      }
+    }, true);
+  }
   // At page level, once: the tree redraws when a menu opens, so focus rarely stays in the panel.
   // It calls whichever render of the page is current - leaving and returning builds a new one.
   tree.redraw = showTree;
@@ -4974,6 +5456,7 @@ export async function render(main, context = {}) {
     tree.escapeHooked = true;
     document.addEventListener('keydown', (event) => {
       if (event.key !== 'Escape' || !(tree.menu || clearSelection())) return;
+      if (tree.menu) tree.focusAfter = tree.menu;          // f180: the name the menu was for gets the focus back
       tree.menu = null;
       if (tree.redraw) tree.redraw();
     });
@@ -5002,4 +5485,5 @@ export function leave() {
   view.offReading = null;
   view.editing = false;
   view.openSearch = null;            // Ctrl+K belongs to the Session page only
+  tree.editing = null;               // f178: a name half typed is dropped with the page
 }

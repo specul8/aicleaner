@@ -1,4 +1,4 @@
-// Down to the Session page's chat band - "Start chatting", Start, a session opened from the menu.
+// Down to the Session page's chat band - Start, a session opened from the menu or a notice (`/chat`).
 //
 // The scroll is smooth, so it runs for a moment, and content above the band can arrive during it (the Start Work /
 // Start Personal panels load after the page is drawn). Such content must aim the scroll again, not nudge the page:
@@ -26,7 +26,10 @@ export function keepChatInPlace(change) {
     smoothIntoView(band, 'start');
     return;
   }
-  if (before < window.innerHeight) {
+  // At the very top the reader is looking at the top of the page, not the chat: content arriving above the band
+  // pushes it down rather than scrolling the page (f183 - with the shorter session card the band is on screen at once,
+  // and the Start Work panels arriving scrolled the page 116 px on arrival).
+  if (before < window.innerHeight && window.scrollY > 0) {
     const moved = band.getBoundingClientRect().top - before;
     if (moved) window.scrollBy(0, moved);
   }

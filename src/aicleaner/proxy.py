@@ -406,6 +406,11 @@ class Proxy:
         # Driving a Claude Code session from the UI, with its traffic pointed back at this proxy so
         # a session driven from a phone is filtered like one driven from the terminal.
         self.session = None
+        # f185: the add-ons the person listed in <state>\aicleaner-addons.json, each checked against its release
+        # manifest and loaded into this process (addons.py). None listed: nothing here does anything.
+        from .addons import AddonHost
+        self.addons = AddonHost(self)
+        self.addons.load()
         # The file editor's PowerShell commands, compiled from this machine (feature 80). Started in
         # run(), not here: a proxy built by a test must not launch PowerShell.
         from .pscommands import PowerShellCommands
@@ -532,6 +537,10 @@ class Proxy:
                                         label=label, projects=[Path(w["path"])], model=e.get("model", ""),
                                         brief=e.get("brief", ""), share=share, home_override=w["path"],
                                         worktree_of=e["name"], worktree=dict(w), agent=e.get("agent", "claude") or "claude"))
+        # f185: sessions an add-on derives (each marked with the add-on's name, outside session.max_running).
+        addons = getattr(self, "addons", None)
+        if addons is not None:
+            profiles.extend(addons.profiles(entries))
         return profiles
 
     def read_profiles(self) -> list[dict]:
@@ -1257,6 +1266,7 @@ class Proxy:
         import hashlib
 
         from .detect import find_candidates
+        from .attachments import withheld_reason
         from .picture import redact_picture
         read_boxes, fill_boxes = self._picture_readers
         ignored = {v.lower() for v in self.store.ignore_set()} if self.store is not None else set()
@@ -1278,7 +1288,7 @@ class Proxy:
                     result = redact_picture(raw, mapper, read_boxes, fill_boxes, candidates)
                 except Exception as exc:  # noqa: BLE001 - said, then handled as before: the picture goes as text
                     if said is not None:
-                        said.append((key, f"the picture reader failed ({str(exc)[:120]})"))
+                        said.append((key, withheld_reason("failed")))
                     raise
                 with _PICTURE_LOCK:
                     cache.pop(key, None)
@@ -1286,7 +1296,9 @@ class Proxy:
                     while len(cache) > PICTURE_CACHE:
                         cache.pop(next(iter(cache)))
             if result.image is None and said is not None:
-                said.append((key, result.withheld))
+                # D246: the reason in words, with counts only - the same words the AI service is given.
+                reason = "too_large" if getattr(result, "too_large", False) else "legible"
+                said.append((key, withheld_reason(reason, int(result.hidden or 0))))
             return result
 
         return redacted
@@ -1300,8 +1312,9 @@ class Proxy:
             if (session_name, key) in told:
                 continue
             told.add((session_name, key))
-            self.session.picture_note(session_name, f"a picture was not sent as a picture ({why}); its text went in its "
-                                                    "place, where any could be read")
+            # D246: said as the picture going as text and why, not as though Text only had been chosen.
+            self.session.picture_note(session_name, f"The picture went as text, not as a picture: {why}. Its text "
+                                                    "(filtered) went in its place.")
 
     def editor_services(self) -> dict[str, dict[str, Any]]:
         """Each suggestion service, whether it can answer here (installed and signed in), and what it costs - for the
@@ -1784,6 +1797,8 @@ class Proxy:
                 await self.session.reattach_all()
             except Exception as exc:  # noqa: BLE001 - a proxy that cannot re-attach still starts
                 log.warning("could not re-attach running sessions: %s", exc)
+        # f185: the add-ons' own start, once sessions are re-attached.
+        await self.addons.start()
         self._auto_update = asyncio.create_task(self._auto_update_loop())
         if self.session is not None and writes_settings:
             self._warm_lists = asyncio.create_task(self._warm_conversation_lists())
@@ -1997,6 +2012,7 @@ class Proxy:
         if self.codetab is not None:
             await self.codetab.stop()
             self.codetab = None
+        await self.addons.stop()               # f185: an add-on's listeners close with the proxy
         if getattr(self, "_copilot_forwarder", None) is not None:
             await self._copilot_forwarder.close()
         if getattr(self, "_openai_forwarder", None) is not None:

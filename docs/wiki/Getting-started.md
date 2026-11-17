@@ -251,7 +251,7 @@ default.
 2. **Project Sessions**: choose **Edit project sessions**, then **+** to add one.
 3. Give it a name, pick the topic, add the repo folders it works in, and optionally a model and a
    standing brief. **Save**.
-4. Pick the project session and choose **Start**, then **Start chatting**.
+4. Pick the project session and choose **Start**: the page scrolls down to the conversation.
 
 Questions and permission prompts from Claude Code appear on the page with Allow and Deny. Names
 restored in replies are marked in green. More in [Project Sessions](Project-Sessions.md).

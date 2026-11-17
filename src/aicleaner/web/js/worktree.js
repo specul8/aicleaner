@@ -11,6 +11,12 @@ import { busyButton, h } from './dom.js';
 // What the slot shows now, so the five-second poll leaves an open form alone.
 const shown = { key: '', form: false, slot: null };
 
+// What a worktree is for, for someone new to Git (the user, 2026-10-08: "people not used to Git may not understand the
+// benefit"). The link's tooltip since f183; the wiki says the rest.
+export const WORKTREE_WHY = 'A second working copy of the same repository, with its own session. Two pieces of work '
+  + 'can go on side by side without touching each other\'s files - say, a large feature alongside everyday fixes - and '
+  + 'when one is finished, Merge brings its changes back into the main copy.';
+
 function createForm(slot, profile, offer, selectSession) {
   const choices = [
     ...offer.repos.map((repo) => h('option', { value: repo, dataset: { init: '' } }, repo)),
@@ -50,7 +56,10 @@ async function openCreate(slot, profile, selectSession) {
     return;
   }
   shown.form = true;
-  slot.replaceChildren(createForm(slot, profile, offer, selectSession));
+  const form = createForm(slot, profile, offer, selectSession);
+  slot.replaceChildren(form);
+  const first = form.querySelector('select, input');
+  if (first) first.focus();
 }
 
 function finishButtons(profile, selectSession, refresh) {
@@ -76,27 +85,31 @@ function finishButtons(profile, selectSession, refresh) {
     h('span', { class: 'muted' }, `Branch ${tree.name} of ${tree.repo}.`), merge, remove);
 }
 
-// Called on every paint; rebuilds only when the session or its running state changes.
-export function paintWorktree(slot, profile, running, selectSession, refresh) {
+// Called on every paint; rebuilds only when the session or its running state changes. `slot` holds the Create a
+// worktree link (under Conversation actions since f183, Brad 2026-11-16: making a worktree is not a conversation
+// action); `wide` - the full width of the card under its rows - holds the form, and a worktree session's Merge and
+// Remove. Without `wide`, both go in `slot`.
+export function paintWorktree(slot, profile, running, selectSession, refresh, wide = slot) {
   if (shown.slot !== slot) Object.assign(shown, { key: '', form: false, slot });
   const key = `${profile.name || ''}|${running}|${profile.worktree_of || ''}`;
   if (shown.key === key || (shown.form && shown.key.startsWith(`${profile.name}|`))) return;
   shown.key = key;
   shown.form = false;
-  if (!profile.name) { slot.replaceChildren(); return; }
+  slot.replaceChildren();
+  if (wide !== slot) wide.replaceChildren();
+  if (!profile.name) return;
   if (profile.worktree_of) {
     // Merging or removing under a running Claude Code would change files it is working on.
-    slot.replaceChildren(running ? h('p', { class: 'hint' }, 'Stop this session to merge or remove its worktree.')
+    wide.replaceChildren(running ? h('p', { class: 'hint' }, 'Stop this session to merge or remove its worktree.')
       : finishButtons(profile, selectSession, refresh));
     return;
   }
-  const open = h('button', { type: 'button', class: 'link worktree-create' }, 'Create a worktree');
-  open.addEventListener('click', () => openCreate(slot, profile, selectSession));
-  // What a worktree is for, for someone new to Git (the user, 2026-10-08: "people not used to Git
-  // may not understand the benefit").
-  const why = h('span', { class: 'hint worktree-why' },
-    ' - a second working copy of the same repository, with its own session. Two pieces of work can go '
-    + 'on side by side without touching each other\'s files - say, a large feature alongside everyday '
-    + 'fixes - and when one is finished, Merge brings its changes back into the main copy.');
-  slot.replaceChildren(open, why);
+  const open = h('button', { type: 'button', class: 'link worktree-create', title: WORKTREE_WHY,
+    'aria-describedby': 'worktree-why' }, 'Create a worktree');
+  open.addEventListener('click', () => openCreate(wide, profile, selectSession));
+  // The explanation, for a screen reader, and the wiki page for the rest.
+  const why = h('span', { id: 'worktree-why', class: 'visually-hidden worktree-why' }, WORKTREE_WHY);
+  const more = h('a', { class: 'worktree-wiki', href: '#/wiki/Project-Sessions', title: 'Worktree sessions, in the wiki' },
+    'About worktrees');
+  slot.replaceChildren(open, why, more);
 }

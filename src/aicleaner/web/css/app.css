@@ -885,9 +885,8 @@ form.rename { margin: 0; }
 .tree-row button.tree-name.selected, .tree-root button.tree-name.selected {
   background: var(--accent); color: var(--accent-text); border-radius: 4px; box-shadow: inset 0 0 0 1px var(--focus);
 }
-/* Several selected: what each action covers sits on a second row inside the button (taller, not wider). */
-.tree-menu.group button { display: inline-flex; flex-direction: column; align-items: center; line-height: 1.25; }
-.tree-menu-detail { font-size: 11px; opacity: .8; }
+/* Several selected: what each action covers follows its name, quieter (f180: one action per row). */
+.tree-menu-detail { font-size: 11px; opacity: .8; margin-left: auto; padding-left: .8rem; }
 .tree-menu button:not(:disabled) { white-space: nowrap; }
 .tree-row button.tree-name:hover { text-decoration: underline; }
 /* A file or folder's actions open under its name when it is tapped or clicked (the user,
@@ -904,23 +903,83 @@ form.rename { margin: 0; }
 .tree-menu button { border: 1px solid var(--border); background: var(--surface-2); color: inherit;
   border-radius: 4px; padding: .15rem .5rem; cursor: pointer; font-size: 12px; white-space: nowrap; }
 .tree-menu button:disabled { opacity: .45; cursor: default; }
+/* f180 (Brad, 2026-11-15): a context menu - one action per row, down the page, icon then words, the icons twice the
+   size of the words (12px words, 24px icons). New file / Rename / Delete follow a line. */
+.tree-menu { flex-direction: column; align-items: stretch; gap: 1px; min-width: 11rem; }
+.tree-menu:focus { outline: none; }
+.tree-menu [role="menuitem"], .tree-menu a.tree-download {
+  display: flex; align-items: center; gap: .5rem; width: 100%; box-sizing: border-box; text-align: left;
+  border: 0; border-radius: 4px; background: transparent; padding: .2rem .6rem .2rem .35rem; font-size: 12px; }
+.tree-menu [role="menuitem"]:hover:not(:disabled), .tree-menu [role="menuitem"]:focus-visible {
+  background: var(--surface-2); outline: 1px solid var(--focus); outline-offset: -1px; }
+.tree-menu-name { display: inline-flex; align-items: center; gap: .5rem; }
+.tree-menu [role="menuitem"] > [aria-hidden="true"], .tree-menu-name > [aria-hidden="true"] {
+  font-size: 24px; line-height: 1; width: 1.15em; flex: 0 0 auto; text-align: center;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif; }
+.tree-menu-sep { height: 1px; margin: .2rem .3rem; background: var(--border); }
+/* f178: a name typed in place - a new file's, or a rename's - with why it was refused beneath. */
+.tree-edit { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .3rem; min-width: 0; }
+.tree-edit-name { font: inherit; font-size: 13px; padding: .05rem .3rem; min-width: 12rem; border: 1px solid var(--focus);
+  border-radius: 4px; background: var(--surface-2); color: inherit; }
+.tree-edit-error { flex-basis: 100%; font-size: 12px; color: var(--bad-text); }
 /* The tree had its own breakpoint; the shell below now covers both panes at once. */
 
 /* The shell's layout is with the working band, below (feature 51). */
 .session-main { display: grid; gap: 1rem; }
-/* Continue | Folder | Asks, a third each (D62). minmax(0, 1fr) rather than 1fr: a select sizes
-   itself to its longest option, and 1fr would let a long conversation title widen its column at
-   the others' expense. The closed box ellipses; the whole value is on its title. */
-.session-head { align-items: center; }
+/* f183 (Brad, 2026-11-16): three rows. Row 1 - name, topic, home folder, running, Start / Stop; the home folder takes
+   what room is left and ellipses, its whole path on its title. */
+.session-head { align-items: center; flex-wrap: wrap; }
 .session-head #session-run { margin-left: auto; }
-.session-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
-.session-controls .field { display: flex; flex-direction: column; gap: 3px; min-width: 0;
+.session-head .session-home { flex: 1 1 8rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   font-size: 12.5px; color: var(--muted); }
-.session-controls select { width: 100%; text-overflow: ellipsis; }
-/* Where sessions start (DECISIONS 64): a path, so it wraps rather than widening the page on a phone. */
-.session-home { min-width: 0; overflow-wrap: anywhere; padding-top: .3rem; color: var(--text); }
-@media (max-width: 50rem) {
-  .session-controls { grid-template-columns: 1fr; }
+.session-controls { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+/* Row 2 - the conversation (wide; a select sizes itself to its longest option, so min-width 0 and an ellipsis), All,
+   and Conversation actions with Create a worktree under it. */
+.session-pick-row { display: flex; gap: 8px; align-items: flex-start; flex-wrap: wrap; }
+.session-pick { flex: 1 1 18rem; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.session-pick select { width: 100%; text-overflow: ellipsis; }
+.session-all { flex: none; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; padding-top: .35rem; }
+.session-actions-col { flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.session-actions-col .worktree-slot { display: flex; gap: .6rem; align-items: baseline; font-size: 12.5px; }
+.session-actions-col .worktree-create { padding: 0; }
+.worktree-wiki { color: var(--muted); }
+.worktree-wide:empty { display: none; }
+/* Row 3 - Asks and its (i). */
+.session-asks-row { align-items: center; font-size: 12.5px; color: var(--muted); }
+.session-asks-row select { max-width: 24rem; min-width: 0; }
+@media (max-width: 40rem) {
+  .session-pick { flex-basis: 100%; }
+  .session-actions-col { margin-left: auto; }
+  .session-asks-row select { flex: 1 1 auto; }
+}
+/* f183: an (i) holding what a control means - on hover, keyboard focus, or a tap (.open). */
+.info-tip { position: relative; display: inline-flex; align-items: center; }
+.info-tip-button { width: 1.3rem; height: 1.3rem; min-width: 0; padding: 0; border-radius: 50%; font-size: 11px;
+  font-style: italic; font-weight: 700; line-height: 1; display: inline-grid; place-items: center; color: var(--muted); }
+.info-tip-text { display: none; position: absolute; left: 0; top: calc(100% + 6px); z-index: 45; width: max-content;
+  max-width: min(26rem, 80vw); padding: .45rem .6rem; font-size: 12.5px; line-height: 1.4; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 6px 18px #0006; }
+.info-tip:hover .info-tip-text, .info-tip-button:focus-visible + .info-tip-text, .info-tip.open .info-tip-text { display: block; }
+/* f183: Conversation actions - a panel from the right edge over the page, as tall as the window; nothing under it
+   moves. Full width on a narrow screen. The reduced-motion rule above turns the slide off. */
+.conv-drawer-backdrop { position: fixed; inset: 0; z-index: 89; background: #0008; opacity: 0; transition: opacity .2s ease; }
+.conv-drawer-backdrop.open { opacity: 1; }
+.conv-drawer { position: fixed; top: 0; right: 0; bottom: 0; z-index: 90; width: 340px; max-width: 100vw; box-sizing: border-box;
+  display: flex; flex-direction: column; gap: .25rem; padding: .75rem .9rem; overflow-y: auto; background: var(--surface);
+  border-left: 1px solid var(--border); box-shadow: -10px 0 30px #0007; transform: translateX(100%); transition: transform .22s ease; }
+.conv-drawer.open { transform: translateX(0); }
+.conv-drawer-head { display: flex; align-items: center; gap: .5rem; padding-bottom: .4rem; border-bottom: 1px solid var(--border); }
+.conv-drawer-head h2 { margin: 0; font-size: 16px; flex: 1 1 auto; }
+.conv-drawer-close { min-width: 2rem; font-size: 18px; line-height: 1; padding: 2px 6px; }
+.conv-drawer-group { list-style: none; margin: 0; padding: .3rem 0; border-bottom: 1px solid var(--border); }
+.conv-drawer-group:last-child { border-bottom: 0; }
+.conv-drawer-item { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%; text-align: left;
+  padding: .45rem .55rem; background: none; border: 1px solid transparent; border-radius: 6px; color: var(--text); cursor: pointer; }
+.conv-drawer-item:hover, .conv-drawer-item:focus-visible { background: var(--surface-2); border-color: var(--border); }
+.conv-drawer-item.danger .conv-drawer-name { color: var(--bad-text); }
+.conv-drawer-why { color: var(--muted); font-size: 12px; }
+@media (max-width: 600px) {
+  .conv-drawer { width: 100vw; }
 }
 #session-list { max-height: 22rem; overflow: auto; }
 /* The running sessions, as wide as their text and side by side, wrapping onto another line inside
@@ -947,18 +1006,26 @@ form.rename { margin: 0; }
 .p-tab.selected { color: var(--accent); background: var(--surface); font-weight: 600; border-color: var(--accent); }
 .profile-row { min-width: 0; margin: 0; padding: 1rem; border: 1px solid var(--border);
   border-radius: 0 8px 8px 8px; }
-.p-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: .75rem 1rem; align-items: start; }
-.p-grid > * { min-width: 0; }
-.p-grid input:not([type="hidden"]), .p-grid select, .p-grid textarea { width: 100%; box-sizing: border-box; }
-.p-grid .field > button, .p-grid .field > .pick-folder { align-self: flex-start; }
-.p-half { grid-column: span 3; }
-.p-full { grid-column: 1 / -1; }
-.p-home-row { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
-/* "Home folder - <path> (how)" on the heading line (the user, 2026-10-05), the why under it. */
-.p-home-head { display: block; }
-.p-home-label { white-space: nowrap; }
-.p-home-head .p-home { color: var(--text); word-break: break-all; }
-.p-home-why { font-size: 12px; }
+/* f184 (Brad, 2026-11-16 11:34): the controls in blocks that wrap - side by side on a wide screen, stacked in order on a
+   narrow one. Each at least 20rem (the screen's width on a phone); the folder list grows the most. */
+.p-blocks { display: flex; flex-wrap: wrap; gap: 1rem 1.25rem; align-items: flex-start; }
+.p-block { flex: 1 1 20rem; min-width: min(100%, 20rem); display: flex; flex-direction: column; gap: .5rem; }
+.p-block-folders { flex: 3 1 32rem; }
+.p-block-ws { flex: 2 1 22rem; }
+.p-basics { flex: 1 1 18rem; min-width: min(100%, 18rem); }
+.p-block > * { min-width: 0; }
+.p-blocks input:not([type="hidden"]), .p-blocks select, .p-blocks textarea { width: 100%; box-sizing: border-box; }
+.p-blocks .field > button, .p-blocks .field > .pick-folder { align-self: flex-start; }
+.p-full { flex: 1 1 100%; min-width: 0; }
+/* In its block the workspace file's parts go one under another: two columns in a 20rem block squeezed Connect under
+   the create offer's Yes. */
+.p-block-ws .p-ws-grid { grid-template-columns: minmax(0, 1fr); }
+.p-block-ws .p-slot-create-ask, .p-block-ws .p-slot-create-yes { max-width: none; }
+.p-notices[hidden] { display: none; }
+/* f184 (revised 2026-11-16 16:25): Project sessions, while open, right under the conversation panel - the same column,
+   as wide as it. */
+.session-right { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
+.session-right > #session-editor { min-width: 0; }
 /* Workspace files: the list with the create question beside it, the browse button with Yes beside
    that (the user, 2026-10-05). An empty side column takes no room. */
 .p-ws { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
@@ -967,22 +1034,51 @@ form.rename { margin: 0; }
 .p-slot-create-ask, .p-slot-create-yes { max-width: 22rem; }
 .create-offer p { margin: 0 0 .2rem; }
 .p-tab-add { font-weight: 600; padding-inline: .7rem; }
-/* The folder and both its buttons on one row while there is room (the user, 2026-10-04). */
-.p-home-line { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center; }
-.p-home-buttons { display: inline-flex; flex-wrap: wrap; gap: .4rem; }
-.p-home-buttons > button { white-space: nowrap; }
+/* f181: the folder list and the workspace file as pills - a frame per path, a handle at the left, remove at the right. */
+.p-folders { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.p-list-label { color: var(--text); font-size: 13px; display: inline-flex; align-items: center; gap: .35rem; }
+.p-home-moved { margin: 0; }
+.p-folder-add { display: flex; flex-wrap: wrap; gap: .4rem; }
+.pill-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.pill { display: flex; align-items: center; gap: .4rem; min-width: 0; padding: 3px 4px 3px 6px; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+.pill.fixed { background: var(--surface-2); }
+.pill[draggable="true"] { cursor: grab; }
+.pill.dragging { opacity: .5; }
+.pill-handle { color: var(--muted); letter-spacing: -2px; cursor: grab; user-select: none; }
+.pill-path { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.pill-badge { flex: none; padding: 0 .35rem; font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 3px; white-space: nowrap; }
+.pill-badge.badge-home { color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
+.pill-actions { display: inline-flex; flex: none; gap: 2px; }
+.pill-actions button { min-width: 1.9rem; padding: 1px 4px; font-size: 12px; line-height: 1.4; }
+.pill.drop-before { box-shadow: 0 -3px 0 var(--accent); }
+.pill.drop-after { box-shadow: 0 3px 0 var(--accent); }
+/* The Files panel's roots dragged among themselves (f181): a line between two roots, never an outline on one. */
+.tree-root.root-drop-before { box-shadow: inset 0 3px 0 var(--accent); }
+.tree-root.root-drop-after, .tree-branch.root-drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
 .p-notices { display: flex; flex-wrap: wrap; gap: .4rem 1.5rem; align-items: baseline; }
-.p-notices > * { margin: 0; }
+.p-notices > * { margin: 0; min-width: 0; max-width: 100%; box-sizing: border-box; overflow-wrap: anywhere; }
 .p-actions { margin-top: .75rem; align-items: center; }
 .p-actions .grow { flex: 1 1 auto; }
 #profile-delete.armed { border-color: var(--bad, #c0504d); color: var(--bad, #c0504d); }
-@media (max-width: 90rem) {
-  .p-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .p-half { grid-column: 1 / -1; }
-}
-@media (max-width: 50rem) {
-  .p-grid { grid-template-columns: minmax(0, 1fr); }
-}
+/* f183 (Option A): the workspace file's button and what Save does with it on one line; the brief folded. */
+.p-ws-line { display: flex; flex-wrap: wrap; gap: .4rem .75rem; align-items: center; }
+.p-ws-kept { font-size: 12px; }
+.pill-actions button.pill-remove-text { min-width: 0; padding: 1px 8px; }
+.p-share { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
+.p-share:has(> .share-slot:empty) { display: none; }   /* no topic, no assets folder to set */
+.p-share .share-slot > .hint { margin: 0; }
+.p-share .share-current { margin: 0; color: var(--text); }
+.p-brief-fold { border: 1px solid var(--border); border-radius: 6px; }
+.p-brief-fold > summary { display: flex; gap: .6rem; align-items: baseline; padding: .4rem .6rem; cursor: pointer; font-size: 13px;
+  list-style: none; }
+.p-brief-fold > summary::-webkit-details-marker { display: none; }
+.p-brief-sum { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
+  font-size: 12.5px; }
+.p-brief-edit { color: var(--accent); font-size: 12.5px; }
+.p-brief-fold[open] .p-brief-edit { display: none; }
+.p-brief-fold > textarea { display: block; width: calc(100% - 1.2rem); margin: 0 .6rem .6rem; box-sizing: border-box; }
 button.link { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit;
   padding: .4rem 0; text-decoration: underline; }
 @media (max-width: 60rem) {
@@ -1375,6 +1471,10 @@ dialog.picker-dialog::backdrop { background: rgba(0, 0, 0, .55); }
 .session-mid > #session-background { margin-top: 0; }
 .session-mid > #session-permissions:empty { display: none; }
 #prompt-pane { flex: 0 0 auto; height: var(--prompt-h, auto); min-height: 0; display: flex; flex-direction: column; gap: .4rem; }
+/* D246: the last prompt's picture went as its text, and why - one line beside Send, the whole note as its tooltip. */
+#prompt-pane .picture-said { flex: 1 1 16rem; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--warn-border); font-size: 12.5px; }
+#prompt-pane .picture-said[hidden] { display: none; }
 #prompt-pane .prompt-text-box { flex: 1 1 auto; min-height: 2.6rem; resize: none; }
 /* Feature 118: the prompt as text boxes with snippet objects between them. With no snippets the
    wrapper is invisible and the one box looks as it always has; with snippets the wrapper takes the
@@ -1467,9 +1567,14 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
 .file-tab.gone { opacity: .6; text-decoration: line-through; }
 .session-work .file-pane { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .file-pane[hidden], .session-stream[hidden], .file-tabs[hidden] { display: none; }
-.file-head { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; padding: .3rem 0; font-size: 12.5px; }
-.file-head .file-path { font-weight: 600; overflow-wrap: anywhere; }
-.file-head .file-actions { margin-left: auto; display: flex; gap: .4rem; }
+/* f182: two rows. The top: the Source / Preview switch, the path, and the save state at the right end; beneath, small,
+   "size - created ... - modified ...". On a narrow screen each row wraps within itself. */
+.file-head { display: flex; flex-direction: column; gap: 2px; padding: .3rem 0; font-size: 12.5px; line-height: 1.3; }
+.file-head .file-path { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.file-head .file-info-top { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .5rem; min-width: 0; }
+.file-head .file-facts { font-size: 11px; overflow-wrap: anywhere; }
+.file-head .file-actions { margin-left: auto; display: flex; flex-wrap: wrap; gap: .4rem; max-width: 100%; }
+.file-head .file-save-state { flex: none; }
 .file-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; }
 .file-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; align-items: flex-start; background: var(--surface-2); }
 .file-gutter, .file-text { margin: 0; padding: .5rem; font-family: var(--mono); font-size: 12.5px; line-height: 1.45; }
@@ -1535,8 +1640,8 @@ button.file-tab, .file-tab button { border: 0; background: none; color: inherit;
 .md-doc .md-image { font-style: italic; color: var(--muted); }
 .md-doc img.md-img { max-width: 100%; height: auto; vertical-align: middle; }
 .md-doc hr { border: 0; border-top: 1px solid var(--border); margin: 1rem 0; }
-.tree-menu a.tree-download { border: 1px solid var(--border); background: var(--surface-2); color: inherit;
-  border-radius: 4px; padding: .15rem .5rem; font-size: 12px; white-space: nowrap; text-decoration: none; }
+/* The menu's Download is a link: looks like the other rows (f180), nothing of a link's own. */
+.tree-menu a.tree-download { color: inherit; white-space: nowrap; text-decoration: none; }
 
 /* The setup wizard (feature 106). */
 .setup-steps { display: flex; flex-wrap: wrap; gap: .3rem 1rem; list-style: none; padding: 0; margin: 0 0 .8rem; }
@@ -1652,10 +1757,6 @@ dialog.conv-search:not([open]) { display: none; }
 .trust-grid td.mono { overflow-wrap: anywhere; }
 .trust-missing { color: var(--bad, #c0392b); font-weight: 600; }
 /* Recently deleted conversations (2026-10-16, item D). */
-/* The Continue row's actions: buttons in a row that wraps, a label on one or two lines (2026-10-17). */
-.conv-actions { display: flex; flex-wrap: wrap; gap: .4rem; margin-top: .4rem; }
-.conv-actions > button.conv-action { flex: 0 1 9.5rem; min-height: 2.6rem; justify-content: center; text-align: center;
-  white-space: normal; line-height: 1.25; padding: 4px 8px; }
 .bin-list { list-style: none; margin: 0; padding: 0; }
 .bin-row { padding: .35rem 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
 .conv-label { font-weight: 700; margin: .15rem 0; overflow-wrap: anywhere; }
@@ -1767,3 +1868,9 @@ input[type="checkbox"].row-tick { width: 26px; height: 26px; margin: 0 .35rem 0 
 .voice-button.listening { border-color: #e5484d; color: #e5484d; box-shadow: 0 0 0 2px rgba(229, 72, 77, .35); }
 #prompt-pane .voice-listening, .voice-listening textarea { outline: 2px solid rgba(229, 72, 77, .55); }
 .editor-service-state .editor-service-now { font-weight: 600; color: var(--text); margin-bottom: .2rem; }
+
+/* f185: a message from someone else (an add-on's prompt with a mark) - its own kind of line, never read as typed here. */
+.turn.marked-message { border-left: 3px solid var(--warn-border); padding-left: 6px; }
+.turn.marked-message .marked-message-from { margin: 0 0 4px; font-size: 0.9em; white-space: normal; }
+/* D239's "run this command" note. */
+.admin-command pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }

@@ -101,10 +101,8 @@ def state(root: Path, runner: Callable[[Path], str] | None = None) -> dict[str, 
         return off()
 
 
-def command(root: Path, on: bool, port: int, user: str = "", profile: str = "") -> list[str]:
-    """The hidden PowerShell that asks Windows to run the script elevated, in a window you can see - it asks for
-    your password there. The account and profile are passed on, so an administrator who is someone else (a
-    standard user's over-the-shoulder prompt) still sets the task up for you."""
+def _arguments(root: Path, on: bool, port: int, user: str = "", profile: str = "") -> tuple[str, str]:
+    """(the script's arguments for -ArgumentList inside a single-quoted string, the same typed by hand)."""
     user = user or f"{os.environ.get('USERDOMAIN', '')}\\{os.environ.get('USERNAME', '')}".lstrip("\\")
     profile = profile or os.environ.get("USERPROFILE", "")
     root = Path(root)
@@ -113,28 +111,66 @@ def command(root: Path, on: bool, port: int, user: str = "", profile: str = "") 
         # A double-quoted argument inside a single-quoted PowerShell string: the single quotes doubled.
         return '"' + str(value).replace("'", "''") + '"'
 
-    inner = (f"-NoProfile -ExecutionPolicy Bypass -File {quoted(script(root))} -Mode {'User' if on else 'Off'} "
-             f"-Port {int(port)} -AppFolder {quoted(root)} -UserName {quoted(user)} -UserProfile {quoted(profile)} "
-             f"-PauseAtEnd")
-    launch = (f"Start-Process -FilePath '{powershell()}' -Verb RunAs -WindowStyle Normal "
-              f"-WorkingDirectory '{str(root).replace(chr(39), chr(39) * 2)}' -ArgumentList '{inner}'")
-    return [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", launch]
+    mode = "User" if on else "Off"
+    inner = (f"-NoProfile -ExecutionPolicy Bypass -File {quoted(script(root))} -Mode {mode} "
+             f"-Port {int(port)} -AppFolder {quoted(root)} -UserName {quoted(user)} -UserProfile {quoted(profile)}")
+    typed = (f'-NoProfile -ExecutionPolicy Bypass -File "{script(root)}" -Mode {mode} -Port {int(port)} '
+             f'-AppFolder "{root}" -UserName "{user}" -UserProfile "{profile}"')
+    return inner, typed
 
 
-def change(root: Path, on: bool, port: int, launcher: Callable[..., Any] | None = None) -> str:
-    """Start the elevated script on this machine and return at once with what happens next."""
+def launch_line(root: Path, on: bool, port: int, user: str = "", profile: str = "") -> str:
+    """The PowerShell line that asks Windows to run the script elevated, in a window you can see - it asks for
+    your password there. The account and profile are passed on, so an administrator who is someone else (a
+    standard user's over-the-shoulder prompt) still sets the task up for you."""
+    inner, _typed = _arguments(root, on, port, user, profile)
+    return (f"Start-Process -FilePath '{powershell()}' -Verb RunAs -WindowStyle Normal "
+            f"-WorkingDirectory '{str(Path(root)).replace(chr(39), chr(39) * 2)}' -ArgumentList '{inner} -PauseAtEnd'")
+
+
+def manual_command(root: Path, on: bool, port: int, user: str = "", profile: str = "") -> str:
+    """What to run by hand in PowerShell as administrator when no desktop can show the prompt (D239)."""
+    _inner, typed = _arguments(root, on, port, user, profile)
+    return f"& '{powershell()}' {typed}"
+
+
+def command(root: Path, on: bool, port: int, user: str = "", profile: str = "") -> list[str]:
+    """The hidden PowerShell that runs launch_line() on this desktop."""
+    return [powershell(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+            launch_line(root, on, port, user, profile)]
+
+
+def handoff_folder() -> Path:
+    """Where a hand-over's launcher is written (D239): the state folder."""
+    return Path(os.environ.get("USERPROFILE") or Path.home()) / ".aicleaner" / "state" / "desktop"
+
+
+def change(root: Path, on: bool, port: int, launcher: Callable[..., Any] | None = None,
+           folder: Path | None = None, desk: Any = None) -> str:
+    """Start the elevated script where the person can see it, and return at once with what happens next.
+
+    D239: run as the start-up task (session 0), the step is handed to the signed-in desktop (deskrun.py); with
+    nobody signed in, deskrun.NoDesktop carries the command to run instead. `launcher` (a test's stand-in for
+    Popen) means a process that has a desktop; `folder` holds the hand-over's launcher."""
+    from . import deskrun
+
     path = script(root)
-    if sys.platform != "win32" and launcher is None:
+    if sys.platform != "win32" and launcher is None and desk is None:
         raise ServiceError("starting with the computer needs Windows")
     if not path.exists():
         raise ServiceError(f"{path.name} is not beside the app in {root}")
-    launch = launcher or subprocess.Popen
+    if desk is None and launcher is not None:
+        desk = deskrun.Desktop.here_only(launcher)
     try:
-        launch(command(root, on, port), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except OSError as exc:
-        raise ServiceError(f"the change could not be started ({exc})") from exc
+        handed = deskrun.launch(launch_line(root, on, port), manual_command(root, on, port),
+                                Path(folder) if folder is not None else handoff_folder(), desk)
+    except deskrun.NoDesktop:
+        raise
+    except deskrun.DesktopError as exc:
+        raise ServiceError(str(exc)) from exc
+    place = "on your desktop" if handed.where == "desktop" else "on this machine"
     if on:
-        return ("Windows is asking on this machine for administrator, and then a window asks for your Windows password. "
+        return (f"Windows is asking {place} for administrator, and then a window asks for your Windows password. "
                 "Once both are done, AI Cleaner restarts as the start-up task.")
-    return ("Windows is asking on this machine for administrator. Once accepted, the start-up task is removed and "
+    return (f"Windows is asking {place} for administrator. Once accepted, the start-up task is removed and "
             "AI Cleaner starts at your sign-in again.")

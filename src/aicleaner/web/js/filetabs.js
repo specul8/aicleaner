@@ -19,6 +19,10 @@ import { attachPreviewJump } from './previewjump.js';
 import { isSealed, objectUrlThrough } from './sealed.js';
 
 const CHECK_EVERY_MS = 15000;
+// f180 (Brad, 2026-11-15): a Markdown file always opens in Preview - from the tree, a link, a closed tab reopened or a
+// tab put back after a reload. Source is a click away on the tab's own switch, and that choice is not kept. (Only a
+// Markdown tab has the two views; every other tab ignores its mode.)
+const OPENS_IN = 'preview';
 // Feature 171: the closed tabs offered again, as the server keeps them (tabstate.py).
 const MAX_CLOSED = 20;
 const CLOSED_FOR_S = 24 * 60 * 60;
@@ -59,11 +63,12 @@ export function viewAsTextItem(name, root, path, fileName) {
   const slot = h('span', { class: 'tree-view-text-slot', hidden: true });
   looksLikeText(name, root, path).then((text) => {
     if (!text || !slot.isConnected) return;
-    slot.replaceWith(h('button', { type: 'button', class: 'tree-view tree-view-text', role: 'menuitem',
+    const item = h('button', { type: 'button', class: 'tree-view tree-view-text', role: 'menuitem',
       'aria-label': `Open ${fileName} in a tab as plain text`,
       title: 'This file\'s type is not one AI Cleaner knows, but its start is plain text: open it in a tab as text',
       dataset: { root, path, name: fileName, view: 'plain' } },
-    h('span', { 'aria-hidden': 'true' }, 'Aa'), ' View as text'));
+    h('span', { 'aria-hidden': 'true' }, 'Aa'), ' View as text');
+    slot.replaceWith(item);
   });
   return slot;
 }
@@ -76,6 +81,15 @@ function bytes(size) {
 
 function when(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString() : '';
+}
+
+// f182 (Brad, 2026-11-15 18:58): the tab's header is two rows. The top row: the Source / Preview switch (Markdown),
+// the file's relative path, and at its right end the save state ("Saved" ...). The row beneath, small:
+// "<size> - created <date time> - modified <date time>". No Reload (a file changed on disk is read again by itself,
+// and an edit in progress has the conflict bar) and no Download (the Files panel's menu has it). f180 took "read" out.
+function fileFacts(tab, d) {
+  return [tab.data ? bytes(d.size || 0) : '', d.created ? `created ${when(d.created)}` : '',
+    d.modified ? `modified ${when(d.modified)}` : ''].filter(Boolean).join(' - ');
 }
 
 // The text with its line numbers, one scroll for both, so they never drift apart. `plain`: a file of an
@@ -198,7 +212,7 @@ export function fileTabs(ctx) {
       const key = `${t.root}|${t.path}`;
       if (!s.tabs.some((x) => x.key === key)) {
         s.tabs.push({ key, root: t.root, path: t.path, name: t.name, view: t.view, modified: 0, stale: false,
-          gone: false, data: null, mode: t.mode || 'source' });
+          gone: false, data: null, mode: OPENS_IN });
       }
     }
     if (!s.active && saved.active) s.active = saved.active;
@@ -239,24 +253,23 @@ export function fileTabs(ctx) {
     if (!tab) { ctx.pane.replaceChildren(); return; }
     const name = ctx.name();
     const d = tab.data || {};
-    const facts = [bytes(d.size || 0), `modified ${when(d.modified)}`, `read ${when(d.read_at)}`].join(' - ');
-    const reload = h('button', { type: 'button', class: 'file-reload' }, tab.stale ? 'Reload (changed on disk)' : 'Reload');
-    reload.addEventListener('click', () => load(tab));
     const markdown = !tab.error && d.kind === 'markdown' && typeof d.text === 'string';
-    const head = h('div', { class: 'file-head' },
+    const facts = fileFacts(tab, d);
+    const top = h('div', { class: 'file-info-top' },
       markdown ? markdownSwitch(tab, () => { paintPane(); persist(); }) : null,
       h('span', { class: 'mono file-path', title: `${tab.root}` }, tab.path),
-      h('span', { class: 'hint file-facts' }, facts),
       tab.gone ? h('span', { class: 'chip bad' }, 'No longer on disk') : null,
       tab.stale ? h('span', { class: 'chip warn' }, 'Changed on disk') : null,
-      h('span', { class: 'file-actions' }, discussButton(), reload, downloadLink(name, tab.root, tab.path)));
+      h('span', { class: 'file-actions' }, discussButton()));
+    const head = h('div', { class: 'file-head' }, top, facts ? h('div', { class: 'hint file-facts' }, facts) : null);
+    const elsewhere = 'Right-click it in the Files panel and choose Download to open it.';
     let body;
     if (tab.error) body = h('p', { class: 'error-text' }, tab.error);
     else if (!tab.data) body = h('p', { class: 'muted' }, 'Reading...');
     else if (d.download_only && d.text_ok) body = viewAsTextOffer(tab);
-    else if (d.download_only) body = h('p', { class: 'muted' }, `${tab.name} cannot be shown here. Download it to open it.`);
-    else if (d.too_big) body = h('p', { class: 'muted' }, `${tab.name} is ${bytes(d.size)}, too big to show here. Download it to open it.`);
-    else if (d.binary) body = h('p', { class: 'muted' }, `${tab.name} is not text. Download it to open it.`);
+    else if (d.download_only) body = h('p', { class: 'muted' }, `${tab.name} cannot be shown here. ${elsewhere}`);
+    else if (d.too_big) body = h('p', { class: 'muted' }, `${tab.name} is ${bytes(d.size)}, too big to show here. ${elsewhere}`);
+    else if (d.binary) body = h('p', { class: 'muted' }, `${tab.name} is not text. ${elsewhere}`);
     else if (d.view === 'image') {
       body = h('div', { class: 'file-media' }, h('img', { src: viaTunnel(`/api/session/file/raw?${fileQuery(name, tab)}&t=${d.read_at}`), alt: tab.name }));
       loadSealed(body);
@@ -291,11 +304,11 @@ export function fileTabs(ctx) {
       body = textView(d.text || '', tab.name, d.view === 'plain');
       // Say why it cannot be edited (the user, 2026-10-12, read an unexplained read-only view as a bug).
       if (d.editable === false) {
-        head.append(h('span', { class: 'chip warn', title: 'Saving it here could change characters it holds. Convert it to UTF-8 to edit it here.' },
+        top.append(h('span', { class: 'chip warn', title: 'Saving it here could change characters it holds. Convert it to UTF-8 to edit it here.' },
           'Read-only: not UTF-8 text'));
       }
     }
-    head.append(...[saveChip(tab)].filter(Boolean));
+    top.append(...[saveChip(tab)].filter(Boolean));     // f182: at the right end of the top row
     // The editor is reused, so moving it into the new pane must not lose the caret or fire a save.
     const editing = tab.editor && focusedEditor(tab.editor);
     const caret = editing ? [tab.editor.selectionStart, tab.editor.selectionEnd, tab.editor.scrollTop] : null;
@@ -401,7 +414,7 @@ export function fileTabs(ctx) {
       load(tab);
     }
     if (!tab) {
-      tab = { key, root, path, name, view, modified: 0, stale: false, gone: false, data: null, mode: 'source' };
+      tab = { key, root, path, name, view, modified: 0, stale: false, gone: false, data: null, mode: OPENS_IN };
       s.tabs.push(tab);
       load(tab);
     }
@@ -507,7 +520,7 @@ export function fileTabs(ctx) {
     let tab = s.tabs.find((t) => t.key === key);
     if (!tab) {
       tab = { key, root: entry.root, path: entry.path, name: entry.name, view: entry.view, modified: 0, stale: false,
-        gone: false, data: null, mode: entry.mode || 'source' };
+        gone: false, data: null, mode: OPENS_IN };
       s.tabs.splice(Math.min(Number(entry.index) || 0, s.tabs.length), 0, tab);    // back at its place
       load(tab);
     }

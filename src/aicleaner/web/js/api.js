@@ -89,7 +89,7 @@ function linkDown() {
       const answer = await fetch(PROBE_URL, { headers: { Accept: 'application/json', ...AJAX }, cache: 'no-store',
                                               redirect: 'manual' });
       if (wantsSignIn(answer)) signOut();
-      else if (!UNREACHABLE.has(answer.status)) linkUp();
+      else if (!UNREACHABLE.has(answer.status)) { linkUp(); checkVersion(answer); }
     } catch (error) { /* still down */ }
   }, PROBE_MS);
 }
@@ -114,6 +114,24 @@ class Unreachable extends Error {
   }
 }
 
+// f182 (Brad, 2026-11-15: his tablet still showed 1.2.2's file header after 1.2.3 was deployed). The page's files are
+// never cached (guard.py sends no-store for every /web/ file), but a page left open keeps running the code it loaded:
+// it reconnects after the restart and carries on as the old version until it is reloaded. Every answer says which
+// version served it (X-AICleaner-Version); when that is not the version this page was loaded from (its
+// aicleaner-version meta tag), the page says so once, with Reload. Not reloaded for you: a form being typed in, or a
+// file being edited, would be lost.
+const PAGE_VERSION = (document.querySelector('meta[name="aicleaner-version"]') || {}).content || '';
+let updateSaid = false;
+
+export function checkVersion(response) {
+  const served = response && response.headers ? response.headers.get('X-AICleaner-Version') : '';
+  if (!served || !PAGE_VERSION || served === PAGE_VERSION || updateSaid) return false;
+  updateSaid = true;
+  say(`AI Cleaner has been updated to ${served}; this page is still the ${PAGE_VERSION} one. Reload it to use the new version.`,
+    'warn', { action: { label: 'Reload', run: () => window.location.reload() } });
+  return true;
+}
+
 // fetch, with the link watched: a network failure or a gateway status means AI Cleaner is not there.
 async function watched(url, init) {
   let response;
@@ -128,6 +146,7 @@ async function watched(url, init) {
   if (wantsSignIn(response)) { signOut(); throw new Unreachable(response.status); }
   if (UNREACHABLE.has(response.status)) { linkDown(); throw new Unreachable(response.status); }
   if (!link.up) linkUp();
+  checkVersion(response);
   return response;
 }
 
@@ -140,8 +159,11 @@ async function parse(response) {
   }
   if (!response.ok || (data && data.error)) {
     const message = (data && data.error) || `Request failed (HTTP ${response.status})`;
-    throw new ApiError(message, response.status, data && data.suggest,
-                       data && data.why, data && data.offer);
+    const error = new ApiError(message, response.status, data && data.suggest,
+                               data && data.why, data && data.offer);
+    // D239: a command to run by hand (nobody signed in to show an administrator prompt to).
+    if (data && typeof data.command === 'string') error.command = data.command;
+    throw error;
   }
   return data;
 }
