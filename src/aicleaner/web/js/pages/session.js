@@ -13,12 +13,13 @@ import { pane } from '../panes.js';
 import { downloadLink, fileTabs, viewAsTextItem } from '../filetabs.js';
 import { caretRect, onFirstRow, onLastRow } from '../caretrow.js';
 import { confirmLeave, forget, rebase, track } from '../unsaved.js';
-import { fillShare, SHARE_WHY, shareSlot } from '../sharecard.js';
 import { handOverWheel } from '../wheelchain.js';
 import { isSealed } from '../sealed.js';
 import { renderMarkdown } from '../markdown.js';
+import { fileRefContext, forgetFileRefs, watchFileRefs } from '../filerefs.js';
 import { paintWorktree } from '../worktree.js';
 import { openMoveConversation } from '../convmovedialog.js';
+import { gitWarning, openGitOneDrive } from '../gitonedrive.js';
 import { begin, note as noteTiming } from '../timing.js';
 import { attachAutocorrect } from '../autocorrect.js';
 import { openSuggestTitles } from '../titlesdialog.js';
@@ -85,7 +86,8 @@ function replyMarkdown(text) {
     flush();
     node.replaceWith(...pieces);
   }
-  return doc;
+  // f188: names of files in the session's folders become links when the reply comes into view.
+  return watchFileRefs(doc);
 }
 
 function withRestoredNames(text) {
@@ -807,11 +809,12 @@ function dragGrip() {
 // Your prompt in the transcript, its snippets numbered and labelled (feature 116): a heading, a
 // line-number gutter (from the file's own first line for a snippet taken from a file), no wrapping,
 // sideways scrolling - so "line 16 of snippet 2" points at something both of you can see.
+// f188: the user's own words are scanned for file names too (a pasted snippet is code, and is not).
 function promptBody(text) {
   const parts = splitPrompt(text);
-  if (!parts.some((part) => part.snippet)) return h('div', { class: 'prompt-text' }, text);
+  if (!parts.some((part) => part.snippet)) return watchFileRefs(h('div', { class: 'prompt-text' }, text));
   return h('div', { class: 'prompt-parts' }, ...parts.map((part) => (part.snippet
-    ? snippetBlock(part.snippet) : h('div', { class: 'prompt-text' }, part.text))));
+    ? snippetBlock(part.snippet) : watchFileRefs(h('div', { class: 'prompt-text' }, part.text)))));
 }
 
 // A prompt sent with pictures (D216): a small "picture: <name>" chip for each, above its words. The page is told
@@ -1209,8 +1212,8 @@ function entryRow(listing, entry, depth) {
 // What to do with a file or folder, shown under its name and over the row below it (DECISIONS 50).
 // A folder: Prompt. A file a tab can show: Prompt, View, Download. A download-only file (Word,
 // PowerPoint, anything a tab cannot show): Prompt, and Download in View's place - no View at all.
-// f181: a root's Move up / Move down - the keyboard's way to do what dragging a root does. Not for the project assets
-// folder (always first). Moving a folder into first place makes it the home folder.
+// f181: a root's Move up / Move down - the keyboard's way to do what dragging a root does. f187: the order is only the
+// order - where sessions start is the AI tooling folder's role, wherever it sits.
 function rootMoves(item) {
   if (item.parent !== '#roots') return [];
   const order = tree.rootOrder || [];
@@ -1221,7 +1224,7 @@ function rootMoves(item) {
     : h('button', { type: 'button', class: `tree-root-move ${cls}`, role: 'menuitem', 'aria-label': `${words}: ${item.root}`,
       title: why, dataset: { root: item.root, to: String(to) } }, h('span', { 'aria-hidden': 'true' }, glyph), ` ${words}`));
   return [
-    one('tree-root-up', '▲', 'Move up', at - 1, at === 1 ? 'Move it to first place: it becomes the home folder' : 'Move it up one place'),
+    one('tree-root-up', '▲', 'Move up', at - 1, 'Move it up one place'),
     one('tree-root-down', '▼', 'Move down', at + 1, 'Move it down one place'),
   ].filter(Boolean);
 }
@@ -1313,6 +1316,7 @@ async function listing(name, root, relative) {
 
 function forgetListings() {
   tree.cache.clear();
+  forgetFileRefs();          // f188: a name that was not a file may be one now
 }
 
 // A folder's own files as tree items, from its listing if it has been read; null until then.
@@ -1376,8 +1380,8 @@ async function treeRows(name, root, relative, depth) {
 // toggle and the same open-set key (`root|` with an empty path), so D73's remembered state covers
 // roots as well as what is inside them. It used to draw its first level unconditionally, so the
 // list of roots was buried under the contents of the first one.
-// f181: every root but the project assets folder can be dragged among the others by its name (folderlist.js
-// attachRootDrag), or moved with Move up / Move down in its menu; first place is the home folder.
+// f181: every root can be dragged among the others by its name (folderlist.js attachRootDrag), or moved with Move up /
+// Move down in its menu (f187: the client assets folder too, when it is one of the session's folders).
 function rootRow(label, path, extraClass) {
   const open = tree.open.has(`${path}|`);
   const about = { path: '', root: path, full: path, name: label, parent: '#roots', kind: 'dir', view: '' };
@@ -1386,7 +1390,7 @@ function rootRow(label, path, extraClass) {
     treeToggle(label, path, '', open),
     h('button', { type: 'button', class: `tree-name dir tree-root-name${isSelected(path) ? ' selected' : ''}`,
                   'aria-expanded': String(open), dataset: about, draggable: movable ? 'true' : null,
-                  title: movable ? 'Drag between the other folders to reorder them (the first is the home folder)' : null },
+                  title: movable ? 'Drag between the other folders to reorder them' : null },
       h('span', { class: 'tree-text' }, label)),
     tree.menu === path ? treeMenu(label, path, null, about) : null);
 }
@@ -1551,13 +1555,16 @@ async function renderTree(panel, name, roots, current, share) {
   // listed once, as the share, saying when it is also where sessions start.
   const same = (a, b) => String(a || '').replace(/[\\/]+$/, '').toLowerCase()
     === String(b || '').replace(/[\\/]+$/, '').toLowerCase();
-  if (share) {
+  // f187: the client assets folder is one of the session's folders, in the person's order and movable like the rest;
+  // only a share that is not one of the roots (Casual chats' folder outside its list) keeps the fixed first place.
+  const shareIsRoot = Boolean(share) && roots.some((root) => same(root, share));
+  if (share && !shareIsRoot) {
     const shareLabel = same(share, current) ? `${share} (this session)` : share;
     sections.push({ head: rootRow(shareLabel, share, 'share'), root: share });
-  } else {
-    sections.push({ head: h('div', { class: 'tree-root share none' }, 'No Project Assets Folder Configured') });
+  } else if (!share) {
+    sections.push({ head: h('div', { class: 'tree-root share none' }, 'No Client Assets Folder Configured') });
   }
-  const seen = share ? [share] : [];
+  const seen = share && !shareIsRoot ? [share] : [];
   // f181: the roots that move, in order, each once (Move up / Move down and a drag work on this list).
   tree.rootOrder = [];
   for (const root of roots) {
@@ -1566,7 +1573,8 @@ async function renderTree(panel, name, roots, current, share) {
     tree.rootOrder.push(root);
   }
   for (const root of tree.rootOrder) {
-    sections.push({ head: rootRow(same(root, current) ? `${root} (this session)` : root, root), root });
+    const said = `${root}${share && same(root, share) ? ' (client assets)' : ''}${same(root, current) ? ' (this session)' : ''}`;
+    sections.push({ head: rootRow(said, root), root });
   }
 
   // A redraw keeps what each open folder showed until its new listing lands (the user, 2026-10-01).
@@ -2024,74 +2032,195 @@ function answersIn(card) {
 
 // ---- editing the profiles ---------------------------------------------------------------------
 
-// f181 (Brad, 2026-11-15): "Folders appearing in the Files panel" - every folder the Files panel shows, in its order:
-// the topic's project assets folder first and fixed, then the home folder (first place is the home, everywhere), then
-// the rest. Pills, each with a drag handle, move up / move down (keyboard and touch) and remove; "Add a folder" adds
-// one at the end. The paths live in the hidden .p-projects box, one per line, as the old text box held them. With a
-// workspace file, saving makes the file list exactly these folders (never the assets folder); without one, the
-// profile keeps them in this order.
+// f181 (Brad, 2026-11-15): "Folders appearing in the Files panel" - every folder the Files panel shows, in its order.
+// Pills, each with a drag handle, move up / move down (keyboard and touch) and remove; "Add a folder" adds one at the
+// end. The paths live in the hidden .p-projects box, one per line, as the old text box held them. With a workspace
+// file, saving makes the file list exactly these folders in this order; without one, the profile keeps them.
+// f187 (Brad, 2026-11-19): each folder has three role toggles in front of it - Client assets (the topic's folder,
+// exactly one), AI tooling (CWD) (where sessions start, at most one), Client code (a label, any number) - and may have
+// none. Roles never reorder anything; the client assets folder is one of the folders and IS written into the file.
 const sameFolder = (a, b) => String(a || '').replace(/[\\/]+$/, '').toLowerCase()
   === String(b || '').replace(/[\\/]+$/, '').toLowerCase();
 
-// The list as the page first shows it: the Files panel's order (the server's `order` - home, the workspace file's
-// folders, then the profile's own), without the assets folder, which has its own fixed pill.
+// The list as the page first shows it: the Files panel's order (the server's `order`: the person's order since f187, the
+// topic's client assets folder one of the folders wherever it was put).
 function folderOrder(profile, workspace) {
-  const share = (workspace && workspace.share) || '';
   const order = (workspace && workspace.order) || profile.projects || [];
   const out = [];
   for (const folder of order) {
-    if (share && sameFolder(folder, share)) continue;
     if (!out.some((known) => sameFolder(known, folder))) out.push(folder);
   }
   return out;
 }
 
+// f187 (Brad, 2026-11-19; spec specs/2026-11-19-f187-folder-roles.md): three toggles in front of each folder. Their
+// words are the buttons' tooltips and accessible names; the short label is what fits on a phone.
+const ROLE_INFO = {
+  assets: { label: 'Assets', icon: '\u{1F4C1}', title: 'Client assets: the files that cross between you and the client - '
+    + 'documents, designs, exports. Usually your OneDrive folder. Exactly one per project session; it is the topic\'s, '
+    + 'so every project session of the topic shares it.' },
+  tooling: { label: 'Tooling (CWD)', icon: '⚙', title: 'AI tooling (working folder): where the AI agent runs and its '
+    + 'commands start; used to build non-client-facing tooling, operating rules and scripts to deliver the client '
+    + 'outcomes. At most one.' },
+  code: { label: 'Client code', icon: '</>', title: 'Client code: folders that hold the client-facing solution - code and '
+    + 'configuration delivered to the client. A label only; any number.' },
+};
+const NO_ROLE = 'Other folder - accessible to the session, no role';
+
+// The roles as the row holds them: hidden fields beside the folder list, so unsaved-change tracking and readProfile
+// see them like any other field.
+function rolesOf(row) {
+  const one = (cls) => ((row && row.querySelector(cls)) ? row.querySelector(cls).value.trim() : '');
+  return { assets: one('.p-assets'), tooling: one('.p-tooling'), code: row ? linesOf(row.querySelector('.p-code')) : [] };
+}
+
+function rolesFor(row, path) {
+  const roles = rolesOf(row);
+  return {
+    assets: Boolean(roles.assets) && sameFolder(roles.assets, path),
+    tooling: Boolean(roles.tooling) && sameFolder(roles.tooling, path),
+    code: roles.code.some((c) => sameFolder(c, path)),
+  };
+}
+
+// Where sessions start: the tooling folder, else the client assets folder.
+function cwdOf(row) {
+  const roles = rolesOf(row);
+  return roles.tooling || roles.assets || '';
+}
+
+function roleButtons(row, path) {
+  const now = rolesFor(row, path);
+  const name = lastSegment(path);
+  return ['assets', 'tooling', 'code'].map((role) => {
+    const info = ROLE_INFO[role];
+    const on = now[role];
+    return h('button', { type: 'button', class: `role-btn role-${role}${on ? ' on' : ''}`, 'aria-pressed': String(on),
+      title: `${info.title} ${on ? `(on for ${name} - press to turn it off)` : `(press to make ${name} ${role === 'code' ? 'client code' : `the ${role === 'assets' ? 'client assets' : 'AI tooling'} folder`})`}`,
+      'aria-label': `${info.label} - ${name}: ${info.title}`, dataset: { role, path } },
+    h('span', { class: 'role-icon', 'aria-hidden': 'true' }, info.icon), h('span', { class: 'role-label' }, info.label));
+  });
+}
+
+// One role pressed on one folder: assets and tooling move to it (or off it, pressed again); client code toggles.
+function toggleRole(row, path, role) {
+  const set = (cls, value) => {
+    const box = row.querySelector(cls);
+    box.value = value;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  const roles = rolesOf(row);
+  if (role === 'code') {
+    const has = roles.code.some((c) => sameFolder(c, path));
+    set('.p-code', (has ? roles.code.filter((c) => !sameFolder(c, path)) : [...roles.code, path]).join('\n'));
+  } else {
+    const cls = role === 'assets' ? '.p-assets' : '.p-tooling';
+    set(cls, roles[role] && sameFolder(roles[role], path) ? '' : path);
+  }
+}
+
+// What the roles mean for this row, said under the list: no assets folder (Save needs one); a new assets folder for a
+// topic changes it for the topic and its other sessions (Brad, 2026-11-19); where sessions start.
+function rolesNote(row, note) {
+  const roles = rolesOf(row);
+  const client = row.querySelector('.p-client');
+  const cid = client ? client.value : '';
+  const topic = cid ? ((client.selectedOptions[0] || {}).textContent || cid) : '';
+  const parts = [];
+  if (!roles.assets) {
+    parts.push(h('span', { class: 'warn p-assets-missing' }, 'Choose the Client Assets folder: press Assets in front of '
+      + 'one of the folders (add it first if it is not here). Save needs one.'));
+  } else if (cid && row.topicAssets !== undefined && !sameFolder(row.topicAssets || '', roles.assets)) {
+    const all = ((view.profiles || {}).profiles || []);
+    const others = all.filter((p) => p.client === cid && p.name !== row.dataset.was).map((p) => p.name);
+    parts.push(h('span', { class: 'p-assets-topic' }, `Saving changes the client assets folder for topic ${topic}`
+      + (others.length ? ` and its ${others.length} other project session${others.length === 1 ? '' : 's'}: ${others.join(', ')}` : '')
+      + ` - to ${roles.assets}.`));
+  }
+  const cwd = cwdOf(row);
+  if (cwd) {
+    parts.push(h('span', { class: 'p-cwd-note' }, roles.tooling ? `Sessions start in ${lastSegment(cwd)} (AI tooling).`
+      : `No AI tooling folder: sessions start in the client assets folder (${lastSegment(cwd)}).`));
+  }
+  note.replaceChildren(...parts.flatMap((part, i) => (i ? [' ', part] : [part])));
+  note.hidden = !parts.length;
+}
+
 function foldersField(profile, notes, workspace) {
   const area = h('textarea', { class: 'p-projects', rows: '2', hidden: true, tabindex: '-1', 'aria-hidden': 'true' },
     folderOrder(profile, workspace).join('\n'));
+  const hidden = (cls, value) => h('textarea', { class: cls, rows: '1', hidden: true, tabindex: '-1', 'aria-hidden': 'true' }, value);
+  const assets = hidden('p-assets', profile.assets || '');
+  const tooling = hidden('p-tooling', profile.tooling || '');
+  const code = hidden('p-code', (profile.client_code || []).join('\n'));
   // The row this sits in, once it is in one; its workspace answer is refreshed as the lists change (hintsFor).
   const rowOf = () => area.closest('[data-profile="row"]');
-  const shareNow = () => (((rowOf() && rowOf().workspace) || workspace || {}).share) || '';
-  // The client's OneDrive share is always included, so it is not added here as well (DECISIONS 64).
-  const refuse = (path) => (shareNow() && sameFolder(path, shareNow())
-    ? 'That is the topic\'s project assets folder, which is always included - it does not need adding here.' : '');
-  const homeMoved = h('p', { class: 'hint warn p-home-moved', role: 'status', hidden: true });
+  const roleNote = h('p', { class: 'hint p-roles-note', role: 'status', hidden: true });
   const list = pillList(area, {
     label: 'Folders appearing in the Files panel',
-    fixed: () => (shareNow() ? [{ path: shareNow(), label: 'project assets folder',
-      title: 'The topic\'s project assets folder: always first in the Files panel; never written into the workspace file' }] : []),
     badgeTitles: {
-      home: `The home folder. ${HOME_WHY} Drag another folder first, or use Move up, to change it.`,
+      cwd: `Where sessions start. ${HOME_WHY} Press Tooling (CWD) in front of another folder to change it.`,
       workspace: 'Listed in the workspace file',
       added: 'Not in the workspace file yet: Save writes it in',
     },
-    badges: (path, i) => {
+    leading: (path) => roleButtons(rowOf(), path),
+    pillTitle: (path) => {
+      const now = rolesFor(rowOf(), path);
+      const said = ['assets', 'tooling', 'code'].filter((r) => now[r]).map((r) => ROLE_INFO[r].label);
+      return said.length ? `${path} - ${said.join(', ')}` : `${path} - ${NO_ROLE}`;
+    },
+    pillData: (path) => {
+      const now = rolesFor(rowOf(), path);
+      return { roles: ['assets', 'tooling', 'code'].filter((r) => now[r]).join(' ') };
+    },
+    badges: (path) => {
       const row = rowOf();
       const ws = (row && row.workspace) || workspace || null;
       const hasFile = Boolean(row && linesOf(row.querySelector('.p-workspaces')).length);
       const listed = ((ws && ws.listed) || []).some((f) => sameFolder(f, path));
-      return [i === 0 ? 'home' : null, hasFile ? (listed ? 'workspace' : 'added') : null];
+      const cwd = row ? cwdOf(row) : (profile.tooling || profile.assets || '');
+      return [cwd && sameFolder(cwd, path) ? 'cwd' : null, hasFile ? (listed ? 'workspace' : 'added') : null];
     },
-    // Removing the home makes the next folder the home - said before it is saved.
+    // A folder removed takes its roles with it.
     changed: (change) => {
-      const now = change.list[0] || '';
-      const was = change.before[0] || '';
-      if (was && !sameFolder(was, now)) {
-        homeMoved.textContent = now
-          ? `${lastSegment(was)} was the home folder; ${lastSegment(now)} is the home folder now. Save the project session to keep it.`
-          : `${lastSegment(was)} was the home folder, and no folder is left. Add one before saving.`;
-        homeMoved.hidden = false;
-      }
+      const row = rowOf();
+      if (change.kind !== 'remove' || !row) return;
+      const roles = rolesOf(row);
+      const gone = change.path;
+      if (roles.assets && sameFolder(roles.assets, gone)) { assets.value = ''; }
+      if (roles.tooling && sameFolder(roles.tooling, gone)) { tooling.value = ''; }
+      code.value = roles.code.filter((c) => !sameFolder(c, gone)).join('\n');
+      for (const box of [assets, tooling, code]) box.dispatchEvent(new Event('input', { bubbles: true }));
     },
   });
+  // A role pressed: the hidden fields change, the pills redraw (nothing moves - roles impose no order), and the focus
+  // stays on the same button of the same folder.
+  list.addEventListener('click', (event) => {
+    const button = event.target.closest('button.role-btn');
+    if (!button || !list.contains(button)) return;
+    const row = rowOf();
+    if (!row) return;
+    const { role, path } = button.dataset;
+    toggleRole(row, path, role);
+    list.redraw();
+    const again = [...list.querySelectorAll(`button.role-btn.role-${role}`)].find((b) => sameFolder(b.dataset.path, path));
+    if (again) again.focus();
+  });
+  for (const box of [assets, tooling, code]) {
+    box.addEventListener('input', () => { const row = rowOf(); if (row) rolesNote(row, roleNote); });
+  }
+  area.addEventListener('input', () => { const row = rowOf(); if (row) rolesNote(row, roleNote); });
   area.pills = list;
+  area.rolesNote = () => { const row = rowOf(); if (row) rolesNote(row, roleNote); };
   return h('div', { class: 'p-places' },
     h('div', { class: 'field p-folders' },
-      h('span', { class: 'p-list-label' }, 'Folders appearing in the Files panel'),
-      h('span', { class: 'hint' }, 'In the order the Files panel shows them. The first under the project assets folder is the '
-        + 'home folder, where sessions start.'),
-      area, list, homeMoved,
-      h('div', { class: 'p-folder-add' }, folderPicker(area, { append: true, label: 'Add a folder', refuse, firstRoot: true }))),
+      h('span', { class: 'p-list-label' }, 'Folders appearing in the Files panel',
+        infoTip('In the order the Files panel shows them (drag, or Move up / Move down). In front of each, its roles: '
+          + 'Assets (the topic\'s client assets folder - exactly one), Tooling (CWD) (where sessions start - at most one) '
+          + 'and Client code (a label - any number). A folder with none is still reachable by the session.',
+        { label: 'What the folder roles mean' })),
+      area, assets, tooling, code, list, roleNote,
+      h('div', { class: 'p-folder-add' }, folderPicker(area, { append: true, label: 'Add a folder', firstRoot: true }))),
     notes);
 }
 
@@ -2144,9 +2273,9 @@ function workspacesField(profile, hint, homeNow) {
   const showAdd = () => {
     const file = linesOf(area)[0] || '';
     add.hidden = Boolean(file);
-    kept.textContent = file ? `Saving writes every folder in the list above (not the project assets folder) into `
-      + `${lastSegment(file)}, in that order - a backup of the file is kept first.` : 'None connected: the project '
-      + 'session keeps its folders itself.';
+    kept.textContent = file ? `Saving writes every folder in the list above (the client assets folder too) into `
+      + `${lastSegment(file)}, in that order, with its terminal working folder the AI tooling folder - a backup of the `
+      + 'file is kept first.' : 'None connected: the project session keeps its folders itself.';
   };
   area.addEventListener('input', showAdd);
   showAdd();
@@ -2179,8 +2308,8 @@ function implicitHint(row, workspace) {
   return h('p', { class: 'hint' }, `In use, found inside a folder: ${workspace.workspaces[0]}. Connect to it here to keep it.`);
 }
 
-const HOME_WHY = 'Sessions start here, it is the one folder AI Cleaner writes Claude settings into, and a '
-  + 'command that changes folder is brought back here when it ends - so Claude keeps working in the right repo.';
+const HOME_WHY = 'Sessions start here (the AI tooling folder, else the client assets folder), it is the one folder AI '
+  + 'Cleaner writes Claude settings into, and a command that changes folder is brought back here when it ends.';
 
 // The folder that holds the home folder: where its sibling repos and, usually, the workspace file
 // are. Empty (the picker's own default) when there is no home yet.
@@ -2200,6 +2329,11 @@ function createOffer(name, workspace, row) {
   const ask = h('div', { class: 'hint create-offer' },
     h('p', {}, `No workspace file. Create ${create.path}?`),
     h('details', {}, h('summary', {}, 'What it will contain'), h('pre', { class: 'mono' }, create.text)));
+  // D260: the server writes the file into the SAVED profile, so a project session never saved has nothing to look up
+  // ("no project session named ''") - said here instead, as the setup panel does.
+  if (!name) {
+    return { ask, yes: h('p', { class: 'hint create-unsaved' }, 'Save the project session first to create it.') };
+  }
   const yes = h('button', { type: 'button', class: 'primary create-workspace' }, 'Yes, create it');
   busyButton(yes, async () => {
     try {
@@ -2337,7 +2471,7 @@ async function trustGate(profile) {
       add.disabled = true;
       try {
         const done = await postJSON('/api/session/trust-add', { profile });
-        say(`Added to Claude Code: ${(done.wrote || []).length} entries${(done.backups || []).length ? ' (backups kept beside the files)' : ''}.`, 'ok');
+        say(`Added to Claude Code for ${profile.name}: ${(done.wrote || []).length} entries${(done.backups || []).length ? ' (backups kept beside the files)' : ''}.`, 'ok');
         finish('save');
       } catch (error) { sayError(error); add.disabled = false; }
     });
@@ -2424,9 +2558,8 @@ function addNewWorkspaceFolders(row, workspace) {
   if (!pending.has(String(workspace.workspace).toLowerCase())) return;
   const area = row.querySelector('.p-projects');
   const have = linesOf(area);
-  const share = workspace.share || '';
   const fromFile = [workspace.file_home, ...(workspace.listed || [])]
-    .filter((f, i, all) => f && !(share && sameFolder(f, share)) && all.findIndex((g) => sameFolder(g, f)) === i);
+    .filter((f, i, all) => f && all.findIndex((g) => sameFolder(g, f)) === i);
   const added = fromFile.filter((f) => !have.some((g) => sameFolder(g, f)));
   const next = [...fromFile, ...have.filter((f) => !fromFile.some((g) => sameFolder(g, f)))];
   if (next.join('\n') === have.join('\n')) return;
@@ -2437,15 +2570,6 @@ function addNewWorkspaceFolders(row, workspace) {
 
 function lastSegment(path) {
   return String(path).split(/[\\/]/).filter(Boolean).pop() || String(path);
-}
-
-// A hand-added folder that is the client's OneDrive share (DECISIONS 64): removed on save, since
-// the share is always included - unless it is where sessions start, which it then stays as.
-function shareNote(workspace) {
-  if (!workspace || !workspace.share_in_folders) return [];
-  return [h('p', { class: 'hint p-share-note' }, workspace.share_is_home
-    ? `${workspace.share} is also the topic's project assets folder. It stays in this list: it is where sessions start.`
-    : `${workspace.share} is the topic's project assets folder, which is always included. It will be removed from this list when you save.`)];
 }
 
 function workspaceNotes(area, workspace) {
@@ -2484,11 +2608,11 @@ function hintsFor(row, workspace, values) {
     row.wsStamp = { path: workspace.workspace, stamp: workspace.stamp };
   }
   const pills = row.querySelector('.p-projects');
-  if (pills && pills.pills) pills.pills.redraw();      // the badges and the assets folder follow the answer
+  if (pills && pills.pills) pills.pills.redraw();      // the badges follow the answer
   const slot = (name) => row.querySelector(`.p-slot-${name}`);
   slot('implicit').replaceChildren(...[implicitHint(row, workspace)].filter(Boolean));
   slot('notes').replaceChildren(...workspaceNotes(row.querySelector('.p-projects'), workspace),
-    ...shareNote(workspace));
+    ...startsInNote(row, workspace));
   const name = row.dataset.was || '';
   const offer = createOffer(name, workspace, row);
   slot('create-ask').replaceChildren(...(offer ? [offer.ask] : []));
@@ -2552,9 +2676,6 @@ function profileRow(profile, clients, workspace, running) {
     ...clients.map((c) => h('option', { value: c.id, selected: c.id === profile.client ? true : null }, c.label)),
     // D197: a client that does not exist yet, made here; the session saves, and starts once it has a name.
     h('option', { value: NEW_CLIENT }, 'Create new topic...'));
-  // The client's OneDrive share (D99, moved from the Clients page): per client, kept on this
-  // machine. Saved on its own, so it follows the drop-down rather than the profile's Save.
-  const share = shareSlot(profile.client, labelOf(profile.client));
   let chosen = client.value;
   client.addEventListener('change', async (event) => {
     if (client.value !== NEW_CLIENT) { chosen = client.value; return; }
@@ -2572,19 +2693,40 @@ function profileRow(profile, clients, workspace, running) {
       say(`${id} created. Add at least one of its names on its page before starting this session.`, 'ok');
     });
   });
-  client.addEventListener('change', () => {
+  // f187: the client assets folder is the topic's - another topic brings its folder (added to the list when it is not
+  // there); a topic with none keeps the one chosen here, which Save then gives the topic.
+  client.addEventListener('change', async () => {
     if (client.value === NEW_CLIENT) return;
-    share.dataset.client = client.value;
-    if (client.value) fillShare(share, client.value, labelOf(client.value));
-    else share.replaceChildren();
+    const cid = client.value;
+    if (!cid) { row.topicAssets = undefined; row.querySelector('.p-projects').rolesNote(); return; }
+    let folder = '';
+    try { folder = (await getJSON(`/api/clients/${encodeURIComponent(cid)}/share`)).share || ''; } catch (error) { folder = ''; }
+    if (client.value !== cid) return;
+    row.topicAssets = folder;
+    if (folder) {
+      const area = row.querySelector('.p-projects');
+      const have = linesOf(area);
+      if (!have.some((f) => sameFolder(f, folder))) {
+        area.value = [folder, ...have].join('\n');
+        area.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      const box = row.querySelector('.p-assets');
+      box.value = folder;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      area.pills.redraw();
+    }
+    row.querySelector('.p-projects').rolesNote();
   });
   // A running session is known by its profile's name, so the name cannot change under it
   // (the user, 2026-10-04): locked, and saying why, until the session stops.
   const name = h('input', { class: 'p-name', value: profile.name || '', placeholder: 'ACME',
     disabled: running ? true : null, title: running ? RUNNING_LOCK : null });
   // f184 (Brad, 2026-11-16 11:34): the controls in blocks that sit side by side on a wide screen and stack, in this order,
-  // on a narrow one - Basics; Folders appearing in the Files panel (the widest); Workspace file; Project assets folder;
-  // Standing brief. The notices span the whole width under them.
+  // on a narrow one - Basics; Folders appearing in the Files panel (the widest); Workspace file; Standing brief. The
+  // notices span the whole width under them. f187: the Project assets folder block is gone - its role button replaces it.
+  // f186: Git in the session's OneDrive folders, said here without blocking anything; Start asks what to do.
+  const gitSlot = h('div', { class: 'p-git-warn' });
+  if (profile.name) gitWarning(gitSlot, profile.name);
   const row = h('fieldset', { class: 'profile-row', dataset: { profile: 'row', was: profile.name || '' } },
     h('div', { class: 'p-blocks' },
       h('div', { class: 'p-block p-basics' },
@@ -2601,17 +2743,16 @@ function profileRow(profile, clients, workspace, running) {
         h('select', { class: 'p-model-pick', hidden: true, 'aria-label': 'Model' }),
         h('input', { class: 'p-model', value: profile.model || '', placeholder: 'default' }))),
       h('div', { class: 'p-block p-block-folders' },
-        foldersField(profile, h('div', { class: 'p-slot-notes' }), workspace)),
+        foldersField(profile, h('div', { class: 'p-slot-notes' }), workspace), gitSlot),
       // The terminal working directory note belongs with the workspace file it is about.
       h('div', { class: 'p-block p-block-ws' },
         workspacesField(profile, h('div', { class: 'p-slot-implicit' }), () => row.workspace),
         h('div', { class: 'p-slot-cwd' })),
-      h('div', { class: 'p-block p-share' },
-        h('span', { class: 'p-list-label' }, 'Project assets folder', infoTip(SHARE_WHY, { label: 'What the project assets folder is' })),
-        share),
       h('div', { class: 'p-block p-block-brief' }, briefField(profile.brief || '')),
       h('div', { class: 'p-full p-notices p-slot-notices' })));
   row.running = Boolean(running);
+  // f187: the topic's client assets folder as saved, so a different one chosen here is said before Save changes it.
+  row.topicAssets = profile.client ? (profile.assets || '') : undefined;
   name.addEventListener('input', () => {        // the tab says the name as it is typed
     const tab = document.querySelector(`#profile-tabs .p-tab[data-index="${profileRows().indexOf(row)}"]`);
     if (tab) tab.lastChild.textContent = tabLabel(row);
@@ -2619,6 +2760,7 @@ function profileRow(profile, clients, workspace, running) {
   hintsFor(row, workspace, profile);
   watchHints(row);
   firstFolderConnects(row);
+  row.querySelector('.p-projects').rolesNote();
   return row;
 }
 
@@ -2677,14 +2819,44 @@ function readProfile(row) {
     projects: linesOf(row.querySelector('.p-projects')),
     // D99: this machine's workspace files and home folder choice.
     workspaces: linesOf(row.querySelector('.p-workspaces')).slice(0, 1),
-    // f181: first place is the home. The server makes the workspace file agree when it saves.
-    home_override: linesOf(row.querySelector('.p-projects'))[0] || '',
+    // f187: the folders' roles; sessions start in the tooling folder, else the assets folder - never "the first".
+    assets: row.querySelector('.p-assets').value.trim(),
+    tooling: row.querySelector('.p-tooling').value.trim(),
+    client_code: linesOf(row.querySelector('.p-code')),
+    home_override: row.querySelector('.p-tooling').value.trim() || row.querySelector('.p-assets').value.trim(),
     home_derived_was: '',
     model: row.querySelector('.p-model').value.trim(),
     brief: row.querySelector('.p-brief').value,
     // The name it was saved under, so a rename keeps its earlier homes (the server decides).
     was: row.dataset.was || '',
   };
+}
+
+// f186: a start, asking first when the project assets folder (OneDrive) holds Git - the server refuses it with an
+// offer, the dialog asks, and the start goes again: skipping the check this once, or (after a move) checking afresh.
+// True when it started; false when the answer was Cancel.
+async function startAsking(request, refresh) {
+  for (let extra = {}; ;) {
+    try {
+      await postJSON('/api/session/start', { ...request, ...extra });
+      return true;
+    } catch (asked) {
+      if (!(asked && asked.offer && asked.offer.action === 'git_onedrive')) throw asked;
+      const answer = await openGitOneDrive(asked.offer);
+      if (answer === 'cancel') { say(`${request.name} was not started.`); return false; }
+      extra = answer === 'once' ? { git_onedrive: 'once' } : {};
+      if (refresh) await refresh();
+    }
+  }
+}
+
+// f186: a project session with no folders starts in its topic's project assets folder - said under the list, since the
+// list then shows only that folder's fixed pill. Neither: it cannot start until it has one or the other.
+function startsInNote(row, workspace) {
+  const area = row.querySelector('.p-projects');
+  if (!area || linesOf(area).length) return [];
+  return [h('p', { class: 'hint p-starts-in' }, 'No folders yet. Add a folder and press Assets in front of it (the '
+    + 'client assets folder), or choose a topic that has one, before starting.')];
 }
 
 // ---- the tabs: one project profile at a time (the user, 2026-10-04) ---------------------------
@@ -2982,6 +3154,7 @@ export async function render(main, context = {}) {
   const asked = named || rememberedSession();
   const toChat = Boolean(context.route && context.route.chat);
   const toReview = (context.route && context.route.review) || null;     // a review notice's Open (2026-11-06)
+  const toEdit = Boolean(context.route && context.route.edit);           // f187: the topic page's Edit link
   let state;
   try {
     state = await fetchSessionState(asked);
@@ -4831,6 +5004,13 @@ export async function render(main, context = {}) {
   let askedToAdd = false;
   try { askedToAdd = sessionStorage.getItem('aicleaner.addSession') === '1'; } catch (e) { /* not asked */ }
   if (askedToAdd) setTimeout(() => view.addSession(), 0);
+  // f187: `#/session/<name>/edit` (the topic page's Edit link) opens the settings on that session's tab - here, once
+  // the link's click handler above is in place (a click before it did nothing).
+  if (toEdit && view.name && !askedToAdd) {
+    view.profileTab = view.name;
+    const link = document.getElementById('session-edit-profiles');
+    if (link && !view.editing) link.click();
+  }
 
   editorSlot.addEventListener('click', async (event) => {
     const rows = document.getElementById('profile-rows');
@@ -4869,7 +5049,15 @@ export async function render(main, context = {}) {
     };
     if (event.target.closest('#profile-save')) {
       const mine = readProfile(active);
-      // Claude Code's trusted folders first (2026-10-16, item C): Save waits for the answer.
+      // D260: a name first - before Claude Code's trusted folders are checked or written, never a lookup error later.
+      if (!mine.name) {
+        say('This project session has no name: give it one before saving.', 'error');
+        active.querySelector('.p-name').focus();
+        return;
+      }
+      // Claude Code's trusted folders first (2026-10-16, item C): Save waits for the answer. The check and the
+      // update both take the profile as the editor holds it, so a session never saved (or renamed and not saved
+      // yet) is trusted under the name it is about to be saved with (D260). Cancel saves nothing and writes nothing.
       try {
         if ((await trustGate(mine)) === 'cancel') return;
       } catch (error) { sayError(error); return; }
@@ -4884,11 +5072,14 @@ export async function render(main, context = {}) {
           const area = active.querySelector('.p-projects');
           area.value = folderOrder(stored, answerView).join('\n');
           active.querySelector('.p-workspaces').value = (stored.workspaces || []).slice(0, 1).join('\n');
-          for (const box of [area, active.querySelector('.p-workspaces')]) box.dispatchEvent(new Event('input'));
+          active.querySelector('.p-assets').value = stored.assets || '';
+          active.querySelector('.p-tooling').value = stored.tooling || '';
+          active.querySelector('.p-code').value = (stored.client_code || []).join('\n');
+          active.topicAssets = stored.client ? (stored.assets || '') : undefined;
+          for (const box of [area, active.querySelector('.p-workspaces'), active.querySelector('.p-assets'),
+            active.querySelector('.p-tooling'), active.querySelector('.p-code')]) box.dispatchEvent(new Event('input'));
         }
         active.wsStamp = null;
-        const homeNote = active.querySelector('.p-home-moved');
-        if (homeNote) homeNote.hidden = true;
         rebase(active);                 // saved: nothing to lose on leaving this tab now (D98)
         hintsFor(active, answerView);
         showTab(profileRows().indexOf(active));
@@ -4934,13 +5125,13 @@ export async function render(main, context = {}) {
         const request = { name: view.name, resume: resume.value, title: resume.value ? '' : newName.value.trim() };
         view.startClock = { name: view.name, at: performance.now() };
         try {
-          await postJSON('/api/session/start', request);
+          if (!(await startAsking(request, refresh))) return;
         } catch (error) {
           // Short of memory (stability spec S2): the server asks first. Its toast carries "Start anyway".
           if (error && error.offer && error.offer.action === 'start_low_memory') {
             sayError(error, { start_low_memory: async () => {
               try {
-                await postJSON('/api/session/start', { ...request, low_memory_ok: true });
+                if (!(await startAsking({ ...request, low_memory_ok: true }, refresh))) return;
                 say(`${request.name} started.`, 'ok');
                 await refresh();
                 subscribe(request.name, refresh, applyEvent);
@@ -5358,6 +5549,10 @@ export async function render(main, context = {}) {
     if (kind) { openInTab(item.root, item.path, item.name, kind); return; }
     await downloadMany([{ ...item, dir: false }]);
   }
+
+  // f188: a file name clicked in the transcript opens exactly as a double-click here does.
+  fileRefContext({ name: () => view.name, open: (match) => openOnDouble({ root: match.root, path: match.path,
+    name: match.name, view: match.view, full: match.full, dir: false }) });
 
   function openInTab(root, path, fileName, kind) {
     tabs.open(root, path, fileName, kind);

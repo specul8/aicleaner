@@ -15,12 +15,16 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
-from . import fileio
+from . import fileio, folderroles
 
 PROFILES_FILE = "profiles.json"
+# 2 (f187, release 1.3.8): each profile carries its folders' roles - the assets folder is the session's, not the
+# topic's. A version-1 file is upgraded when it is read (proxy.read_profiles -> folderroles.migrate).
+VERSION = 2
 
 # Enough to be a name a person can say, short enough to fit a session card.
 MAX_NAME = 40
@@ -68,11 +72,21 @@ def _clean(entry: dict[str, Any]) -> dict[str, Any]:
                   "path": str(w.get("path", "")).strip()}
                  for w in (entry.get("worktrees") or []) if isinstance(w, dict)]
     worktrees = [w for w in worktrees if w["name"] and w["repo"] and w["path"]]
+    # f186: "Don't remind me again (this project)" - the start's Git-in-OneDrive check is off for this profile. Written
+    # only by the server (the dialog's answer), carried over on an editor save; omitted when it is the default (remind).
+    git_onedrive = str(entry.get("git_onedrive") or "").strip().lower()
+    # f187: the folders' roles - the Client Assets folder (one), the AI tooling folder (where sessions start; at most
+    # one) and the client code folders (a label). Each is one of `projects`; the list's order is never changed here.
+    projects, roles = folderroles.clean(entry, [f for f in folders if f])
     return {
         **({"worktrees": worktrees} if worktrees else {}),
+        **({"git_onedrive": "ignore"} if git_onedrive == "ignore" else {}),
         "name": name,
         "client": str(entry.get("client", "")).strip(),
-        "projects": [f for f in folders if f],
+        "projects": projects,
+        "assets": roles.get("assets", ""),
+        "tooling": roles.get("tooling", ""),
+        "client_code": roles.get("client_code", []),
         "workspaces": workspaces,
         # A home folder the user chose over the derived one, and what the derived one was then;
         # empty = derived (D99). Reset is clearing the override.
@@ -111,11 +125,15 @@ def validate(entries: list[dict[str, Any]], known_clients: set[str] | None = Non
     return cleaned
 
 
+_SAVE_LOCK = threading.Lock()     # D257: one profiles.json save at a time in this process
+
+
 class ProfileStore:
     """Reads and writes profiles.json, and says what is wrong rather than throwing it away."""
 
     def __init__(self, path: str | Path):
         self.path = Path(path)
+        self.version = VERSION          # the version of the file as last read (1 = before f187's folder roles)
 
     def exists(self) -> bool:
         return self.path.is_file()
@@ -124,11 +142,16 @@ class ProfileStore:
         """(profiles, problem). A file that cannot be read gives no profiles and a message: the
         session page then says what to fix instead of showing an empty picker."""
         if not self.path.is_file():
+            self.version = VERSION
             return [], ""
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             return [], f"{self.path.name}: {exc}"
+        try:
+            self.version = int(raw.get("version") or 1) if isinstance(raw, dict) else 1
+        except (TypeError, ValueError):
+            self.version = 1
         entries = raw.get("profiles") if isinstance(raw, dict) else raw
         if not isinstance(entries, list):
             return [], f"{self.path.name}: expected a list of project sessions"
@@ -140,11 +163,19 @@ class ProfileStore:
     def save(self, entries: list[dict[str, Any]], known_clients: set[str] | None = None) -> list[dict[str, Any]]:
         """Validate, then commit. Nothing is written unless every profile is storable."""
         cleaned = validate(entries, known_clients)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps({"version": 1, "profiles": cleaned}, indent=2, ensure_ascii=False) + "\n",
-                       encoding="utf-8")
-        fileio.replace(tmp, self.path)
+        text = json.dumps({"version": VERSION, "profiles": cleaned}, indent=2, ensure_ascii=False) + "\n"
+        # D257: two saves at once (the page's own save and another request) both wrote and renamed the one
+        # profiles.json.tmp, so the second rename found it gone (FileNotFoundError, a 500). Saves now take turns, and
+        # each writes a temp file of its own.
+        with _SAVE_LOCK:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(f"{self.path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            try:
+                tmp.write_text(text, encoding="utf-8")
+                fileio.replace(tmp, self.path)
+            finally:
+                tmp.unlink(missing_ok=True)
+            self.version = VERSION
         return cleaned
 
     def bootstrap(self, from_config: list[dict[str, Any]]) -> list[dict[str, Any]]:

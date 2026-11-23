@@ -449,6 +449,7 @@ class FilterRun:
         self.differences: list[str] = []
         self.whole: list[str] = []        # passes that read the text whole this time, and why
         self.abandoned = False
+        self.pictures: dict[str, Any] | None = None   # D261: picture.PictureTally.summary(), when there were any
 
     # -- bookkeeping --
 
@@ -465,6 +466,8 @@ class FilterRun:
             out["read_whole"] = list(self.whole)
         if self.abandoned:
             out["abandoned"] = True        # the client went away; the passes stopped where `ms` ends
+        if self.pictures:
+            out["pictures"] = dict(self.pictures)
         return out
 
     def _timed(self, name: str, started: float) -> None:

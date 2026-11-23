@@ -4,8 +4,8 @@
 // what saves the profile, what tracks unsaved changes and the folder picker's "add a line" all work on it as before;
 // the pills are drawn from it whenever it changes.
 //
-// Also the Files panel's roots, dragged among themselves (rootdrag below): the same move, the same rule - the first
-// place is the home folder.
+// Also the Files panel's roots, dragged among themselves (rootdrag below): the same move. Since f187 the order is only
+// the order - the AI tooling folder is the home wherever it sits.
 import { h } from './dom.js';
 
 export const PILL_TYPE = 'application/x-aicleaner-pill';
@@ -43,6 +43,8 @@ const lastName = (path) => String(path).split(/[\\/]/).filter(Boolean).pop() || 
 //   badgeTitles        { badge: tooltip } for the badges
 //   removeText         the remove button's word, in place of x ("Disconnect" for the workspace file, f183)
 //   changed(change)    after a change made here: { kind: 'move' | 'remove', from, to, path, list, before }
+//   leading(path, i)   controls drawn in front of a pill (f187: the folder role buttons); their clicks are the caller's
+//   pillTitle(path, i) the pill's tooltip; pillData(path, i) more data-* attributes for it
 export function pillList(area, opts = {}) {
   const what = opts.what || 'folder';
   const movable = opts.movable !== false;
@@ -67,7 +69,12 @@ export function pillList(area, opts = {}) {
     const remove = h('button', { type: 'button', class: `pill-remove${opts.removeText ? ' pill-remove-text' : ''}`,
       title: `${verb} ${name}`, 'aria-label': `${verb} ${name}`, dataset: { index: String(i) } }, opts.removeText || '×');
     const badges = (opts.badges ? opts.badges(path, i) : []).filter(Boolean);
-    return h('li', { class: 'pill', draggable: movable ? 'true' : null, dataset: { index: String(i), path } },
+    // f187: controls in front of the pill (the folder role buttons), and what the pill as a whole is.
+    const leading = (opts.leading ? opts.leading(path, i) : []).filter(Boolean);
+    const extra = opts.pillData ? opts.pillData(path, i) : {};
+    return h('li', { class: 'pill', draggable: movable ? 'true' : null, title: opts.pillTitle ? opts.pillTitle(path, i) : null,
+      dataset: { index: String(i), path, ...extra } },
+      leading.length ? h('span', { class: 'pill-lead' }, ...leading) : null,
       movable ? h('span', { class: 'pill-handle', title: 'Drag to move', 'aria-hidden': 'true' }, '⋮⋮') : null,
       ...badges.map((badge) => h('span', { class: `pill-badge badge-${badge.replace(/\W+/g, '-')}`,
         title: (opts.badgeTitles || {})[badge] || null }, badge)),
@@ -94,7 +101,7 @@ export function pillList(area, opts = {}) {
   };
 
   list.addEventListener('click', (event) => {
-    const button = event.target.closest('button');
+    const button = event.target.closest('button.pill-remove, button.pill-up, button.pill-down');
     if (!button || !list.contains(button)) return;
     const paths = linesIn(area);
     const i = Number(button.dataset.index);

@@ -570,7 +570,9 @@ function parseRoute() {
   const chat = name === 'session' && parts[2] === 'chat';
   // ... and `/review/<root|path>`: a review notice's Open, the file's tab brought to the front (2026-11-06).
   const review = name === 'session' && parts[2] === 'review' ? parts[3] || null : null;
-  return { name, id, chat, review };
+  // ... and `/edit`: the project session's settings opened on its tab (f187: the topic page's Edit link).
+  const edit = name === 'session' && parts[2] === 'edit';
+  return { name, id, chat, review, edit };
 }
 
 // The address a page was drawn for, so a guarded move can be put back (D98).

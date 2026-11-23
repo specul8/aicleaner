@@ -147,6 +147,161 @@ def redact_picture(raw: bytes, mapper: Any, read_boxes: ReadBoxes, fill_boxes: F
     return Redacted(copy, text, len(boxes), media=media_of(copy))
 
 
+# ---- pictures decided, remembered (D261) -------------------------------------------------------------------------
+
+class Kept:
+    """A bounded, thread-safe memory, least recently used out first, by count and by bytes (D261).
+
+    The picture outcomes were kept first in, first out, 32 of them, and a hit did not refresh its entry: a conversation
+    with more pictures than that, sent again in the same order with every request, found each one gone just before it
+    was asked for - no hit at all, and three PowerShell runs per picture per request (38 pictures, 230 s)."""
+
+    def __init__(self, kept: int, max_bytes: int) -> None:
+        import threading
+        from collections import OrderedDict
+
+        self._items: "OrderedDict[Any, tuple[Any, int]]" = OrderedDict()
+        self._bytes = 0
+        self._limit = (max(1, int(kept)), max(1, int(max_bytes)))
+        self._lock = threading.Lock()
+
+    def get(self, key: Any) -> Any:
+        with self._lock:
+            found = self._items.get(key)
+            if found is None:
+                return None
+            self._items.move_to_end(key)
+            return found[0]
+
+    def put(self, key: Any, value: Any, size: int) -> None:
+        with self._lock:
+            old = self._items.pop(key, None)
+            if old is not None:
+                self._bytes -= old[1]
+            self._items[key] = (value, size)
+            self._bytes += size
+            while len(self._items) > 1 and (len(self._items) > self._limit[0] or self._bytes > self._limit[1]):
+                _key, (_value, gone) = self._items.popitem(last=False)
+                self._bytes -= gone
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+
+def _lines_size(lines: list) -> int:
+    return sum(64 + len(str(line.get("text") or "")) if isinstance(line, dict) else 64 for line in lines)
+
+
+class PictureMemory:
+    """The box reader and the box filler, remembering what they said (D261; see picturestore.py for why this is safe).
+
+    In memory first (bounded, least recently used out), then on disk when a store is given (only for the real reader,
+    with `reader` its fingerprint), then the reader itself. `redact_picture` is handed these in place of the reader and
+    so makes every decision as before, against the mapping it is given: only the reader's runs are saved. A failure
+    (timeout, error) is never kept; a copy that could not fit the size cap is (same bytes, boxes and cap, same answer).
+    """
+
+    def __init__(self, read_boxes: ReadBoxes, fill_boxes: FillBoxes, store: Any = None, reader: str = "",
+                 kept: int = 512, max_bytes: int = 128_000_000) -> None:
+        self.readers = (read_boxes, fill_boxes)
+        self.store = store
+        self.reader = reader
+        self._readings = Kept(kept, max_bytes)
+        self._copies = Kept(kept, max_bytes)
+
+    def read(self, raw: bytes) -> tuple[list, bool]:
+        """(the lines and boxes read from `raw`, whether they were remembered rather than read)."""
+        from .picturestore import key_of
+
+        key = key_of(raw, self.reader)
+        found = self._readings.get(key)
+        if found is None and self.store is not None:
+            stored = self.store.get("read", key)
+            if isinstance(stored, dict) and isinstance(stored.get("lines"), list):
+                found = stored["lines"]
+                self._readings.put(key, found, _lines_size(found))
+        if found is not None:
+            return found, True
+        lines = self.readers[0](raw)                  # a ConversionError goes to the caller, and nothing is kept
+        lines = lines if isinstance(lines, list) else [lines]
+        self._readings.put(key, lines, _lines_size(lines))
+        if self.store is not None:
+            self.store.put("read", key, {"lines": lines})
+        return lines, False
+
+    def fill(self, raw: bytes, boxes: list, cap: int) -> tuple[bytes, bool]:
+        """(the copy with exactly `boxes` filled, at most `cap` bytes; whether it was remembered). PictureTooLarge as
+        the filler said it."""
+        from .picturestore import key_of
+
+        key = key_of(raw, boxes, int(cap), self.reader)
+        found = self._copies.get(key)
+        if found is None and self.store is not None:
+            stored = self.store.get("fill", key)
+            if isinstance(stored, dict) and "too_large" in stored:
+                found = PictureTooLarge(str(stored["too_large"]))
+            elif isinstance(stored, dict) and isinstance(stored.get("copy"), str):
+                import base64
+                found = base64.b64decode(stored["copy"])
+            if found is not None:
+                self._copies.put(key, found, len(found) if isinstance(found, bytes) else 256)
+        if found is not None:
+            if isinstance(found, PictureTooLarge):
+                again = PictureTooLarge(str(found))
+                again.remembered = True              # type: ignore[attr-defined] - not a reader run (the tally)
+                raise again
+            return found, True
+        try:
+            copy = _fill(self.readers[1], raw, boxes, cap)
+        except PictureTooLarge as exc:
+            self._copies.put(key, PictureTooLarge(str(exc)), 256)
+            if self.store is not None:
+                self.store.put("fill", key, {"too_large": str(exc)})
+            raise
+        self._copies.put(key, copy, len(copy))
+        if self.store is not None:
+            import base64
+            self.store.put("fill", key, {"copy": base64.b64encode(copy).decode("ascii")})
+        return copy, False
+
+
+class PictureTally:
+    """One request's pictures, for the upstream line's `filter.pictures` (D261): counts and times only, never text.
+
+    `seen` pictures (image blocks); `cached` - answered from memory with no reader run; `processed` - the reader ran
+    for them (a PowerShell process, OCR) - the time a picture-heavy request goes to. `ms` per stage."""
+
+    def __init__(self) -> None:
+        self.seen = 0
+        self.cached = 0
+        self.processed = 0
+        self.work = 0                     # reader runs so far in this request (box reads, fills, text reads)
+        self.runs = {"read_boxes": 0, "fill": 0, "read_text": 0}
+        self.ms: dict[str, float] = {}
+
+    def timed(self, stage: str, started: float) -> None:
+        import time
+
+        self.ms[stage] = self.ms.get(stage, 0.0) + (time.perf_counter() - started) * 1000
+
+    def ran(self, stage: str) -> None:
+        self.runs[stage] += 1
+        self.work += 1
+
+    def block(self, work_before: int) -> None:
+        """One picture done: processed when a reader ran for it, else cached."""
+        self.seen += 1
+        if self.work > work_before:
+            self.processed += 1
+        else:
+            self.cached += 1
+
+    def summary(self) -> dict[str, Any]:
+        return {"seen": self.seen, "cached": self.cached, "processed": self.processed, "runs": dict(self.runs),
+                "ms": {k: round(v, 1) for k, v in self.ms.items()}}
+
+
 # ---- the reader, through Read-ImageText.ps1 ----------------------------------------------------------------------
 
 def windows_readers(timeout: int = TIMEOUT_S) -> tuple[ReadBoxes, FillBoxes] | None:

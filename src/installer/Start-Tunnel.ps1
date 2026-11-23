@@ -131,9 +131,13 @@ try {
     # this before anyone signs in, and the sign-in task aicleaner-tunnel runs it again at sign-in. The second finds
     # the first and leaves it be.
     # Only this account's: another user's cloudflared is not this tunnel, and must not stop it starting (security review).
+    # And only AI Cleaner's: it runs with --logfile at this script's log (D264, 2026-11-22: the aicleaner-rdp add-on's
+    # own tunnel, also this account's cloudflared, writes its log elsewhere - counted as this one, AI Cleaner's tunnel
+    # stood down on every attempt and remote access stayed down).
     $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $already = @(Get-CimInstance Win32_Process -Filter "Name = '$($exeName -replace "'", "''")'" -ErrorAction SilentlyContinue |
         Where-Object { [string]$_.CommandLine -match '\stunnel\b.*\srun\b' } |
+        Where-Object { ([string]$_.CommandLine).IndexOf($LogPath, [StringComparison]::OrdinalIgnoreCase) -ge 0 } |
         Where-Object {
             $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction SilentlyContinue
             $owner -and $owner.Sid -eq $me

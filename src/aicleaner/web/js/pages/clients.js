@@ -12,6 +12,9 @@ import { heldCallout, keySection } from './clientkeys.js';
 import { track } from '../unsaved.js';
 import { folderPicker } from '../picker.js';
 import { smoothIntoView } from '../motion.js';
+import { infoTip } from '../infotip.js';
+import { SHARE_WHY, shareSlot } from '../sharecard.js';
+import { deleteTopicButton, openDeletedTopics } from './topicbin.js';
 
 // Quotes and backslashes are fine (escaped where JSON needs it); control characters never are.
 const FORBIDDEN = /[\u0000-\u001f]/;
@@ -1139,8 +1142,8 @@ function tools(cid, clientView, table, readOnly) {
   return bar;
 }
 
-// The OneDrive share and the primary repo used to be set here. Both are about this machine's disk,
-// not about tokenising, so they moved to the Session page's profiles editor (D99).
+// The primary repo used to be set here (it moved to the Session page's profiles editor, D99). The client assets folder
+// (the OneDrive share) is back on the topic page since f187, beside the Session page's Assets role button.
 
 // What this client is called, in the three places it has a name. The id is the one that leaves
 // this window - it names the file, keys the mapping, and is what the command line wants - so it
@@ -1573,7 +1576,20 @@ export async function render(main, ctx) {
     const head = h('div', { class: 'page-head' }, title);
     if (row.id !== 'global') head.append(renameControl(row, head, title));
     head.append(h('span', { class: 'muted' }, indexNote, ' - ', h('a', { id: 'show-all', href: '#/clients' }, 'show all topics')));
-    main.append(head, h('div', { class: 'client-list' }, section(row, true)));
+    // D258: delete the topic (to a bin, 30 days) - the bin icon's modal says what will happen first.
+    if (row.id !== 'global') {
+      head.append(deleteTopicButton(row.id, async () => {
+        expanded.delete(row.id);
+        view.ctx.status = await view.ctx.refresh();
+        location.hash = '#/clients';
+      }));
+    }
+    // f187 (Brad, 2026-11-19: "where is the topic folder for Actor-Quotes? I cannot see it listed anywhere on the topic
+    // page"): the topic's client assets folder, and the project sessions that read it.
+    const assets = row.id === 'global' ? null : h('section', { class: 'card topic-assets', 'aria-label': 'Client assets folder' },
+      h('h2', {}, 'Client assets folder', infoTip(SHARE_WHY, { label: 'What the client assets folder is' })),
+      shareSlot(row.id));
+    main.append(head, ...(assets ? [assets] : []), h('div', { class: 'client-list' }, section(row, true)));
     return;
   }
   const find = h('input', { type: 'search', id: 'find-client', placeholder: 'Find a topic, term, token or ignored string',
@@ -1595,9 +1611,16 @@ export async function render(main, ctx) {
     clearTimeout(view.findTimer);
     view.findTimer = setTimeout(() => findEverywhere(list, find.value.trim().toLowerCase()).catch(sayError), 250);
   });
+  // D258: topics deleted from their page wait here for 30 days.
+  const binButton = h('button', { type: 'button', id: 'topics-deleted', title: 'Topics deleted in the last 30 days, '
+    + 'which can be restored' }, 'Recently deleted');
+  binButton.addEventListener('click', () => openDeletedTopics(async () => {
+    view.ctx.status = await view.ctx.refresh();
+    paintList(list);
+  }));
   main.append(h('div', { class: 'page-head' }, h('h1', {}, 'Topics'),
     h('span', { class: 'muted' }, `${ctx.status.clients.length} ${ctx.status.clients.length === 1 ? 'topic' : 'topics'} and Global`),
-    h('div', { class: 'actions' }, find, addButton, joinShared())), form, list);
+    h('div', { class: 'actions' }, find, addButton, joinShared(), binButton)), form, list);
   paintList(list);
 }
 

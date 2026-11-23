@@ -84,8 +84,10 @@ class _Scrubber:
                  office: OfficeToText | None = office_to_text,
                  repair: Repair | None = None,
                  ocr_max_pages: int = 10, ocr_timeout_s: int = 60,
-                 ocr_max_bytes: int = 20_000_000, picture: Any = None):
+                 ocr_max_bytes: int = 20_000_000, picture: Any = None, tally: Any = None):
         self.allow_images = allow_images
+        # D261: this request's pictures - seen, answered from memory, read again - for the upstream line.
+        self.tally = tally
         # Feature 114: (image bytes) -> picture.Redacted, when pictures go with client names blacked out.
         self.picture = picture
         self.pdf_to_text = pdf_to_text
@@ -143,6 +145,18 @@ class _Scrubber:
         return _notice(f"[aicleaner: an attachment ({what or 'unknown type'}) was withheld: it cannot be checked for real names.]")
 
     def image(self, block: dict[str, Any], media: str, raw: bytes | None = None) -> Any:
+        if self.tally is None:
+            return self._image(block, media, raw)
+        import time
+
+        before, started = self.tally.work, time.perf_counter()
+        try:
+            return self._image(block, media, raw)
+        finally:
+            self.tally.timed("pictures", started)
+            self.tally.block(before)
+
+    def _image(self, block: dict[str, Any], media: str, raw: bytes | None = None) -> Any:
         if self.allow_images and media in ACCEPTED_IMAGE_TYPES:
             self.counts["image_allowed"] += 1
             return block
@@ -367,13 +381,14 @@ class _Scrubber:
 def scrub(obj: Any, allow_images: bool, pdf_to_text: PdfToText, *,
           image_to_text: ImageToText | None = None, office: OfficeToText | None = office_to_text,
           repair: Repair | None = None, ocr_max_pages: int = 10, ocr_timeout_s: int = 60,
-          ocr_max_bytes: int = 20_000_000, picture: Any = None) -> tuple[Any, Counter[str]]:
+          ocr_max_bytes: int = 20_000_000, picture: Any = None, tally: Any = None) -> tuple[Any, Counter[str]]:
     """Rewrite every attachment in a parsed request; returns the new body and outcome counts.
 
     `repair` is handed the text a converter produced, and nothing else. The caller uses it to put
-    right the letters an OCR engine got wrong, and to keep what was read.
+    right the letters an OCR engine got wrong, and to keep what was read. `tally` (picture.PictureTally), when given,
+    counts and times each picture for the upstream line (D261).
     """
     s = _Scrubber(allow_images, pdf_to_text, image_to_text=image_to_text, office=office,
                   repair=repair, ocr_max_pages=ocr_max_pages, ocr_timeout_s=ocr_timeout_s,
-                  ocr_max_bytes=ocr_max_bytes, picture=picture)
+                  ocr_max_bytes=ocr_max_bytes, picture=picture, tally=tally)
     return s.walk(obj), s.counts

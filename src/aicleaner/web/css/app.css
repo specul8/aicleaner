@@ -27,6 +27,7 @@
   --bad-border: #e8a0a0;
   --bad-text: #b42318;
   --focus: #2563eb;
+  --file-link: #1d4ed8;     /* f188: a file name in the transcript */
   --shadow: 0 6px 20px rgba(16, 35, 31, 0.14);
   --mono: Consolas, "Cascadia Mono", "SFMono-Regular", Menlo, monospace;
   --sans: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
@@ -60,6 +61,7 @@
   --bad-border: #8f2d2d;
   --bad-text: #ff8a8a;
   --focus: #7cc4ff;
+  --file-link: #7cc4ff;
   --shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
   color-scheme: dark;
 }
@@ -1040,18 +1042,47 @@ form.rename { margin: 0; }
 .p-home-moved { margin: 0; }
 .p-folder-add { display: flex; flex-wrap: wrap; gap: .4rem; }
 .pill-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
-.pill { display: flex; align-items: center; gap: .4rem; min-width: 0; padding: 3px 4px 3px 6px; color: var(--text);
-  background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+/* f187: wraps - the role toggles in front made a pill wider than a narrow Folders block (no sideways scroll at 768 px);
+   the path keeps the row while 10rem of it fits. */
+.pill { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; min-width: 0; padding: 3px 4px 3px 6px;
+  color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
 .pill.fixed { background: var(--surface-2); }
 .pill[draggable="true"] { cursor: grab; }
 .pill.dragging { opacity: .5; }
 .pill-handle { color: var(--muted); letter-spacing: -2px; cursor: grab; user-select: none; }
-.pill-path { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.pill-path { flex: 1 1 10rem; min-width: 0; overflow-wrap: anywhere; }
 .pill-badge { flex: none; padding: 0 .35rem; font-size: 11px; color: var(--muted); border: 1px solid var(--border);
   border-radius: 3px; white-space: nowrap; }
 .pill-badge.badge-home { color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
 .pill-actions { display: inline-flex; flex: none; gap: 2px; }
 .pill-actions button { min-width: 1.9rem; padding: 1px 4px; font-size: 12px; line-height: 1.4; }
+/* f187: the folder role toggles in front of each pill - off: quiet outline; on: filled, each role its own accent. A
+   pill with no role shows all three off (its tooltip says "no role"). */
+.pill-badge.badge-cwd { color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
+.pill-lead { display: inline-flex; flex: none; gap: 2px; }
+.role-btn { display: inline-flex; align-items: center; gap: 3px; min-width: 0; padding: 1px 6px; font-size: 11.5px;
+  line-height: 1.4; color: var(--muted); background: transparent; border: 1px dashed var(--border); border-radius: 3px;
+  white-space: nowrap; cursor: pointer; }
+.role-btn:hover { color: var(--text); border-style: solid; }
+.role-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.role-btn .role-icon { font-size: 11px; }
+.role-btn.on { border-style: solid; font-weight: 600; }
+.role-btn.role-assets.on { color: #fff; background: #2f6fb3; border-color: #2f6fb3; }
+.role-btn.role-tooling.on { color: var(--accent-text); background: var(--accent); border-color: var(--accent); }
+.role-btn.role-code.on { color: #fff; background: #7a4fb0; border-color: #7a4fb0; }
+.pill[data-roles=""] .pill-path { color: var(--muted); }
+.p-roles-note { margin: 0; font-size: 12.5px; }
+.p-roles-note .p-assets-missing { color: var(--warn-text); }
+@media (max-width: 600px) { .role-btn .role-label { display: none; } .pill { flex-wrap: wrap; } }
+@media (pointer: coarse) { .role-btn { min-height: 44px; min-width: 44px; justify-content: center; } }
+/* f187 / D258: the topic page - its client assets folder and the sessions reading it; the bin and its modal. */
+.topic-assets h2 { display: flex; align-items: center; gap: .4rem; font-size: 15px; margin: 0 0 .4rem; }
+.topic-assets .share-current { margin: 0 0 .3rem; }
+.topic-sessions { margin: .2rem 0 0; padding-left: 1.2rem; }
+.topic-session { margin: .15rem 0; overflow-wrap: anywhere; }
+.page-head .topic-delete { margin-left: auto; }
+.topic-delete-what { padding-left: 1.2rem; }
+.topic-delete-what li { margin: .3rem 0; }
 .pill.drop-before { box-shadow: 0 -3px 0 var(--accent); }
 .pill.drop-after { box-shadow: 0 3px 0 var(--accent); }
 /* The Files panel's roots dragged among themselves (f181): a line between two roots, never an outline on one. */
@@ -1066,10 +1097,6 @@ form.rename { margin: 0; }
 .p-ws-line { display: flex; flex-wrap: wrap; gap: .4rem .75rem; align-items: center; }
 .p-ws-kept { font-size: 12px; }
 .pill-actions button.pill-remove-text { min-width: 0; padding: 1px 8px; }
-.p-share { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; color: var(--muted); }
-.p-share:has(> .share-slot:empty) { display: none; }   /* no topic, no assets folder to set */
-.p-share .share-slot > .hint { margin: 0; }
-.p-share .share-current { margin: 0; color: var(--text); }
 .p-brief-fold { border: 1px solid var(--border); border-radius: 6px; }
 .p-brief-fold > summary { display: flex; gap: .6rem; align-items: baseline; padding: .4rem .6rem; cursor: pointer; font-size: 13px;
   list-style: none; }
@@ -1091,6 +1118,23 @@ button.link { background: none; border: 0; color: var(--accent); cursor: pointer
 :root, :root[data-theme="light"] { --restored: #0b7a3a; }
 :root[data-theme="dark"] { --restored: #5fd68a; }
 .restored { color: var(--restored); font-weight: 600; }
+
+/* f188: a file name or path in the transcript that is a file in the session's folders. Blue, underlined on hover and
+   focus, opened as a Files-panel double-click; several of that name open a chooser. */
+a.file-ref { color: var(--file-link); text-decoration: none; cursor: pointer; border-radius: 2px; }
+a.file-ref:hover, a.file-ref:focus-visible { text-decoration: underline; }
+a.file-ref:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+a.file-ref code { color: inherit; }
+.md-code a.file-ref { color: var(--file-link); }
+.file-ref-chooser { position: fixed; z-index: 60; display: flex; flex-direction: column; gap: 1px; min-width: 14rem;
+  max-width: min(36rem, calc(100vw - 8px)); max-height: 50vh; overflow: auto; padding: 4px; background: var(--surface);
+  color: var(--text); border: 1px solid var(--border, #c9d6d2); border-radius: 6px; box-shadow: var(--shadow); }
+.file-ref-chooser-head { padding: 2px 6px 4px; }
+.file-ref-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 0; text-align: left;
+  padding: 4px 8px; border: 0; background: transparent; color: inherit; border-radius: 4px; cursor: pointer; }
+.file-ref-choice:hover, .file-ref-choice:focus-visible { background: var(--surface-2); outline: none; }
+.file-ref-folder { font-weight: 600; }
+.file-ref-path { font-family: var(--mono); font-size: .85em; overflow-wrap: anywhere; }
 
 /* The client's OneDrive share, pinned above the repo folders. */
 /* Same shape as a tree row, so the root's action lands in the same sticky column as the rest. */
@@ -1874,3 +1918,17 @@ input[type="checkbox"].row-tick { width: 26px; height: 26px; margin: 0 .35rem 0 
 .turn.marked-message .marked-message-from { margin: 0 0 4px; font-size: 0.9em; white-space: normal; }
 /* D239's "run this command" note. */
 .admin-command pre { white-space: pre-wrap; overflow-wrap: anywhere; user-select: all; }
+/* f186: Git in OneDrive - the start's question, the move's plan and progress; the editor's warning. */
+dialog.git-od-dialog { max-width: min(48rem, 95vw); }
+dialog.git-od-dialog .git-od-warning { margin-top: 0; }
+dialog.git-od-dialog .git-od-repos, dialog.git-od-dialog .git-od-moves { margin: .3rem 0 .6rem; padding-left: 1.2rem; }
+dialog.git-od-dialog .git-od-moves li { margin-bottom: .3rem; overflow-wrap: anywhere; }
+dialog.git-od-dialog .git-od-choose { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin: .5rem 0; }
+dialog.git-od-dialog .git-od-target { flex: 1 1 20rem; min-width: 0; }
+dialog.git-od-dialog .git-od-clashes ul { max-height: 12rem; overflow-y: auto; padding-left: 1.2rem; overflow-wrap: anywhere; }
+dialog.git-od-dialog .git-od-actions { display: inline-flex; flex-wrap: wrap; gap: .5rem; justify-content: flex-end; }
+dialog.git-od-dialog .warn { color: var(--warn-text); }
+dialog.git-od-dialog .bad { color: var(--bad-text); }
+dialog.git-od-dialog .ok { color: var(--ok-text); }
+.p-git-warn:empty { display: none; }
+.p-git-warn .hint { margin: .4rem 0 0; }

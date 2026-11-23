@@ -292,7 +292,8 @@ export function fileTabs(ctx) {
       body = h('div', { class: 'file-scroll md-preview-body', tabindex: '0' }, h('div', { class: 'md-doc' },
         renderMarkdown(text, { localImage: localImage(name, tab) })));
       loadSealed(body);
-      // Double-click a word: the source, with that word selected (feature 92).
+      // Double-click a word: the source, with that word selected (feature 92); an empty spot: the
+      // caret at the same place (D251).
       attachPreviewJump(body, () => String(text || '').replace(/\r\n?/g, '\n'), (start, end) => {
         tab.mode = 'source';
         paintPane();

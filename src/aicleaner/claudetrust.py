@@ -34,9 +34,16 @@ class TrustError(RuntimeError):
     pass
 
 
+def _home() -> Path:
+    """The person's home - AICLEANER_CLIENT_HOME when set (the tests' home, as bashguard and codetab_settings honour
+    it), so a test that forgets CLAUDE_CONFIG_DIR still never writes the real Claude Code settings (D260)."""
+    override = os.environ.get("AICLEANER_CLIENT_HOME", "").strip()
+    return Path(override) if override else Path.home()
+
+
 def config_dir() -> Path:
     configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    return Path(configured) if configured else Path.home() / ".claude"
+    return Path(configured) if configured else _home() / ".claude"
 
 
 def settings_file() -> Path:
@@ -46,7 +53,7 @@ def settings_file() -> Path:
 def global_file() -> Path:
     """Claude Code's own state file: beside the config folder, or inside CLAUDE_CONFIG_DIR when set."""
     configured = os.environ.get("CLAUDE_CONFIG_DIR", "").strip()
-    return Path(configured) / ".claude.json" if configured else Path.home() / ".claude.json"
+    return Path(configured) / ".claude.json" if configured else _home() / ".claude.json"
 
 
 def norm(path: str) -> str:

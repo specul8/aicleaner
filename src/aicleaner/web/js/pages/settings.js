@@ -1890,7 +1890,7 @@ function toolsCard(s) {
   const area = h('textarea', { name: 'tools', rows: '3', 'aria-label': 'Tool name patterns, one per line' });
   area.value = (s.keep_tokenised_tools || []).join('\n');
   return card('tools', 'Names kept in tool calls',
-    'Remote MCP servers whose arguments must not carry real names (one glob per line, for example mcp__*learn*__*). Local tools (az, git, Serena) are swapped back to real names.',
+    'Remote MCP servers whose arguments must not carry real names (one glob per line, for example mcp__*learn*__*). Local tools (az, git, Serena) are swapped back to real names. claude.ai connectors (mcp__claude_ai_*) are always kept; a line starting with ! gives a tool real names after all, for example !mcp__claude_ai_Todoist__* - what it is sent is then stored by that service.',
     [area], () => ({ keep_tokenised_tools: area.value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) }));
 }
 

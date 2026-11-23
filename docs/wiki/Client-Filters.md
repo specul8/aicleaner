@@ -137,6 +137,7 @@ own filter set to the same text. Clearing the box closes the topics it opened.
 
 | Card | What it does |
 |---|---|
+| **Client assets folder** | The topic's client assets folder (usually in OneDrive) - the files that cross between you and the client - with **Choose a folder** / **Change** (AI Cleaner's own folder picker, so it works remotely) and **Clear**, and every project session that uses it, each with **Edit** (its settings on the Session page). Changing it here changes it for every project session of the topic; the Assets button in a project session's settings changes the same folder. Clearing it leaves the folder and its files where they are. Not on Global. |
 | Problem callouts | Shown only when something is wrong (see States below). |
 | **Names** | Topic id, display name and index side by side, the matching `AI Cleaner scan <folder> --add <id>` command, **Change the index**, and **Open in OneDrive**. |
 | Terms | The table, filter, bulk bar, **Export mapping and ignore policies** and **Archive**. |
@@ -181,6 +182,23 @@ does not stop a scan; coming back shows it.
 
 Red and amber states also appear in the status line at the top of every page. See
 [Troubleshooting](Troubleshooting.md).
+
+## Deleting a topic
+
+The bin icon at the top right of a topic's page (not on Global) deletes the topic. A confirmation says first what will
+happen:
+
+- its terms stop being filtered at once;
+- the project sessions using it (named) become **Topic: None (Global only)** - each keeps the topic's client assets
+  folder as its own;
+- a session using it that is running blocks the delete until you stop it;
+- its client assets folder in OneDrive, and every file in it, is not touched.
+
+The topic's file goes to **Recently deleted** (on this machine, in AI Cleaner's state folder) for 30 days. **Topics >
+Recently deleted** lists them; **Restore** puts the topic back and links the project sessions it was taken from again
+(those that still exist and have no topic). A topic whose id has been used again since cannot be restored until that one
+is renamed or deleted. Deleting and restoring work through remote access as other topic edits do; on this machine, with
+desktop confirmation on, the delete waits for your Yes on the desktop.
 
 ## Archive, export and import
 

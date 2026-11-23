@@ -189,8 +189,17 @@ def strip_marks(text: str) -> str:
 
 
 def tool_is_kept(name: str | None, keep_patterns: Iterable[str]) -> bool:
-    """True when a tool's arguments must stay tokenised (remote MCP servers)."""
-    return bool(name) and any(fnmatch.fnmatchcase(name, pat) for pat in keep_patterns)
+    """True when a tool's arguments must stay tokenised (remote MCP servers).
+
+    A pattern starting with ! is an exception the person chose: tools it matches get real names, whatever else
+    matches them - the claude.ai connector pattern included (f189, 2026-11-22: Todoist tasks written with tokens,
+    "it's my task list - I don't know who Client3191 is")."""
+    if not name:
+        return False
+    patterns = list(keep_patterns)
+    if any(pat.startswith("!") and fnmatch.fnmatchcase(name, pat[1:]) for pat in patterns):
+        return False
+    return any(not pat.startswith("!") and fnmatch.fnmatchcase(name, pat) for pat in patterns)
 
 
 def rehydrate_message(

@@ -93,7 +93,9 @@ class Watch:
     def filter(self, stats: dict[str, Any]) -> None:
         """What the filter did with this request (incremental filtering, spec part 5, Brad 2026-11-10): its units in
         total, from the cache and filtered now; the milliseconds in each pass; whether the worker processes were
-        used; the filter generation; and any shadow difference (by pass name). Counts and times only, no text."""
+        used; the filter generation; and any shadow difference (by pass name). With pictures in the request (D261),
+        `pictures`: seen, answered from memory (cached), read again (processed), the reader runs and ms per stage; and
+        `ms.attachments`, the whole attachment pass. Counts and times only, no text."""
         self.rec["filter"] = stats
 
     def headers(self, status: int, headers: Any) -> None:

@@ -43,6 +43,10 @@ API (JSON; writes need Content-Type application/json):
   GET  /api/session/profiles               the profiles, and the clients one can be pointed at
   POST /api/session/profiles               {profiles: [...]} replace them (validate, then commit)
   POST /api/session/root-order             {name, roots} the Files panel's roots reordered (f181)
+  GET  /api/session/git-onedrive           ?name= Git found in the project assets folder (f186)
+  POST /api/session/git-onedrive/choice    {name, choice: remind|ignore} the start's Git check for this project
+  POST /api/session/git-onedrive/plan      {name, target} the move of its repositories out of OneDrive, worked out
+  POST /api/session/git-onedrive/migrate   {name, target} the move, as a job; GET .../job?id= its progress
   GET  /api/session/presets                Start Work / Start Personal and the current run (feature 152)
   POST /api/session/presets                {presets: [...]} save them, at most max_running - 1 projects each
   POST /api/session/preset/go              {id} start a run: the set started, the rest stopped when idle
@@ -352,10 +356,12 @@ def _settle_homes_and_shares(wanted: list, stored: list, shares: dict | None) ->
     which it then stays as. Returns what was done, in words, for the page to say."""
     from . import workspace
 
+    from .folderroles import cwd_of
+
     def home(entry: dict) -> str:
         try:
             return workspace.home_of(list(entry.get("workspaces") or []), list(entry.get("projects") or []),
-                                     str(entry.get("home_override") or "")).get("folder", "")
+                                     cwd_of(entry) or str(entry.get("home_override") or "")).get("folder", "")
         except Exception:  # noqa: BLE001 - a hint, never a reason to refuse the save
             return ""
 
@@ -365,15 +371,8 @@ def _settle_homes_and_shares(wanted: list, stored: list, shares: dict | None) ->
     for entry in wanted:
         if not isinstance(entry, dict):
             continue
-        share = _share_of(entry, shares)
-        if share:
-            now = home(entry)
-            folders = list(entry.get("projects") or [])
-            kept = [f for f in folders if not workspace._same(f, share) or workspace._same(f, now)]
-            if len(kept) != len(folders):
-                entry["projects"] = kept
-                notes.append(f"{entry.get('name')}: {share} was removed from the folders - it is the "
-                             "topic's project assets folder, which is always included.")
+        # f187: the topic's client assets folder is one of the session's own folders now (its Client Assets role) -
+        # no longer dropped from the list.
         old = before.get(str(entry.get("name", "")).lower())
         # A renamed profile keeps its history (the user, 2026-10-06): `was` names the stored profile
         # it came from, honoured only when that name has left the list - renamed, not copied. What
@@ -396,6 +395,10 @@ def _settle_homes_and_shares(wanted: list, stored: list, shares: dict | None) ->
         entry.pop("worktrees", None)
         if (old or {}).get("worktrees"):
             entry["worktrees"] = list(old["worktrees"])
+        # f186: the Git-in-OneDrive answer is the server's too (the dialog's), never the page's form.
+        entry.pop("git_onedrive", None)
+        if (old or {}).get("git_onedrive"):
+            entry["git_onedrive"] = old["git_onedrive"]
     return notes
 
 
@@ -419,31 +422,39 @@ def _arrange_entry(entry: dict, allowed: list | None, backup_dir: Path | None, e
     changed is left alone and said; the home then stays what the list says, as a choice. Returns
     what was done, in words."""
     from . import workspace
+    from .folderroles import cwd_of
 
     name = entry.get("name") or "a project session"
     folders = workspace.unique_folders(list(entry.get("projects") or []))
-    chosen = str(entry.get("home_override") or "").strip()
+    # f187: with folder roles the order is the person's and the home is the AI tooling folder (else the client assets
+    # folder) wherever it sits. Without (a profile from before f187 that has neither), f181's first place = home.
+    roled = cwd_of(entry)
+    chosen = "" if roled else str(entry.get("home_override") or "").strip()
     if chosen:
         folders = [chosen] + [f for f in folders if not workspace._same(f, chosen)]
+    if roled and not any(workspace._same(roled, f) for f in folders):
+        folders.append(roled)
     if not folders:
         return []
     entry["projects"] = folders
-    home = folders[0]
+    home = next((f for f in folders if workspace._same(f, roled)), folders[0]) if roled else folders[0]
     workspaces = [w for w in entry.get("workspaces") or [] if str(w).strip()]
     notes: list[str] = []
-    written = [f for f in folders if not (share and workspace._same(f, share))]
+    # f187: the client assets folder IS written into the file (f181/f183 left it out), wherever it sits in the order.
+    written = folders
     if workspaces and written:
         file = Path(workspaces[0])
         try:
-            done = workspace.lead_with(file, written, expect=expect, backup_dir=backup_dir, allowed=allowed)
+            done = workspace.lead_with(file, written, expect=expect, backup_dir=backup_dir, allowed=allowed,
+                                       home=home)
         except (OSError, workspace.WorkspaceRewriteError) as exc:
             entry["home_override"] = home
             entry["home_derived_was"] = workspace.derived_home(workspaces, folders)["folder"]
             return [f"{name}: {file.name} was not changed - {exc}. The home folder is still {home}, "
                     "as a choice of this project session."]
         if done["changed"]:
-            notes.append(f"{name}: {file.name} now lists these folders in this order, with {Path(written[0]).name} "
-                         f"first and as its home (the file as it was is kept in {Path(done['backup']).parent})."
+            notes.append(f"{name}: {file.name} now lists these folders in this order, its terminal working folder "
+                         f"{Path(home).name} (the file as it was is kept in {Path(done['backup']).parent})."
                          if done["backup"] else f"{name}: {file.name} now lists these folders in this order.")
     derived = workspace.derived_home(workspaces, folders)["folder"]
     if workspace._same(derived, home):
@@ -487,9 +498,11 @@ def _root_order_lists(entry: dict, roots: list, share: str) -> tuple[list[str], 
             except FolderError:
                 continue
             wss.append(ws)
-    home = workspace.home_of(wss, projects, str(entry.get("home_override") or ""))
+    from .folderroles import cwd_of
+
+    # f187: with roles the order is the person's (the home does not lead) and the assets folder is one of the folders.
+    home = {} if cwd_of(entry) else workspace.home_of(wss, projects, str(entry.get("home_override") or ""))
     full = workspace.editor_order(wss, projects, home.get("folder", ""))
-    full = [f for f in full if not (share and workspace._same(f, share))]
     for folder in full:
         try:
             _root_order_check(folder, roots, "folder")
@@ -505,9 +518,11 @@ def _root_order_lists(entry: dict, roots: list, share: str) -> tuple[list[str], 
 def _share_hint(entry: dict, shares: dict | None, folders: list, home: str) -> dict:
     from . import workspace
 
-    share = _share_of(entry, shares)
+    # f187: the session's client assets folder - its topic's (read into the entry), or its own with no topic. It is one
+    # of the session's folders now, so "repeated in the folders" is no longer something to warn about.
+    share = str(entry.get("assets") or "").strip() or _share_of(entry, shares)
     repeated = bool(share) and any(workspace._same(f, share) for f in folders)
-    return {"share": share, "share_in_folders": repeated,
+    return {"share": share, "share_in_folders": False,
             "share_is_home": repeated and bool(home) and workspace._same(share, home)}
 
 
@@ -528,16 +543,28 @@ def _workspace_view(entries: list, mf: MappingStore | None = None, shares: dict 
     about this machine's folders) and kept for the callers' signature.
     """
     from . import workspace
+    from .folderroles import cwd_of
 
     out: dict[str, dict] = {}
     for entry in entries:
         folders = list(entry.get("projects") or [])
         own = list(entry.get("workspaces") or [])
         if not folders and not own:
+            # f186: no folders, but a topic with a project assets folder - the session starts there. The editor still
+            # needs the share (its fixed pill, and saying where the session starts).
+            hint = _share_hint(entry, shares, [], "")
+            if hint.get("share"):
+                out[entry.get("name", "")] = {
+                    "home": {"folder": "", "how": "", "derived": "", "overridden": False}, "home_derived_was": "",
+                    "workspaces": [], "implicit": False, "missing": [], "workspace": "",
+                    "cwd": {"current": "", "suggested": ""}, "create": None, **hint, "setup": [],
+                    "folder": "", "how": "", "order": [], "listed": [], "file_home": "", "stamp": "",
+                    "assets_start": True}
             continue
         try:
             workspaces = own or workspace.implicit_workspaces(folders)
-            home = workspace.home_of(workspaces, folders, str(entry.get("home_override") or ""))
+            roled = cwd_of(entry)
+            home = workspace.home_of(workspaces, folders, roled or str(entry.get("home_override") or ""))
             first = workspaces[0] if workspaces else ""
             cwd = (workspace.cwd_offer(first, home["folder"]) if first and home.get("folder")
                    else {"current": "", "suggested": ""})
@@ -559,7 +586,11 @@ def _workspace_view(entries: list, mf: MappingStore | None = None, shares: dict 
                 # f181: the editor's one list - every folder the Files panel shows, home first - what the
                 # workspace file lists (in its order, and its own home), and its stamp, so a save can tell
                 # the file changed on disk since the page read it.
-                "order": workspace.editor_order(workspaces, folders, home.get("folder", "")),
+                "order": workspace.editor_order(workspaces, folders, "" if roled else home.get("folder", "")),
+                # f187: the folders' roles, and where sessions start (the tooling folder, else the assets folder).
+                "roles": {"assets": str(entry.get("assets") or ""), "tooling": str(entry.get("tooling") or ""),
+                          "code": [str(c) for c in entry.get("client_code") or []]},
+                "start_in": home.get("folder", ""),
                 "listed": [str(f) for _n, f in workspace.workspace_folders(first)] if first else [],
                 "file_home": workspace.derived_home([first], [])["folder"] if first else "",
                 "stamp": workspace.file_stamp(first) if first else "",
@@ -662,7 +693,8 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         cid = request.match_info["cid"]
         if cid.lower() == GLOBAL_ID.lower():
             return err(ValueError("Global is not an engagement, so it has no project assets folder"), status=404)
-        return web.json_response(share_view(cid))
+        # f187: and the project sessions that read it (the topic page lists them, each with an Edit link).
+        return web.json_response({**share_view(cid), "sessions": _topic_sessions(cid)})
 
     async def client_share_save(request: web.Request) -> web.Response:
         """{path} to use a folder that exists, {create: true} to make one, {path: ""} to forget it."""
@@ -674,6 +706,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         from .folders import FolderError, FolderOutside, check_usable
 
         body = await request.json()
+        old = proxy.share_store.get(cid)
         try:
             if body.get("create"):
                 # Created inside OneDrive by the store, so it lands where OneDrive is; it still has
@@ -692,9 +725,46 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             return err(problem)
         except ShareError as problem:
             return err(problem)
-        # Sessions read it from their profile; a running one keeps what it was started with.
+        # f187: the topic's project sessions follow - the new folder in place of the old one in each list, their
+        # workspace files rewritten. Sessions read it from their profile; a running one keeps what it was started with.
+        notes = await asyncio.to_thread(_sessions_follow_topic, cid, old, proxy.share_store.get(cid))
         proxy.reload_profiles()
-        return web.json_response(share_view(cid))
+        forget_roots()
+        return web.json_response({**share_view(cid), "notes": notes, "sessions": _topic_sessions(cid)})
+
+    def _topic_sessions(cid: str) -> list[dict[str, Any]]:
+        """f187: the project sessions of a topic, each with its client assets folder (the topic's) - the topic page."""
+        return [{"name": e.get("name", ""), "assets": str(e.get("assets") or "")}
+                for e in proxy.read_profiles() if str(e.get("client") or "").lower() == cid.lower()]
+
+    def _sessions_follow_topic(cid: str, old: str, new: str) -> list[str]:
+        from . import folderroles, workspace
+        from .profiles import ProfileError
+
+        if (old or "") == (new or "") or (old and new and workspace._same(old, new)):
+            return []
+        # read_profiles already put the new folder in (first, when missing); replace_folder moves it to the old one's
+        # place instead.
+        entries = proxy.read_profiles()
+        mine = [e for e in entries if str(e.get("client") or "").lower() == cid.lower()]
+        if not mine:
+            return []
+        roots = folder_roots()
+        notes: list[str] = []
+        for entry in mine:
+            folderroles.replace_folder(entry, old, new)
+            if entry.get("workspaces") and new:
+                try:
+                    notes += _arrange_entry(entry, roots, workspace_backups())
+                except Exception as exc:  # noqa: BLE001 - the list still saves; the file is said
+                    notes.append(f"{entry.get('name')}: its workspace file was not updated ({exc}).")
+        try:
+            proxy.profile_store.save(entries, set(proxy.client_labels()))
+        except (ProfileError, OSError) as problem:
+            return [f"The project sessions of {cid} were not updated: {problem}"]
+        names = ", ".join(str(e.get("name")) for e in mine)
+        notes.insert(0, f"{names}: client assets folder {'now ' + new if new else 'cleared (the folder stays in the list, with no role)'}.")
+        return notes
 
     # ---- driving a session (session.py) -------------------------------------------------
 
@@ -763,6 +833,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             # The folders, the workspace files' folders and the home override are all held to the
             # same allowed locations (D99): a workspace file must not widen what the pages reach.
             places = [(p, "project folder") for p in entry.get("projects") or []]
+            # f187: the role folders too (each joins the list when it is not in it).
+            places += [(entry[k], what) for k, what in (("assets", "client assets folder"), ("tooling", "AI tooling folder"))
+                       if str(entry.get(k) or "").strip()]
             places += [(str(Path(w).parent), "workspace file's folder") for w in entry.get("workspaces") or []]
             if str(entry.get("home_override") or "").strip():
                 places.append((entry["home_override"], "home folder"))
@@ -782,6 +855,15 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         for entry in wanted:
             if isinstance(entry, dict):
                 notes += _one_workspace(entry)
+        # f187: the project session saved from the editor needs exactly one Client Assets folder; and with a topic, that
+        # folder is the TOPIC's (Brad, 2026-11-19) - a new one changes it for the topic and its other sessions too.
+        try:
+            topic_change = _topic_assets_change(wanted, str(body.get("arrange") or ""), roots)
+        except (ValueError, FolderError) as problem:
+            return err(problem, status=403 if isinstance(problem, FolderOutside) else 400)
+        if topic_change:
+            notes += await asyncio.to_thread(_follow_topic_assets, wanted, topic_change, roots,
+                                             str(body.get("arrange") or ""))
         notes += await asyncio.to_thread(_arrange_saved, wanted, body, roots)
         notes += await asyncio.to_thread(_settle_homes_and_shares, wanted, proxy.read_profiles(),
                                          proxy.share_store.load())
@@ -789,9 +871,69 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             saved = proxy.profile_store.save(wanted, set(proxy.client_labels()))
         except (ProfileError, OSError) as problem:
             return err(problem)
+        if topic_change:
+            try:
+                proxy.share_store.set(topic_change["client"], topic_change["new"])
+                log.info("client assets folder of topic %s set from a project session save", topic_change["client"])
+            except Exception as problem:  # noqa: BLE001 - checked before the save; said if it still fails
+                notes.append(f"The topic's client assets folder was not changed: {problem}")
         proxy.reload_profiles()
         forget_roots()
         return web.json_response({"profiles": saved, "notes": notes})
+
+    def _topic_assets_change(wanted: list, arrange: str, roots: list) -> dict | None:
+        """f187: the saved profile's Client Assets folder checked - present (ValueError when not), inside the allowed
+        folders (FolderError) - and, when the profile has a topic whose folder it is not, the change to make to the
+        topic: {client, old, new}. None when nothing changes for a topic."""
+        from . import folderroles, workspace
+        from .folders import check_usable
+        from .shares import ShareError, check as share_check
+
+        if not arrange:
+            return None
+        entry = next((e for e in wanted if isinstance(e, dict)
+                      and str(e.get("name", "")).strip().lower() == arrange.strip().lower()), None)
+        if entry is None:
+            return None
+        problem = folderroles.assets_problem(entry)
+        if problem:
+            raise ValueError(problem)
+        new = str(entry["assets"]).strip()
+        check_usable(new, roots, "client assets folder")
+        client = str(entry.get("client") or "").strip()
+        if not client:
+            return None
+        old = proxy.share_store.get(client)
+        if old and workspace._same(old, new):
+            return None
+        try:
+            share_check(new)
+        except ShareError as exc:
+            raise ValueError(f"{entry.get('name')}: {exc}") from exc
+        return {"client": client, "old": old, "new": new}
+
+    def _follow_topic_assets(wanted: list, change: dict, roots: list, arrange: str) -> list[str]:
+        """f187: the topic's other project sessions follow its new client assets folder - in place of the old one in
+        their lists (first when they did not have it), their workspace files rewritten the f181 way. Said by name."""
+        from . import folderroles
+
+        names: list[str] = []
+        notes: list[str] = []
+        for other in wanted:
+            if not isinstance(other, dict) or str(other.get("name", "")).strip().lower() == arrange.strip().lower():
+                continue
+            if str(other.get("client") or "").strip().lower() != change["client"].lower():
+                continue
+            folderroles.replace_folder(other, change["old"], change["new"])
+            names.append(str(other.get("name")))
+            if other.get("workspaces"):
+                notes += _arrange_entry(other, roots, workspace_backups())
+        if names:
+            notes.insert(0, f"The client assets folder of topic {change['client']} is now {change['new']}, for "
+                            f"{', '.join(names)} too.")
+        else:
+            notes.insert(0, f"The client assets folder of topic {change['client']} is now {change['new']}.")
+        return notes
 
     def workspace_backups() -> Path:
         """Where a workspace file is copied before AI Cleaner changes it (f181): its own state folder,
@@ -850,8 +992,10 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except SessionError as problem:
             return err(problem, status=404)
         share = str(profile.share or "")
-        shown = [r for r in host.tree_of(profile) if not (share and workspace._same(r, share))]
-        order = [r for r in order if not (share and workspace._same(r, share))]
+        # f187: the client assets folder is one of the roots that move (when it is one of the session's folders); only a
+        # share the tree shows apart from them (Casual chats' folder outside its list, say) stays out of the order.
+        shown = list(host.tree_of(profile))
+        order = [r for r in order if any(workspace._same(r, s) for s in shown) or not (share and workspace._same(r, share))]
         entries = proxy.read_profiles()
         entry = next((e for e in entries if e.get("name") == profile.name), None)
         if entry is None:
@@ -1326,7 +1470,9 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         elif share.strip():
             check_usable(share, folder_roots(), "project assets folder", must_exist=False)
             proxy.share_store.set(cid, share)
-        entries = proxy.read_profiles() + [{"name": name, "client": cid, "projects": [str(home)]}]
+        # f187: the tooling repository is the session's AI tooling folder (where it starts); the topic's client assets
+        # folder joins its list when it is read.
+        entries = proxy.read_profiles() + [{"name": name, "client": cid, "projects": [str(home)], "tooling": str(home)}]
         proxy.profile_store.save(entries, set(proxy.client_labels()))
         proxy.reload_profiles()
         return name
@@ -1593,6 +1739,25 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         name, root, path = _file_args(request)
         try:
             answer = await asyncio.to_thread(session_host().sniff_file, name, root, path)
+        except (SessionError, OSError) as problem:
+            return web.json_response({"error": str(problem)}, status=403)
+        return web.json_response(answer)
+
+    async def session_file_refs(request: web.Request) -> web.Response:
+        """f188: which file names and paths in the transcript are files in the session's folders - only names and
+        where they are, never contents, through the tree's own allow-list. Display only."""
+        from .session import SessionError
+
+        try:
+            body = await request.json()
+        except ValueError:
+            return web.json_response({"error": "a JSON body is needed"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "a JSON object is needed"}, status=400)
+        refs = body.get("refs")
+        try:
+            answer = await asyncio.to_thread(session_host().file_refs, str(body.get("name", "")),
+                                             refs if isinstance(refs, list) else [], bool(body.get("fresh")))
         except (SessionError, OSError) as problem:
             return web.json_response({"error": str(problem)}, status=403)
         return web.json_response(answer)
@@ -2052,16 +2217,49 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
             "home_derived_was": str(entry.get("home_derived_was") or ""),
         }
 
+    def trust_refusal(entry: dict) -> str:
+        """D260: why Save would refuse this profile, or "" - asked BEFORE Claude Code's trusted folders are checked or
+        written, so a profile that cannot be saved (no name, a name another project session has, no Client Assets
+        folder) is refused with its own message instead of having its folders added to Claude Code's files first.
+        Nothing here looks the profile up in the saved ones: a project session never saved, or renamed in the editor
+        and not saved yet, is checked exactly as the page holds it. `was` is the name it was saved under ('' when new)."""
+        from .folderroles import assets_problem
+        from .profiles import ProfileError, validate
+
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            return ("This project session has no name: give it one before saving. Claude Code's trusted folders are "
+                    "updated as part of the save, so nothing was added.")
+        try:
+            validate([entry], set(proxy.client_labels()))
+        except ProfileError as problem:
+            return str(problem)
+        was = str(entry.get("was", "")).strip().lower()
+        if name.lower() != was and any(str(e.get("name", "")).strip().lower() == name.lower()
+                                       for e in proxy.read_profiles()):
+            return f"{name}: another project session is already called {name}; choose another name."
+        return assets_problem(entry)
+
     async def trust_inputs(request: web.Request) -> tuple[dict, list[str], str, list[str]]:
         """The folders a profile needs trusted (2026-10-16, item C): hand-added folders and the share
-        with their children, the home folder, the workspace files' folders."""
+        with their children, the home folder, the workspace files' folders. Taken from the request - the
+        profile as the editor holds it, saved or not (D260) - and held to folders.roots first (clean_profile,
+        as saving holds it, D245); a folder outside them is left out, never trusted."""
         body = await request.json()
         entry = body.get("profile") if isinstance(body, dict) else None
         if not isinstance(entry, dict):
             raise ValueError("send {profile: {...}}")
+        from . import workspace
+
+        refused = trust_refusal(entry)
+        if refused:
+            raise ValueError(refused)
         clean = clean_profile(entry)
         view = (await asyncio.to_thread(_workspace_view, [clean], None, proxy.share_store.load())).get(clean["name"]) or {}
-        folders = list(clean["projects"]) + ([str(view["share"])] if view.get("share") else [])
+        # f187: the role folders are the session's folders too (saving adds each to the list when it is not in it).
+        roles = clean_profile({"projects": [entry.get("assets") or "", entry.get("tooling") or ""]})["projects"]
+        folders = list(clean["projects"]) + [r for r in roles if not any(workspace._same(r, f) for f in clean["projects"])]
+        folders += [str(view["share"])] if view.get("share") else []
         home = str((view.get("home") or {}).get("folder") or "")
         workspace_dirs = [str(Path(w).parent) for w in (view.get("workspaces") or [])]
         return clean, folders, home, workspace_dirs
@@ -2072,10 +2270,12 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         if os.environ.get("AICLEANER_SKIP_TRUST_CHECK") == "1":
             return web.json_response({"missing": [], "can_add": False, "names": claudetrust.LIST_NAMES})
         try:
-            _clean, folders, home, workspace_dirs = await trust_inputs(request)
+            clean, folders, home, workspace_dirs = await trust_inputs(request)
             missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
-        except (ValueError, claudetrust.TrustError) as exc:
+        except ValueError as exc:
             return err(exc)
+        except claudetrust.TrustError as exc:
+            return err(ValueError(f"{clean['name']}: Claude Code's trusted folders could not be read - {exc}"))
         return web.json_response({"missing": missing, "can_add": True,
                                   "names": claudetrust.LIST_NAMES})
 
@@ -2085,11 +2285,16 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         from . import claudetrust
         try:
             clean, folders, home, workspace_dirs = await trust_inputs(request)
-            missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
-            done = await asyncio.to_thread(claudetrust.add, missing, clean["name"] or "a project session")
-        except (ValueError, OSError, claudetrust.TrustError) as exc:
+        except ValueError as exc:
             return err(exc)
-        return web.json_response(done)
+        try:
+            missing = await asyncio.to_thread(claudetrust.check, folders, home, workspace_dirs)
+            done = await asyncio.to_thread(claudetrust.add, missing, clean["name"])
+        except (OSError, claudetrust.TrustError) as exc:
+            return err(ValueError(f"{clean['name']}: Claude Code's trusted folders were not updated - {exc}"))
+        log.info("trusted folders added to Claude Code for project session %s: %d entries", clean["name"],
+                 len(done.get("wrote") or []))
+        return web.json_response({**done, "name": clean["name"]})
 
     async def session_workspace_create(request: web.Request) -> web.Response:
         """Write the new workspace file the page offered (D99) and make it the profile's first.
@@ -2100,10 +2305,13 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         from .folders import is_usable
 
         name = str((await request.json()).get("name", "")).strip()
+        if not name:
+            # D260: a project session not saved yet has no saved name to write the file into.
+            return err(ValueError("This project session is not saved yet: save it first, then create its workspace file."))
         entries = proxy.read_profiles() if proxy else []
         entry = next((e for e in entries if e.get("name") == name), None)
         if entry is None:
-            return err(ValueError(f"no project session named {name!r}"))
+            return err(ValueError(f"no project session named {name!r} - save it first"))
         create = ((await asyncio.to_thread(_workspace_view, [entry], mf)).get(name) or {}).get("create")
         if not create:
             return err(ValueError("nothing to create: the project session already has a workspace file, or no home folder"))
@@ -2169,6 +2377,12 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
                     {"error": f"Memory is nearly full: {free:.1f} GB of {memory['commit_limit_mb'] / 1024:.0f} GB left.",
                      "why": "Another session would take more. Stop a session you are not using first, or start anyway.",
                      "offer": {"action": "start_low_memory", "label": "Start anyway", **memory}}, status=409)
+        # f186: Git in the project assets folder (OneDrive) stops the start and asks; "once" is the dialog's
+        # "start this time" (a scheduled script may send it too).
+        if str(body.get("git_onedrive") or "") != "once":
+            blocked = await asyncio.to_thread(_git_onedrive_block, str(body.get("name", "")))
+            if blocked:
+                return web.json_response(blocked, status=409)
         try:
             state = await session_host().start(name=str(body.get("name", "")),
                                                project=str(body.get("project", "")),
@@ -2178,6 +2392,297 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except SessionError as exc:
             return err(exc)
         return web.json_response(state)
+
+    # ---- f186: Git kept out of OneDrive ------------------------------------------------------------------------
+
+    git_jobs: dict[str, dict[str, Any]] = {}
+
+    def _git_profile(name: str):
+        """(the profile, the stored entry whose answer applies - a worktree's parent's) for a project session name."""
+        profile = session_host().profile(name)
+        owner = getattr(profile, "worktree_of", "") or profile.name
+        entry = next((e for e in proxy.read_profiles() if str(e.get("name", "")).lower() == owner.lower()), None)
+        return profile, entry
+
+    def _git_folders(profile) -> list[str]:
+        """f187: the folders the check looks in - every folder of the session (its client assets folder, its tree and
+        its own list) that is a folder and in OneDrive; none for an add-on's session. Outer ones only (a folder inside
+        another is covered by its scan)."""
+        from . import gitonedrive
+
+        if getattr(profile, "addon", ""):
+            return []
+        share = str(getattr(profile, "share", "") or "")
+        try:
+            tree = list(session_host().tree_of(profile))
+        except Exception:  # noqa: BLE001 - the profile's own list is enough to check
+            tree = []
+        wanted = [*([share] if share else []), *[str(p) for p in profile.projects], *tree]
+        found = [f for f in wanted if Path(f).is_dir() and gitonedrive.in_onedrive(f)]
+        return gitonedrive.outer_folders(found)
+
+    def _git_view(profile, entry, scan: dict) -> dict:
+        from . import gitonedrive
+
+        roots = folder_roots()
+        first = str(scan.get("first") or "")
+        checked = scan.get("checked") or []
+        # The folder Migrate acts on (the first holding Git, or cut off); `repos` are its repositories, as the dialog
+        # and the move expect, and `found` says what every folder holds (f187).
+        mine = [r for r in scan.get("repos", []) if not first or str(r.get("root", first)) == first]
+        return {"name": profile.name, "share": first or str(profile.share or ""), "assets": str(profile.share or ""),
+                "choice": gitonedrive.choice_of(entry),
+                "found": [{"folder": c.get("folder", ""), "repos": c.get("repos", []),
+                           "skeletons": c.get("skeletons", []), "complete": bool(c.get("complete")),
+                           "folders": c.get("folders", 0)} for c in checked
+                          if c.get("repos") or c.get("skeletons") or not c.get("complete")],
+                # D259: empty `.git` folders left behind (no HEAD) - said, "safe to delete", never blocking Start
+                "skeletons": scan.get("skeletons", []),
+                "repos": mine, "complete": bool(scan.get("complete")),
+                "folders": scan.get("folders", 0), "budget": scan.get("budget", gitonedrive.SCAN_BUDGET_S),
+                "migrate_possible": gitonedrive.migrate_possible(roots),
+                "roots": [str(r) for r in roots if not gitonedrive.in_onedrive(r)]}
+
+    def _git_scan_state() -> Path | None:
+        """f186: where the Git check keeps each assets folder's tree between checks (the state folder, never
+        OneDrive); None (always a full scan) when no state folder is set."""
+        state = getattr(proxy.cfg, "state_dir", "") or ""
+        return Path(state) if str(state).strip() else None
+
+    def _git_onedrive_block(name: str) -> dict | None:
+        """The 409 a start gets when its project assets folder holds Git (or the check was cut off), else None. Never
+        for a session already running (Start reconnects), one whose answer is "don't remind me again", or one whose
+        assets folder is not in OneDrive."""
+        from . import gitonedrive
+        from .session import SessionError
+
+        try:
+            profile, entry = _git_profile(name)
+            running = session_host().sessions.get(profile.name)
+        except SessionError:
+            return None                      # the start says what is wrong with the name
+        if running is not None and running.running:
+            return None
+        folders = _git_folders(profile)
+        if not folders or gitonedrive.choice_of(entry) == "ignore":
+            return None
+        scan = gitonedrive.check_folders(folders, cache_dir=_git_scan_state())
+        if scan["complete"] and not scan["repos"]:
+            return None
+        view = _git_view(profile, entry, scan)
+        count = len(scan["repos"])
+        where = sorted({str(r.get("root") or "") for r in scan["repos"]})
+        if count:
+            said = (f"Git files are in OneDrive ({count} {'repository' if count == 1 else 'repositories'}, in "
+                    f"{', '.join(where)}).")
+        else:
+            said = (f"AI Cleaner could not finish checking this session's OneDrive folders for Git files in "
+                    f"{scan['budget']:.0f} seconds ({scan['folders']} folders checked).")
+        return {"error": said, "why": "Git in OneDrive causes sync problems; choose what to do before starting.",
+                "offer": {"action": "git_onedrive", "label": "Choose what to do", **view}}
+
+    async def git_onedrive_get(request: web.Request) -> web.Response:
+        """f186: what the check finds in a project session's assets folder (the editor's warning, the dialog)."""
+        from . import gitonedrive
+        from .session import SessionError
+
+        try:
+            profile, entry = _git_profile(request.query.get("name", ""))
+        except SessionError:
+            # The editor asks for every tab, saved or not; an unknown name has nothing to warn about (no 404 in the
+            # page's console for an ordinary question).
+            return web.json_response({"name": request.query.get("name", ""), "known": False, "onedrive": False,
+                                      "choice": "remind", "repos": [], "complete": True})
+        folders = await asyncio.to_thread(_git_folders, profile)
+        if not folders:
+            return web.json_response({"name": profile.name, "share": str(profile.share or ""), "onedrive": False,
+                                      "choice": gitonedrive.choice_of(entry), "repos": [], "found": [],
+                                      "skeletons": [], "complete": True})
+        scan = await asyncio.to_thread(gitonedrive.check_folders, folders, 1.0, _git_scan_state(), True)
+        return web.json_response({**_git_view(profile, entry, scan), "onedrive": True})
+
+    async def git_onedrive_choice(request: web.Request) -> web.Response:
+        """f186: "remind" (the default) or "ignore" - Don't remind me again (this project) - kept with the profile."""
+        from . import gitonedrive
+        from .profiles import ProfileError
+        from .session import SessionError
+
+        body = await request.json()
+        choice = str(body.get("choice", "")).strip().lower()
+        if choice not in gitonedrive.CHOICES:
+            return err(ValueError("choice is remind or ignore"))
+        try:
+            _profile, entry = _git_profile(str(body.get("name", "")))
+        except SessionError as exc:
+            return err(exc, status=404)
+        entries = proxy.read_profiles()
+        stored = next((e for e in entries if entry is not None and e.get("name") == entry.get("name")), None)
+        if stored is None:
+            return err(ValueError("that project session is not saved yet - save it first"), status=404)
+        stored.pop("git_onedrive", None)
+        if choice == "ignore":
+            stored["git_onedrive"] = "ignore"
+        try:
+            proxy.profile_store.save(entries, set(proxy.client_labels()))
+        except (ProfileError, OSError) as problem:
+            return err(problem)
+        proxy.reload_profiles()
+        return web.json_response({"ok": True, "name": stored["name"], "choice": choice})
+
+    def _git_plan(name: str, target: str, folder: str = "") -> dict:
+        from . import gitonedrive, workspace
+
+        profile, _entry = _git_profile(name)
+        folders = _git_folders(profile)
+        # f187: which of the session's OneDrive folders to move repositories out of - the one the dialog names, else
+        # the first; never a folder that is not one of them.
+        if folder.strip():
+            share = next((f for f in folders if workspace._same(f, folder)), "")
+            if not share:
+                raise gitonedrive.MoveError(f"{folder} is not one of this project session's folders in OneDrive")
+        else:
+            share = folders[0] if folders else ""
+        if not share:
+            raise gitonedrive.MoveError("none of this project session's folders is in OneDrive - nothing to move")
+        scan = gitonedrive.scan(share, budget_s=gitonedrive.BACKGROUND_BUDGET_S)
+        if not scan["complete"]:
+            raise gitonedrive.MoveError("the project assets folder is too big to check in "
+                                        f"{gitonedrive.BACKGROUND_BUDGET_S:.0f} seconds - move the repositories by hand")
+        return gitonedrive.plan_move(share, [r["path"] for r in scan["repos"]], target, folder_roots())
+
+    async def git_onedrive_plan(request: web.Request) -> web.Response:
+        """f186: the move worked out - counts, sizes, clashes, a free sub-folder - nothing written."""
+        from . import gitonedrive
+        from .folders import FolderError, FolderOutside
+        from .session import SessionError
+
+        body = await request.json()
+        try:
+            plan = await asyncio.to_thread(_git_plan, str(body.get("name", "")), str(body.get("target", "")),
+                                           str(body.get("folder", "")))
+        except SessionError as exc:
+            return err(exc, status=404)
+        except FolderOutside as exc:
+            return err(exc, status=403)
+        except (FolderError, gitonedrive.MoveError) as exc:
+            return err(exc)
+        return web.json_response(gitonedrive.plan_view(plan))
+
+    def _git_adopt(name: str, result: dict) -> list[str]:
+        """After a move: each moved repository's new folder joins the project session (the first is the home when it
+        had none), and its workspace file is updated the f181 way - every folder held to the allowed roots (D245)."""
+        from . import gitonedrive, workspace
+        from .folders import FolderError
+
+        profile, owner = _git_profile(name)
+        if owner is None:
+            return []
+        share = str(profile.share or "")
+        entries = proxy.read_profiles()
+        entry = next(e for e in entries if e.get("name") == owner.get("name"))
+        roots = folder_roots()
+        moved = [Path(r["repo"]) for r in result["repos"]]
+        outer_repos = [r for r in result["repos"]
+                       if not any(other != Path(r["repo"]) and gitonedrive._within(Path(r["repo"]), other) for other in moved)]
+        outer = [str(r["dest"]) for r in outer_repos]
+        try:
+            wss, full = _root_order_lists(entry, roots, share)
+            for folder in outer:
+                _root_order_check(folder, roots, "folder")
+        except FolderError as problem:
+            return [f"{entry.get('name')}: the moved repositories were not added to its folders - {problem}"]
+        # f187: a moved repository that WAS one of the session's folders (other than its client assets folder) is
+        # replaced by its new folder, in the same place and with the same roles; the others join with no role.
+        for repo in outer_repos:
+            at = next((i for i, known in enumerate(full) if workspace._same(known, repo["repo"])), None)
+            if at is None or (share and workspace._same(repo["repo"], share)):
+                continue
+            full[at] = str(repo["dest"])
+            if entry.get("tooling") and workspace._same(entry["tooling"], repo["repo"]):
+                entry["tooling"] = str(repo["dest"])
+            entry["client_code"] = [str(repo["dest"]) if workspace._same(c, repo["repo"]) else c
+                                    for c in entry.get("client_code") or []]
+        added = [f for f in outer if not any(workspace._same(f, known) for known in full)]
+        entry["projects"] = full + added
+        entry["home_override"] = ""
+        # f186's rule kept: a session that had nowhere of its own to start (no AI tooling folder) starts in the first
+        # moved repository from now on - it becomes its tooling folder.
+        became = ""
+        if added and not str(entry.get("tooling") or "").strip():
+            entry["tooling"] = became = added[0]
+        if wss and not entry.get("workspaces"):
+            entry["workspaces"] = wss[:1]
+        notes = _arrange_entry(entry, roots, workspace_backups(), "", share)
+        proxy.profile_store.save(entries, set(proxy.client_labels()))
+        proxy.reload_profiles()
+        forget_roots()
+        if added:
+            notes.insert(0, f"{entry.get('name')}: {', '.join(added)} added to its folders"
+                            + (f" - {Path(became).name} is its AI tooling folder (where it starts) now." if became else "."))
+        return notes
+
+    async def git_onedrive_migrate(request: web.Request) -> web.Response:
+        """f186: the move, as a job the page polls (it can outlast the tunnel's request limit). Planned again here -
+        the page's plan is never trusted - and refused on any clash."""
+        import secrets
+
+        from . import gitmigrate, gitonedrive
+        from .folders import FolderError, FolderOutside
+        from .session import SessionError
+
+        body = await request.json()
+        name, target = str(body.get("name", "")), str(body.get("target", ""))
+        try:
+            profile, _entry = _git_profile(name)
+            running = session_host().sessions.get(profile.name)
+            if running is not None and running.running:
+                raise SessionError(f"{profile.name} is running; stop it before moving its repositories")
+            plan = await asyncio.to_thread(_git_plan, name, target, str(body.get("folder", "")))
+        except SessionError as exc:
+            return err(exc, status=409)
+        except FolderOutside as exc:
+            return err(exc, status=403)
+        except (FolderError, gitonedrive.MoveError) as exc:
+            return err(exc)
+        if not plan["ok"]:
+            return web.json_response({"error": "the move has clashes to settle first",
+                                      "plan": gitonedrive.plan_view(plan)}, status=409)
+        if any(job["state"] == "running" for job in git_jobs.values()):
+            return err(ValueError("another move is still running - wait for it to finish"), status=409)
+        job_id = secrets.token_hex(8)
+        job: dict[str, Any] = {"id": job_id, "state": "running", "step": "Starting", "name": profile.name}
+        git_jobs[job_id] = job
+        log_folder = Path(getattr(proxy.cfg, "state_dir", "") or Path.home() / ".aicleaner") / "logs" / "git-migrate"
+
+        def step(text: str) -> None:
+            job["step"] = text
+
+        async def work() -> None:
+            try:
+                result = await asyncio.to_thread(gitmigrate.execute, plan, log_folder, step)
+            except Exception as exc:  # noqa: BLE001 - said on the page; the executor put everything back
+                log.warning("git move for %s failed: %s", profile.name, exc)
+                job.update(state="failed", error=str(exc), step="Failed")
+                return
+            # The move is done whatever happens next: a profile that cannot be saved is said, never "not moved".
+            job["step"] = "Adding the new folders to the project session"
+            try:
+                result["profile_notes"] = _git_adopt(profile.name, result)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("git move for %s: the profile was not updated: %s", profile.name, exc)
+                result["profile_notes"] = [f"The repositories moved, but {profile.name} was not updated ({exc}) - add "
+                                           f"{result['target']} to its folders in Edit project sessions."]
+            job.update(state="done", result=result, step="Done")
+
+        job["task"] = asyncio.ensure_future(work())
+        return web.json_response({"job": job_id})
+
+    async def git_onedrive_job(request: web.Request) -> web.Response:
+        """f186: a move's progress - running (with its step), done (with what moved) or failed (with why)."""
+        job = git_jobs.get(request.query.get("id", ""))
+        if job is None:
+            return err(ValueError("no such move"), status=404)
+        return web.json_response({k: v for k, v in job.items() if k != "task"})
 
     async def conversation_move_preview(request: web.Request) -> web.Response:
         """What a move would take (J3): the files the conversation made, and where it could go."""
@@ -4174,6 +4679,125 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         except MappingError as exc:
             return err(exc, 404 if str(exc).startswith("unknown topic") else 400)
 
+    # ---- D258: deleting a topic to a bin, and restoring it ---------------------------------------------------------
+
+    def _topic_bin_state() -> Path:
+        state = getattr(mf, "state_dir", None) or (getattr(proxy.cfg, "state_dir", "") if proxy is not None else "")
+        if not str(state or "").strip():
+            raise ValueError("AI Cleaner has no state folder here, so a deleted topic would have nowhere to wait")
+        return Path(state)
+
+    def _topic_use(cid: str) -> dict[str, Any]:
+        """What deleting `cid` would touch: its label, the project sessions naming it, the running ones (which block
+        it), and its client assets folder (never touched)."""
+        entries = proxy.read_profiles() if proxy is not None else []
+        sessions = [str(e.get("name")) for e in entries if str(e.get("client") or "").lower() == cid.lower()]
+        running: list[str] = []
+        host = getattr(proxy, "session", None) if proxy is not None else None
+        if host is not None:
+            for name, sess in host.sessions.items():
+                profile = getattr(sess, "profile", None)
+                if sess.running and str(getattr(profile, "client", "") or "").lower() == cid.lower():
+                    running.append(name)
+        label = share_label(cid)
+        share = proxy.share_store.get(cid) if proxy is not None else ""
+        return {"id": cid, "label": label, "sessions": sessions, "running": running, "assets": share}
+
+    async def topic_delete_preview(request: web.Request) -> web.Response:
+        cid = request.match_info["cid"]
+        if cid.lower() == GLOBAL_ID.lower():
+            return err(ValueError("Global cannot be deleted - it holds your own names for every topic"))
+        try:
+            mf._client_doc(cid)
+        except MappingError as exc:
+            return err(exc, status=404)
+        return web.json_response(await asyncio.to_thread(_topic_use, cid))
+
+    async def topic_delete(request: web.Request) -> web.Response:
+        """D258: the topic to the bin (30 days), its project sessions to Topic: None. Refused for Global, an unknown
+        topic, and while a session using it runs. Turns filtering off for its terms, so on this machine it waits for
+        the desktop's Yes when that is switched on (H2)."""
+        from . import topicbin
+        from .profiles import ProfileError
+
+        cid = request.match_info["cid"]
+        if cid.lower() == GLOBAL_ID.lower():
+            return err(ValueError("Global cannot be deleted - it holds your own names for every topic"))
+        try:
+            mf._client_doc(cid)
+        except MappingError as exc:
+            return err(exc, status=404)
+        use = await asyncio.to_thread(_topic_use, cid)
+        if use["running"]:
+            return err(ValueError(f"{', '.join(use['running'])} {'is' if len(use['running']) == 1 else 'are'} running "
+                                  f"with topic {use['label']} - stop {'it' if len(use['running']) == 1 else 'them'} "
+                                  "before deleting the topic"), status=409)
+        refused = await _confirmed_here(request, [f"Delete topic {use['label']}: its terms stop being filtered"])
+        if refused is not None:
+            return refused
+        try:
+            state = _topic_bin_state()
+            meta = await asyncio.to_thread(topicbin.delete, mf, cid, state, use["label"], use["sessions"])
+        except (topicbin.TopicBinError, ValueError, OSError) as exc:
+            return err(exc)
+        notes: list[str] = []
+        if use["sessions"] and proxy is not None:
+            entries = proxy.read_profiles()
+            for entry in entries:
+                if str(entry.get("client") or "").lower() == cid.lower():
+                    entry["client"] = ""
+            try:
+                proxy.profile_store.save(entries, set(proxy.client_labels()))
+            except (ProfileError, OSError) as problem:
+                notes.append(f"The project sessions still name {cid}: {problem}")
+            else:
+                notes.append(f"{', '.join(use['sessions'])} now use{'s' if len(use['sessions']) == 1 else ''} "
+                             "Topic: None (Global only).")
+            proxy.reload_profiles()
+        return web.json_response({"ok": True, "entry": meta["entry"], "notes": notes, **use})
+
+    async def topics_deleted(request: web.Request) -> web.Response:
+        from . import topicbin
+
+        try:
+            state = _topic_bin_state()
+        except ValueError:
+            return web.json_response({"deleted": [], "keep_days": topicbin.KEEP_DAYS})
+        rows = await asyncio.to_thread(topicbin.listing, state)
+        return web.json_response({"deleted": rows, "keep_days": topicbin.KEEP_DAYS})
+
+    async def topics_restore(request: web.Request) -> web.Response:
+        """D258: a deleted topic back, and the project sessions it unlinked that still exist with no topic linked
+        to it again."""
+        from . import topicbin
+        from .profiles import ProfileError
+
+        body = await request.json()
+        try:
+            state = _topic_bin_state()
+            meta = await asyncio.to_thread(topicbin.restore, mf, state, str(body.get("entry", "")))
+        except topicbin.TopicBinError as exc:
+            return err(exc, status=409 if "exists again" in str(exc) else 404)
+        except (ValueError, OSError) as exc:
+            return err(exc)
+        cid = str(meta.get("id"))
+        relinked: list[str] = []
+        if proxy is not None and meta.get("sessions"):
+            wanted = {str(n).lower() for n in meta["sessions"]}
+            entries = proxy.read_profiles()
+            for entry in entries:
+                if str(entry.get("name", "")).lower() in wanted and not str(entry.get("client") or "").strip():
+                    entry["client"] = cid
+                    relinked.append(str(entry["name"]))
+            if relinked:
+                try:
+                    proxy.profile_store.save(entries, set(proxy.client_labels()) | {cid})
+                except (ProfileError, OSError) as problem:
+                    relinked = []
+                    log.warning("topic %s restored; its project sessions were not re-linked: %s", cid, problem)
+            proxy.reload_profiles()
+        return web.json_response({"ok": True, "id": cid, "label": meta.get("label", cid), "relinked": relinked})
+
     async def client_restore(request: web.Request) -> web.Response:
         try:
             mf.restore(request.match_info["cid"])
@@ -4395,6 +5019,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
     app.router.add_get("/api/clients/{cid}", client_view)
     app.router.add_get("/api/clients/{cid}/raw", client_raw)
     app.router.add_post("/api/clients/{cid}/restore", client_restore)
+    # D258: delete a topic to a bin (restorable for 30 days).
+    app.router.add_get("/api/clients/{cid}/delete", topic_delete_preview)
+    app.router.add_post("/api/clients/{cid}/delete", topic_delete)
+    app.router.add_get("/api/topics/deleted", topics_deleted)
+    app.router.add_post("/api/topics/restore", topics_restore)
     app.router.add_get("/api/clients/{cid}/key", client_key_get)
     app.router.add_post("/api/clients/{cid}/key", client_key_post)
     app.router.add_post("/api/clients/{cid}/held", client_held)
@@ -4469,6 +5098,7 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/session/files/zip", session_files_zip)
         app.router.add_get("/api/session/files/zip", session_files_zip)        # feature 169: a folder dragged out
         app.router.add_get("/api/session/file/sniff", session_file_sniff)      # feature 172: is it text?
+        app.router.add_post("/api/session/file/refs", session_file_refs)       # f188: clickable file names
         app.router.add_get("/api/session/tree-state", session_tree_state)
         app.router.add_post("/api/session/workspace-cwd", session_workspace_cwd)
         app.router.add_post("/api/session/workspace-create", session_workspace_create)
@@ -4499,6 +5129,11 @@ def build_ui_routes(app: web.Application, mf: MappingStore, store: CandidateStor
         app.router.add_post("/api/tunnel/secret", tunnel_secret_set)
         app.router.add_post("/api/session/profile/add-folder", session_profile_add_folder)
         app.router.add_post("/api/session/root-order", session_root_order)
+        app.router.add_get("/api/session/git-onedrive", git_onedrive_get)
+        app.router.add_post("/api/session/git-onedrive/choice", git_onedrive_choice)
+        app.router.add_post("/api/session/git-onedrive/plan", git_onedrive_plan)
+        app.router.add_post("/api/session/git-onedrive/migrate", git_onedrive_migrate)
+        app.router.add_get("/api/session/git-onedrive/job", git_onedrive_job)
         app.router.add_get("/api/session/commands", session_commands)
         app.router.add_get("/api/session/profiles", session_profiles)
         app.router.add_post("/api/session/profiles", session_profiles_save)

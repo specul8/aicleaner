@@ -19,6 +19,7 @@ Policy, in order:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import json
 import logging
@@ -117,7 +118,9 @@ COPILOT_READ = {"/chat/completions": "openai", "/responses": "openai_responses",
 _NOT_UI_ACTIONS = ("/api/tokenise", "/api/rehydrate", "/api/session/tree-state",
                    "/api/session/permission/request",
                    # the file tabs' 15-second changed-on-disk check: a poll, not a person
-                   "/api/session/file/stat")
+                   "/api/session/file/stat",
+                   # f188: which names in the transcript are files - asked as turns scroll into view
+                   "/api/session/file/refs")
 # Reads that are logged although they change nothing: a project file's content leaving the machine
 # for a browser (DECISIONS 50). Who read or downloaded what is exactly what the log is for.
 _LOGGED_READS = ("/api/session/file", "/api/session/file/raw", "/api/session/file/download",
@@ -125,8 +128,10 @@ _LOGGED_READS = ("/api/session/file", "/api/session/file/raw", "/api/session/fil
 _FILE_WRITE = "/api/session/file/write"
 _READ_IMAGE = "/api/session/read-image"
 _PROMPT = "/api/session/prompt"
-PICTURE_CACHE = 32          # redacted pictures kept by hash (D216): a conversation's worth
-_PICTURE_LOCK = threading.Lock()
+# Picture outcomes kept by hash (D216), least recently used out first (D261: 32, first in first out, was no hit at all
+# for a conversation with more pictures than that). Several sessions' pictures; the copies' bytes bounded too.
+PICTURE_CACHE = 512
+PICTURE_CACHE_BYTES = 128_000_000
 # Where a body value is a credential. Everything on the Secrets endpoints is; elsewhere, a key
 # that names one. "token" is withheld except where it is a client's token, which is not a secret.
 _SECRET_PATHS = ("/api/secrets",)
@@ -344,6 +349,82 @@ def _client_gone(request: Any) -> bool:
     return transport is None or transport.is_closing()
 
 
+
+def _derived_home(entry: dict) -> str:
+    """f187's upgrade: the home a version-1 profile has now (its override, its workspace file's cwd or first folder, or
+    its first folder) - it becomes its AI tooling folder, so sessions keep starting where they did."""
+    from . import workspace
+
+    projects = [str(p) for p in entry.get("projects") or []]
+    wss = [str(w) for w in entry.get("workspaces") or [] if str(w).strip()] or workspace.implicit_workspaces(projects)
+    return str(workspace.home_of(wss, projects, str(entry.get("home_override") or "")).get("folder") or "")
+
+
+def _reader_print(kind: str) -> str:
+    """D261: the fingerprint of the real reader - Read-ImageText.ps1's bytes and the engines found - that keys what
+    is kept of its readings on disk, so a new reader (an update, Tesseract installed) reads afresh."""
+    from .convert import ocr_engine_name, reader_script
+    from .picturestore import reader_print
+    try:
+        script = hashlib.sha256(reader_script().read_bytes()).hexdigest()
+    except OSError:
+        script = ""
+    return reader_print(kind, script, ocr_engine_name() if kind == "text" else "")
+
+
+def _remembering_readers(memory: Any, tally: Any) -> tuple[Any, Any]:
+    """D261: the box reader and filler through `memory` (picture.PictureMemory), each real run timed and counted for
+    this request's upstream line; an answer from memory or the store is not a run."""
+    def read(raw: bytes) -> list:
+        started = time.perf_counter()
+        remembered = False
+        try:
+            lines, remembered = memory.read(raw)
+            return lines
+        finally:
+            if tally is not None:
+                if not remembered:
+                    tally.ran("read_boxes")
+                tally.timed("read_boxes", started)
+
+    def fill(raw: bytes, boxes: list, max_bytes: int = 0) -> bytes:
+        started = time.perf_counter()
+        remembered = False
+        try:
+            copy, remembered = memory.fill(raw, boxes, max_bytes)
+            return copy
+        except Exception as exc:
+            remembered = bool(getattr(exc, "remembered", False))
+            raise
+        finally:
+            if tally is not None:
+                if not remembered:
+                    tally.ran("fill")
+                tally.timed("fill", started)
+    return read, fill
+
+
+def _tallied_text_reader(reader: Any, tally: Any) -> Any:
+    """D261: the image-to-text reader, timed and counted - a reading answered from memory is not a run."""
+    if reader is None or tally is None:
+        return reader
+    remembering = reader.read if isinstance(reader, RememberedReader) else None
+
+    def read(raw: bytes, media: str = "") -> str | None:
+        started = time.perf_counter()
+        remembered = False
+        try:
+            if remembering is not None:
+                text, remembered = remembering(raw, media)
+                return text
+            return reader(raw, media)
+        finally:
+            if not remembered:
+                tally.ran("read_text")
+            tally.timed("read_text", started)
+    return read
+
+
 class Proxy:
     def __init__(self, cfg: Config, mapper: Mapper | MapperHandle, evidence: EvidenceLog):
         self.cfg = cfg
@@ -484,8 +565,10 @@ class Proxy:
         if cfg.ocr and self._image_to_text is None:
             log.info("no OCR engine on this machine: images and scanned PDFs stay withheld")
         elif self._image_to_text is not None:
-            # A picture in the history is sent again with every request: read once, remembered by its hash.
-            self._image_to_text = RememberedReader(self._image_to_text)
+            # A picture in the history is sent again with every request: read once, remembered by its hash - and,
+            # D261, kept on disk for the real reader, so a restart does not read every picture again.
+            self._image_to_text = RememberedReader(self._image_to_text, store=self._picture_store(),
+                                                   reader=_reader_print("text"))
         # dialect -> (gateway token, upstream key); loaded once at startup.
         self._swaps: dict[str, tuple[str, str]] = {}
         for dialect, spec in cfg.credentials.items():
@@ -509,14 +592,15 @@ class Proxy:
     def _as_profiles(self, entries: list[dict]) -> list:
         from .session import Profile
 
+        from . import folderroles
+
         labels = self.client_labels()
-        shares = self.share_store.load()
-        folded = {cid.lower(): folder for cid, folder in shares.items()}
         profiles = []
         from .casual import PROFILE as CASUAL
 
         for e in entries:
-            share = Path(folded[e["client"].lower()]) if folded.get(e.get("client", "").lower()) else None
+            # f187: the project assets folder is the session's own (its Client Assets role), no longer the topic's.
+            share = Path(e["assets"]) if str(e.get("assets") or "").strip() else None
             # Casual chats has no client, so no client share: its folder is its share (item J).
             if share is None and e["name"] == CASUAL and not e.get("client") and self.cfg.session_casual_folder:
                 share = Path(self.cfg.session_casual_folder)
@@ -524,8 +608,11 @@ class Proxy:
             profiles.append(Profile(name=e["name"], client=e.get("client", ""), label=label,
                                     projects=[Path(f) for f in e.get("projects", [])],
                                     model=e.get("model", ""), brief=e.get("brief", ""), share=share,
+                                    tooling=str(e.get("tooling") or ""),
+                                    client_code=[str(c) for c in e.get("client_code") or []],
                                     workspaces=[Path(w) for w in e.get("workspaces", [])],
-                                    home_override=e.get("home_override", ""),
+                                    # f187: sessions start in the AI tooling folder, else the assets folder.
+                                    home_override=folderroles.cwd_of(e) or e.get("home_override", ""),
                                     homes_before=list(e.get("homes_before") or []),
                                     agent=e.get("agent", "claude") or "claude"))
             # Each worktree is a session of its own, `<profile> @ <name>` (DECISIONS 66): everything
@@ -552,6 +639,19 @@ class Proxy:
         put right.
         """
         entries, problem = self.profile_store.load()
+        if entries:
+            # f187: a file from before folder roles keeps its home as its AI tooling folder (in memory; the next save
+            # writes version 2), and every profile with a topic reads the topic's client assets folder.
+            from . import folderroles
+            from .profiles import ProfileError, validate
+
+            if getattr(self.profile_store, "version", 2) < 2:
+                folderroles.upgrade(entries, _derived_home)
+            folderroles.apply_topic_assets(entries, self.share_store.load())
+            try:
+                entries = validate(entries)
+            except ProfileError as exc:                      # cannot happen for a clean file; said if it does
+                problem = (f"{problem} " if problem else "") + str(exc)
         labels = self.client_labels()
         if labels:                     # an unreadable mapping is reported on its own page
             unknown = sorted({e["client"] for e in entries if e.get("client") and e["client"] not in labels})
@@ -1248,29 +1348,38 @@ class Proxy:
         found = next((c for c in clients if c.get("id") == client), None)
         return None if found is None else len([f for f in (found.get("forms") or []) if f.get("real")])
 
-    def _picture(self, mapper: Any, said: list[tuple[str, str]] | None = None) -> Any:
+    def _picture(self, mapper: Any, said: list[tuple[str, str]] | None = None, tally: Any = None) -> Any:
         """Feature 114: (image bytes) -> picture.Redacted while pictures go with client names blacked out; else None.
 
         D216: a picture attached on the Session page stays in the conversation, and Claude Code sends the whole
         conversation with every request - each read three times (read, fill, read again) on every tool call of every
         turn. So the outcome is kept by the picture's hash, for as long as the mapping and the ignore list are the
         same (they decide what is blacked out). `said` collects (hash, why) for a picture that did not go as a picture
-        - held back, or the reader failed - so the session that sent it can be told, once."""
+        - held back, or the reader failed - so the session that sent it can be told, once. `tally` (picture.PictureTally)
+        times each reader run for the upstream line (D261)."""
         if not self.cfg.redact_images or self.cfg.allow_images:
             return None
         if getattr(self, "_picture_readers", None) is None:
             from .picture import windows_readers
             self._picture_readers = windows_readers(self.cfg.ocr_timeout_s) or False
+            # D261: only the real reader's readings are kept on disk, under its fingerprint.
+            self._picture_reader_print = _reader_print("boxes") if self._picture_readers else ""
         if not self._picture_readers:
             return None
-        import hashlib
-
         from .detect import find_candidates
         from .attachments import withheld_reason
-        from .picture import redact_picture
-        read_boxes, fill_boxes = self._picture_readers
+        from .picture import Kept, PictureMemory, redact_picture
+        memory = self.__dict__.get("_picture_memory")
+        if memory is None or memory.readers != tuple(self._picture_readers):
+            printed = getattr(self, "_picture_reader_print", "")
+            memory = PictureMemory(*self._picture_readers, store=self._picture_store() if printed else None,
+                                   reader=printed)
+            self._picture_memory = memory
+        read_boxes, fill_boxes = _remembering_readers(memory, tally)
         ignored = {v.lower() for v in self.store.ignore_set()} if self.store is not None else set()
-        cache: dict[str, Any] = self.__dict__.setdefault("_picture_cache", {})
+        cache = self.__dict__.get("_picture_cache")
+        if cache is None:
+            cache = self.__dict__.setdefault("_picture_cache", Kept(PICTURE_CACHE, PICTURE_CACHE_BYTES))
         ignoring = frozenset(ignored)
 
         def candidates(text: str) -> list[str]:
@@ -1279,22 +1388,22 @@ class Proxy:
 
         def redacted(raw: bytes) -> Any:
             key = hashlib.sha256(raw).hexdigest()
-            with _PICTURE_LOCK:                      # requests are filtered on worker threads
-                kept = cache.get(key)
+            kept = cache.get(key)                    # locked inside: requests are filtered on worker threads
             if kept is not None and kept[0] is mapper and kept[1] == ignoring:
                 result = kept[2]
             else:
+                started = time.perf_counter()
                 try:
                     result = redact_picture(raw, mapper, read_boxes, fill_boxes, candidates)
                 except Exception as exc:  # noqa: BLE001 - said, then handled as before: the picture goes as text
                     if said is not None:
                         said.append((key, withheld_reason("failed")))
                     raise
-                with _PICTURE_LOCK:
-                    cache.pop(key, None)
-                    cache[key] = (mapper, ignoring, result)
-                    while len(cache) > PICTURE_CACHE:
-                        cache.pop(next(iter(cache)))
+                finally:
+                    if tally is not None:
+                        tally.timed("redact", started)
+                cache.put(key, (mapper, ignoring, result),
+                          256 + len(result.image or b"") + len(result.text or ""))
             if result.image is None and said is not None:
                 # D246: the reason in words, with counts only - the same words the AI service is given.
                 reason = "too_large" if getattr(result, "too_large", False) else "legible"
@@ -1302,6 +1411,16 @@ class Proxy:
             return result
 
         return redacted
+
+    def _picture_store(self) -> Any:
+        """D261: what the real picture reader said, kept on disk (picturestore.py) - one store for the proxy."""
+        store = self.__dict__.get("_picture_store_")
+        if store is None:
+            from .picturestore import PictureStore, store_folder
+            folder = store_folder(self._state_path())
+            store = PictureStore(folder) if folder is not None else False
+            self._picture_store_ = store
+        return None if store is False else store       # not `or`: an empty store has no length
 
     def _say_pictures(self, session_name: str, said: list[tuple[str, str]]) -> None:
         """D216: a Session-page session hears, once a picture, that it went as its text and not as a picture."""
@@ -1923,6 +2042,13 @@ class Proxy:
         # A Config built in code carries the folders but has never been through the file
         # reader, so ask the same helper the reader uses rather than starting with no profile.
         declared = cfg.session_profiles or session_profiles({}, cfg.session_projects)
+        if declared and not self.profile_store.exists():
+            # f187: profiles from the config are from before folder roles, as a version-1 file is - each keeps its
+            # home as its AI tooling folder (one that names its tooling folder is left as it is).
+            from . import folderroles
+
+            declared = [dict(entry) if isinstance(entry, dict) else entry for entry in declared]
+            folderroles.upgrade([e for e in declared if isinstance(e, dict)], _derived_home)
         self.profile_store.bootstrap(declared)
         entries = self.read_profiles()
         self.session = SessionHost(claude=cfg.session_claude,
@@ -2254,11 +2380,18 @@ class Proxy:
             return fixed
 
         said = done.said
-        obj, attach_counts = scrub(obj, self.cfg.allow_images, self._pdf_to_text, picture=self._picture(mapper, said),
-                                   image_to_text=self._image_to_text, repair=repair,
+        from .picture import PictureTally
+        tally = PictureTally()
+        started = time.perf_counter()
+        obj, attach_counts = scrub(obj, self.cfg.allow_images, self._pdf_to_text,
+                                   picture=self._picture(mapper, said, tally),
+                                   image_to_text=_tallied_text_reader(self._image_to_text, tally), repair=repair,
                                    ocr_max_pages=self.cfg.ocr_max_pages,
                                    ocr_timeout_s=self.cfg.ocr_timeout_s,
-                                   ocr_max_bytes=self.cfg.ocr_max_bytes)
+                                   ocr_max_bytes=self.cfg.ocr_max_bytes, tally=tally)
+        run.ms["attachments"] = run.ms.get("attachments", 0.0) + (time.perf_counter() - started) * 1000
+        if tally.seen:
+            run.pictures = tally.summary()      # D261: what the pictures cost, on the upstream line
         attach = dict(attach_counts)
         run.check()                     # the client may have gone during the pictures' reading
         original = obj

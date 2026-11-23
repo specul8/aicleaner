@@ -1,7 +1,8 @@
 // Markdown preview for a file tab (feature 54; DECISIONS 50).
 //
 // Builds DOM nodes with h(), never an HTML string, so nothing in the file can become markup: raw
-// HTML is shown as the text it is, and only http, https and mailto addresses become links. An
+// HTML is shown as the text it is - except an empty anchor, <a id="x"></a> (D263), which becomes a
+// jump target and nothing else - and only http, https and mailto addresses become links. An
 // image is shown only when its path resolves to a file in the session's folders; a remote one is
 // its description and a link, never loaded.
 // Covers what notes and handoffs use - headings, paragraphs, emphasis, code, lists (nested),
@@ -17,6 +18,12 @@ const LIST = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
 const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 const LINK = /^\[([^\]]*)\]\(\s*([^\s)]+)(?:\s+"[^"]*")?\s*\)/;
 const PUNCT = /[!-/:-@[-`{-~]/;
+// D263 (2026-11-21): an anchor a file sets for its own links, as GitHub and VS Code read it - `<a id="j20"></a>` on
+// its own line or before an item's text was shown as text. Only this exact, empty form; the name only letters,
+// digits, - and _. It becomes a target carrying the name in data-md-target, not an id: an id would also name a
+// global (window.j20) a file could choose.
+const HTML_ANCHOR = /^<a\s+(?:id|name)\s*=\s*"([A-Za-z0-9_-]{1,100})"\s*>\s*<\/a>/i;
+const anchorTarget = (name) => h('a', { class: 'md-target', dataset: { mdTarget: name } });
 const SAFE_SCHEMES = new Set(['http:', 'https:', 'mailto:']);
 
 function safeHref(url) {
@@ -37,7 +44,7 @@ function anchorLink(target, children) {
   link.addEventListener('click', (event) => {
     event.preventDefault();
     const doc = link.closest('.md-doc') || document;
-    const heading = doc.querySelector(`[id="${CSS.escape(target)}"]`);
+    const heading = doc.querySelector(`[id="${CSS.escape(target)}"], [data-md-target="${CSS.escape(target)}"]`);
     if (heading) heading.scrollIntoView({ block: 'start' });
   });
   return link;
@@ -107,6 +114,10 @@ export function inline(text, opts = {}) {
       } else { plain += run; i += run.length; }
       continue;
     }
+    if (c === '<') {
+      const found = HTML_ANCHOR.exec(text.slice(i));
+      if (found) { flush(); out.push(anchorTarget(found[1])); i += found[0].length; continue; }
+    }
     if (c === '!' && text[i + 1] === '[') {
       const found = LINK.exec(text.slice(i + 1));
       if (found) {
@@ -170,24 +181,27 @@ function startsBlock(lines, i) {
     || LIST.test(line) || isTableStart(lines, i);
 }
 
-function table(lines, i, opts) {
+// Each row carries its source line (data-line) and a cell is found by its index in the row, so a
+// double-click in an empty cell can put the caret between that cell's pipes (D251).
+function table(lines, i, opts, base = 0) {
   const aligns = cells(lines[i + 1]).map((c) => (c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : ''));
   // A cell holding one short word ("On", "Built-in", "90") is never broken across lines: in a table
   // whose other columns hold sentences, the browser otherwise squeezes it to "Built-/in" (D139).
   const short = (text) => text.length <= 24 && !/\s/.test(text.trim());
   const cell = (tag, text, n) => h(tag, { class: [aligns[n] ? `md-${aligns[n]}` : '', short(text) ? 'md-nowrap' : '']
     .filter(Boolean).join(' ') || null }, inline(text, opts));
-  const head = h('thead', null, h('tr', null, cells(lines[i]).map((text, n) => cell('th', text, n))));
+  const head = h('thead', null, h('tr', { dataset: { line: String(base + i) } }, cells(lines[i]).map((text, n) => cell('th', text, n))));
   const body = h('tbody');
   let j = i + 2;
   for (; j < lines.length && lines[j].trim() && lines[j].includes('|'); j++) {
-    body.append(h('tr', null, cells(lines[j]).map((text, n) => cell('td', text, n))));
+    body.append(h('tr', { dataset: { line: String(base + j) } }, cells(lines[j]).map((text, n) => cell('td', text, n))));
   }
   return [h('div', { class: 'md-table' }, h('table', null, head, body)), j];
 }
 
 // A list and any list indented under its items; a blank line or a line that is not an item ends it.
-function list(lines, i, opts) {
+// Each item carries the source line it starts on (data-line, D251).
+function list(lines, i, opts, base = 0) {
   const first = LIST.exec(lines[i]);
   const indent = first[1].length;
   const ordered = /\d/.test(first[2]);
@@ -197,7 +211,7 @@ function list(lines, i, opts) {
     const item = LIST.exec(lines[i]);
     if (!item || item[1].length < indent) break;
     if (item[1].length > indent) {
-      const [nested, next] = list(lines, i, opts);
+      const [nested, next] = list(lines, i, opts, base);
       if (!node.lastElementChild) node.append(h('li'));
       node.lastElementChild.append(nested);
       i = next;
@@ -205,8 +219,9 @@ function list(lines, i, opts) {
     }
     if (/\d/.test(item[2]) !== ordered) break;
     const parts = [item[3]];
+    const from = i;
     for (i++; i < lines.length && lines[i].trim() && /^\s/.test(lines[i]) && !LIST.test(lines[i]); i++) parts.push(lines[i].trim());
-    node.append(h('li', null, inline(parts.join('\n'), opts)));
+    node.append(h('li', { dataset: { line: String(base + from) } }, inline(parts.join('\n'), opts)));
   }
   return [node, i];
 }
@@ -251,6 +266,8 @@ function blocks(lines, opts, base = 0) {
       continue;
     }
     if (RULE.test(line)) { out.push(h('hr')); i++; continue; }
+    const anchor = HTML_ANCHOR.exec(line.trim());
+    if (anchor && anchor[0].length === line.trim().length) { out.push(anchorTarget(anchor[1])); i++; continue; }
     if (QUOTE.test(line)) {
       const quoted = [];
       const from = i;
@@ -258,8 +275,8 @@ function blocks(lines, opts, base = 0) {
       out.push(h('blockquote', null, blocks(quoted, opts, base + from)));
       continue;
     }
-    if (isTableStart(lines, i)) { const [node, next] = table(lines, i, opts); out.push(node); i = next; continue; }
-    if (LIST.test(line)) { const [node, next] = list(lines, i, opts); out.push(node); i = next; continue; }
+    if (isTableStart(lines, i)) { const [node, next] = table(lines, i, opts, base); out.push(node); i = next; continue; }
+    if (LIST.test(line)) { const [node, next] = list(lines, i, opts, base);out.push(node); i = next; continue; }
     const para = [line.trim()];
     for (i++; i < lines.length && !startsBlock(lines, i); i++) para.push(lines[i].trim());
     out.push(h('p', null, inline(para.join('\n'), opts)));

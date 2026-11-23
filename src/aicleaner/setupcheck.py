@@ -32,7 +32,9 @@ def findings(home: str, folders: list[str], share: str = "", workspaces: list[st
     out: list[dict[str, Any]] = []
     if home and Path(home).is_dir():
         h = Path(home)
-        if not (h / ".git").exists():
+        # f186: never offer Git in the project assets folder (OneDrive) - a session homed there is design and
+        # documentation work, and Git in OneDrive is what the start's check warns about.
+        if not (h / ".git").exists() and not (share and _same(home, share)):
             out.append({"folder": home, "kind": "not_repo",
                         "fix": None if in_repository(h) else "git_init",
                         "text": (f"{home} is not a git repository" + (" (it is inside one)" if in_repository(h) else ""))})

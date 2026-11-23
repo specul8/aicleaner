@@ -26,35 +26,51 @@ On a narrow screen the panel sits under the conversation panel.
 
 The editor's controls are in blocks that sit side by side on a wide screen and one under another, in this order, on a
 narrow one: **Basics** (Name, Topic, Model); **Folders appearing in the Files panel** (the widest); **Workspace file**
-(with the terminal working directory note); **Project assets folder**; **Standing brief**, folded. Any notices, and
-**Add a project session** / **Delete** / **Save** / **Close**, run across the bottom. The (i) beside **Workspace file** and **Project assets folder**
-says what each is for.
+(with the terminal working directory note); **Standing brief**, folded. Any notices, and
+**Add a project session** / **Delete** / **Save** / **Close**, run across the bottom. The (i) beside **Folders appearing
+in the Files panel** and **Workspace file** says what each is for.
 
 | Field | What it does |
 |---|---|
 | Name | How the session is known everywhere: the picker, the menu, notifications, the page address. Up to 40 characters; no slash, `?`, `#` or `%`. Locked while its AI session runs |
 | Topic | The topic the work is for, or **None (Global only)**. Shown as the topic's label, never its id |
 | Model | A drop-down of known models, **Default** (Claude Code's own choice), or **Other...** to type a name |
-| Folders appearing in the Files panel | Every folder the Files panel shows, in its order: the topic's project assets folder first (fixed), then the home folder, then the rest. Each is an entry with a drag handle at its left, **Move up** / **Move down** buttons (for the keyboard and touch) and **Remove** (x) at its right; **Add a folder** adds one at the end. With a workspace file, each is marked **workspace** (in the file) or **added** (not yet: Save writes it in) |
-| Home folder | Where sessions start: always the first folder in the list, marked **home** (hover it for what that means). To change it, drag another folder first or use **Move up**. Removing the home makes the next one the home, and the page says so before you save. On a project session with no folders yet, the first folder added that holds a `.code-workspace` file connects that file instead, and the file's folders become the list, its home first |
+| Folders appearing in the Files panel | Every folder the Files panel shows, in the order you set - drag one (the handle at its left) or use **Move up** / **Move down** (for the keyboard and touch); **Remove** (x) at its right; **Add a folder** adds one at the end. In front of each, its three role buttons (below). The folder sessions start in is marked **cwd**. With a workspace file, each is also marked **workspace** (in the file) or **added** (not yet: Save writes it in). On a project session with no folders yet, the first folder added that holds a `.code-workspace` file connects that file instead, and the file's folders become the list |
 | Workspace file | One `.code-workspace` file per project session: **Connect to a workspace file** chooses it; it shows as a single entry with **Disconnect**. Its folders join the list above. A project session saved with several keeps the first and names the others it dropped (the files themselves are never touched) |
-| Project assets folder | The topic's project assets folder in OneDrive, saved per topic on this machine (`client-shares.json`), not with the project session. Shown only once a topic is chosen |
 | Standing brief | Text sent with the first prompt of each session, for example "Landing zone work for Contoso. Terraform only." Folded to one line showing its first line; open it to edit |
+
+### Folder roles
+
+Each folder has three toggle buttons in front of it. Hover (or focus) one for what it means; press it to turn it on or
+off for that folder. A folder can have any of them, all three, or none.
+
+| Role | What it means |
+|---|---|
+| **Assets** (Client assets) | The files that cross between you and the client - documents, designs, exports. Usually your OneDrive folder. **Exactly one** per project session: Save refuses until one folder has it. It is the **topic's** folder: every project session of the topic shows it among its folders with Assets on (wherever you put it in the order), and choosing another one here changes it for the topic and all its other project sessions - the editor names them before you save. The topic page shows and changes the same folder. A project session with **Topic: None** keeps its own |
+| **Tooling (CWD)** (AI tooling, working folder) | Where the AI agent runs and its commands start; for non-client-facing tooling, operating rules and scripts that deliver the client outcomes. **At most one**. Sessions start here; with none, in the client assets folder |
+| **Client code** | Folders that hold the client-facing solution - code and configuration delivered to the client. A label only (it tells Claude what the folder is); any number, including none |
+| none | Any other folder - a template repository from another engagement, say: the session can still reach it, and Claude is told it has no role |
+
+Roles never move a folder: the order is yours, in the editor, the Files panel and the workspace file alike. When the
+first prompt of a session goes out, Claude is told every folder and its roles, beside the standing brief.
+
+On updating to 1.3.8 each project session kept starting where it did: its home folder became its Tooling (CWD) folder,
+and its topic's project assets folder joined its list first, with Assets on. Client code starts off everywhere.
 
 Folders must sit inside the allowed folder locations (`folders.roots`, set in
 [Folders the pages can open](Settings.md#card-folders)). A project session naming a topic that is not in the mapping is refused when
 you save it. Edits to a project session apply from the AI session's next start.
 
 **The workspace file follows the list.** With a workspace file, saving makes the file list exactly the folders in
-the list, in that order (never the project assets folder) - so a folder you added by hand, or had before you connected
-the file, is written into it too: the first folder - the home - becomes its first entry,
-and its `terminal.integrated.cwd` setting, when it has one, points at it (in the form it already uses - a
-`${workspaceFolder:<name>}` reference or a path). Nothing else in the file changes: comments, other settings,
+the list, in that order - the client assets folder included - so a folder you added by hand, or had before you
+connected the file, is written into it too. Its `terminal.integrated.cwd` setting points at the Tooling (CWD) folder
+(else the client assets folder), wherever it sits: replaced in the form it already uses (a `${workspaceFolder:<name>}`
+reference or a path), or added when that folder is not the file's first. Nothing else in the file changes: comments, other settings,
 names and relative paths stay as they were. A copy of the file as it was is kept first in
 `%USERPROFILE%\.aicleaner\workspace-backups\` (the newest 10 per file - never beside the file, where a repository
 would pick it up). The file is left alone, with a note saying why, when it is read-only, outside the allowed folder
-locations, or changed on disk since the page read it (reload the page and save again); the home folder is then still
-the one you chose. Without a workspace file, the project session keeps the folders and their order itself.
+locations, or changed on disk since the page read it (reload the page and save again); sessions still start in the
+Tooling (CWD) folder you chose. Without a workspace file, the project session keeps the folders and their order itself.
 This works the same through remote access as on the machine itself.
 
 **Naming a session does not narrow the filter.** Every topic's terms are replaced in every
@@ -67,8 +83,11 @@ session's name, its topic, the home folder (hover it for the whole path), whethe
 **Stop**; the second the conversation to continue, **All** and **Conversation actions**, with **Create a worktree**
 under it; the third **Asks**.
 
-- **Start** launches Claude Code in the home folder. Every other folder of the project session,
-  and the topic's project assets folder, is passed with `--add-dir`, so Claude can reach them (prompts still apply).
+- **Start** launches Claude Code in the Tooling (CWD) folder. Every other folder of the project session is passed
+  with `--add-dir`, so Claude can reach them (prompts still apply). A project session with **no Tooling folder** starts
+  in its client assets folder instead - for design and documentation work, where there is no repository. The editor
+  says where sessions start under the folder list, and the session card shows it. With no folder at all, it cannot
+  start.
 - **Continue** (the drop-down) lists earlier conversations held in the project session's folders, newest first, each
   shown by its title or first prompt. Choosing one starts with `--resume`. The **All** tick (Show all conversations)
   lists every one, not just the newest 25. When there are older ones, the list ends with a line that cannot be chosen:
@@ -101,6 +120,50 @@ detached from the proxy; it holds the CLI's input and output, numbers every line
 `%USERPROFILE%\.aicleaner\sessions\`. When the proxy restarts - every update does - it finds the
 broker, reconnects and catches up, so the page keeps the session. Pressing Start on a conversation
 that is already running reconnects to it rather than starting a second copy.
+
+## Git and OneDrive
+
+A Git repository does not belong in OneDrive. It is thousands of small files that change together; OneDrive syncs them
+one by one, keeps both copies when two machines change the same one, can sync half of a change (a corrupted repository:
+"bad object", "missing blob"), and locks files Git is trying to write. Your remote (GitHub, Azure DevOps) is a
+repository's backup; OneDrive is for documents.
+
+So **Start** checks every folder of the project session that is in OneDrive - the client assets folder, and any
+other folder kept there - for Git: a `.git` folder or file anywhere inside it, at any depth (links and junctions are not followed). A `.git`
+folder counts only when it holds a `HEAD` file (a `.git` file only when it starts with `gitdir:`). An empty `.git`
+folder tree - what OneDrive often leaves behind after a repository is moved out - is not Git: it never stops Start, and
+the dialog and the editor list it as "Empty Git folders left behind - safe to delete". The check takes at most about 2 seconds; when
+it cannot finish in that time it says so, and does not treat the folder as clean. A folder that can be checked in
+full in half a second is checked in full every time. For a larger one, AI Cleaner keeps a list of its folders (in its
+own state folder, not in OneDrive), and Start looks again only at the folders created or changed on this computer
+since, so it does not wait. Something OneDrive brings in from another device does not show as a change, so each of
+those quick checks is followed by a full check in the background; Git that arrived that way is caught as soon as it
+finishes, at the latest by the next Start. When it finds Git, the session does not start and a dialog asks what to do,
+naming each folder that holds Git:
+
+- **Yes & Migrate Repo** - choose a folder outside OneDrive (one of the allowed folder locations; a OneDrive folder is
+  refused). AI Cleaner first shows the plan: each repository goes to the same place under the chosen folder, with its
+  `.git` folder, every file Git tracks (uncommitted changes included) and every file `.gitignore` covers; untracked
+  files - never added to the repository - stay in OneDrive. If anything is already where the move would write (a file
+  of the same name, a folder that already holds files, another repository), it lists it and offers **Choose another
+  folder** or **Move into a new folder** - it never overwrites or merges. **Move the repositories** copies everything,
+  checks the copies (the same commit and changes, and `git fsck` clean), and only then removes the originals from
+  OneDrive; if anything fails along the way, everything is put back as it was. In each repository's old folder it
+  leaves **where did my files go.md**, saying what moved where, why, and the exact command to move it back. The new
+  folder takes the old one's place in the project session (with its roles) when the repository was one of its folders,
+  or joins it with no role, and its workspace file follows. With Git in more than one folder, the repositories of the
+  first are moved; Start then checks again and asks about the next. A log of every
+  step is kept in `%USERPROFILE%\.aicleaner\logs\git-migrate\`. Then **Start the session**.
+  When every allowed folder location is in OneDrive, there is nowhere to move to: the dialog says so and offers
+  **Ignore this time** or **Cancel**, with **Don't remind me again for this project**.
+- **No, but remind me next time** - starts this time; the next Start asks again.
+- **No, Don't remind me again (this project)** - starts, and this project session is not checked again. The editor's
+  folder list then says "Git check: off for this project session", with **Turn it back on**.
+- **Cancel** - nothing starts.
+
+The editor's folder list also warns, without stopping anything, when one of its OneDrive folders holds Git. A script
+that starts a session through the API (a scheduled run) can send `"git_onedrive": "once"` to skip the check for that
+start. AI Cleaner never offers `git init` in the project assets folder.
 
 ## Permission modes and approvals
 
@@ -160,15 +223,14 @@ Settings > [Prompt autocorrect](Settings.md#card-autocorrect).
 
 ## Files
 
-The file tree (toggle with **Files**) shows the project session's folders, with the topic's project
-assets folder pinned at the top, then the home folder, then the rest in the workspace file's order, then any other
-folders in the project session's order - each once.
+The file tree (toggle with **Files**) shows the project session's folders in the order you set, each once; the client
+assets folder is marked "(client assets)" and the folder sessions start in "(this session)".
 
 **Reordering the folders.** Drag a project folder's name up or down among the others: a line shows the gap it will
 land in (it never drops *into* a folder, and it is not the drag that copies files or saves them to your device).
 From the keyboard, its right-click menu has **Move up** and **Move down**. The new order is written to the workspace
-file (or kept in the project session, with none), as when you save the list above; moving a folder into first place
-makes it the home folder. The project assets folder stays first and cannot be moved.
+file (or kept in the project session, with none), as when you save the list above. Moving a folder changes only the
+order: where sessions start is the Tooling (CWD) role's, wherever that folder sits.
 
 The mouse works as in File Explorer:
 

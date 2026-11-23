@@ -402,10 +402,17 @@ def profile_tree(workspaces: list[str], projects: list[str], allowed: list[Path]
         if not any(_same(folder, known) for known in out):
             out.append(str(folder))
 
-    for ws in [w for w in workspaces if str(w).strip()]:
-        for _name, folder in workspace_folders(ws):
-            if folder.is_dir() and allowed and is_usable(folder, allowed):
+    file_folders = [folder for ws in [w for w in workspaces if str(w).strip()] for _name, folder in workspace_folders(ws)]
+    # f187: when the profile's own list names every folder the file does (every profile saved since f181), its order is
+    # the person's order and it leads - the file follows it on the next save.
+    covered = bool(file_folders) and all(any(_same(f, p) for p in projects) for f in file_folders)
+    if covered:
+        for folder in projects:
+            if str(folder).strip() and (not allowed or _usable(folder, allowed)):
                 add(folder)
+    for folder in file_folders:
+        if folder.is_dir() and allowed and is_usable(folder, allowed):
+            add(folder)
     # D245: the profile's own folders were checked when saved, but the allowed folders can narrow since, and a
     # tree root is a folder the session reaches - so they are held to the roots here too (when any are set).
     for folder in projects:
@@ -431,9 +438,12 @@ def editor_order(workspaces: list[str], projects: list[str], home: str = "") -> 
             out.append(str(folder))
 
     add(home)
-    for ws in [w for w in workspaces if str(w).strip()]:
-        for _name, folder in workspace_folders(ws):
+    file_folders = [folder for ws in [w for w in workspaces if str(w).strip()] for _name, folder in workspace_folders(ws)]
+    if file_folders and all(any(_same(f, p) for p in projects) for f in file_folders):
+        for folder in projects:                  # f187: the person's order (see profile_tree)
             add(folder)
+    for folder in file_folders:
+        add(folder)
     for folder in projects:
         add(folder)
     return out
@@ -659,13 +669,11 @@ def plan_order(entries: list[Path | None], folders: list[str]) -> list:
 def reorder_within(full: list[str], shown: list[str]) -> list[str]:
     """`full` with the folders that are in `shown` put in `shown`'s order, each in a place one of
     them held; the rest (a folder the tree does not show - not on this disk, say) keep their places.
-    The first of `shown` then leads, since first place is the home (f181)."""
+    f187: the order is only the order - the first place no longer makes a folder the home."""
     full = unique_folders(full)
     shown = [f for f in unique_folders(shown) if any(_same(f, k) for k in full)]
     queue = list(shown)
     out = [queue.pop(0) if any(_same(f, s) for s in shown) else f for f in full]
-    if shown:
-        out = [shown[0]] + [f for f in out if not _same(f, shown[0])]
     return out
 
 
@@ -696,16 +704,35 @@ def _holds_repos(file_dir: Path, entries: list[Path | None]) -> bool:
                for p in entries)
 
 
-def lead_text(text: str, file_dir: Path, folders: list[str]) -> str:
-    """The workspace file's text with exactly these folders, in this order - the first is the home,
-    and the terminal working directory points at it when the file sets one - and nothing else
-    changed. No writing. WorkspaceRewriteError when it cannot be done safely."""
+def _with_cwd(text: str, value: str) -> str:
+    """The text with `terminal.integrated.cwd` added (f187): into the `settings` object when there is one, else a new
+    `settings` object before the closing brace. An insertion, never a re-serialisation."""
+    pair = f'"{CWD_KEY}": {json.dumps(value)}'
+    data = _loads(text)
+    settings = data.get("settings")
+    newline = "\r\n" if "\r\n" in text else "\n"
+    found = re.search(r'"settings"\s*:\s*\{', text)
+    if found and isinstance(settings, dict):
+        return text[:found.end()] + f"{newline}    {pair}{'' if not settings else ','}" + text[found.end():]
+    end = text.rstrip().rfind("}")
+    if end < 0:
+        raise WorkspaceRewriteError("it has no closing brace")
+    body = text[:end].rstrip()
+    comma = "" if body.endswith(("{", ",")) else ","
+    return body + comma + f'{newline}    "settings": {{{newline}        {pair}{newline}    }}{newline}' + text[end:]
+
+
+def lead_text(text: str, file_dir: Path, folders: list[str], home: str = "") -> str:
+    """The workspace file's text with exactly these folders, in this order, and the terminal working
+    directory pointing at `home` (f187: the AI tooling folder, wherever it sits; the first folder when not
+    given) - replaced in place when the file sets one, added when the home is not the first folder - and
+    nothing else changed. No writing. WorkspaceRewriteError when it cannot be done safely."""
     import os
 
     folders = unique_folders(folders)
     if not folders:
         raise WorkspaceRewriteError("a workspace file needs at least one folder")
-    home = folders[0]
+    home = next((f for f in folders if str(home).strip() and _same(f, home)), folders[0])
 
     try:
         toks = _tokens(text)
@@ -762,19 +789,43 @@ def lead_text(text: str, file_dir: Path, folders: list[str]) -> str:
     parts.append(pieces["closing"] + "]")
     new = text[:pieces["start"]] + "".join(parts) + text[pieces["end"]:]
     # The terminal's working directory, in place, when the file sets one (D99 reads it before the
-    # first folder). With none, the first folder decides - which is now the home.
+    # first folder). With none, the first folder decides - so f187 adds one when the home is not first.
+    home_index = next((item for item in final if isinstance(item, int) and entries[item] is not None
+                       and _same(entries[item], home)), None)
+    home_name = (names[home_index] if home_index is not None else "") or Path(home).resolve().name
+    set_already = False
     if "settings" in top and toks[top["settings"][1]][0] == "{":
         toks2 = _tokens(new)
         inner = _members(new, toks2, _members(new, toks2, 0)["settings"][1])
         if CWD_KEY in inner and toks2[inner[CWD_KEY][1]][0] == "str":
+            set_already = True
             value_tok = toks2[inner[CWD_KEY][1]]
             old = str(json.loads(new[value_tok[1]:value_tok[2]]))
-            home_index = final[0] if isinstance(final[0], int) else None
-            home_name = (names[home_index] if home_index is not None else "") or Path(home).resolve().name
             value = _cwd_value(old, home_name, Path(home), file_dir)
             if value is not None and value != old:
                 new = new[:value_tok[1]] + json.dumps(value) + new[value_tok[2]:]
+    if not set_already and not _same(home, folders[0]):
+        value = "${workspaceFolder:" + home_name + "}"
+        if not _CWD_VALUE.match(value) or sum(1 for n in _names_after(new, file_dir) if n == home_name) != 1:
+            value = path_text(home) if relative else str(Path(home))
+        new = _with_cwd(new, value)
     return new
+
+
+def _names_after(text: str, file_dir: Path) -> list[str]:
+    """The folder names a workspace file's text gives (as workspace_folders reads them) - so a cwd reference by name is
+    only written when exactly one folder carries that name."""
+    try:
+        data = _loads(text)
+    except ValueError:
+        return []
+    out: list[str] = []
+    for entry in data.get("folders") or []:
+        raw = str(entry.get("path", "")).strip() if isinstance(entry, dict) else ""
+        resolved = _resolve(file_dir, raw) if raw else None
+        if resolved is not None:
+            out.append(str(entry.get("name") or "").strip() or resolved.name)
+    return out
 
 
 def glob_escape(text: str) -> str:
@@ -804,8 +855,9 @@ def _backup(path: Path, raw: bytes, backup_dir: Path) -> Path:
 
 
 def lead_with(path: str | Path, folders: list[str], *, expect: str = "",
-              backup_dir: str | Path | None = None, allowed: list[Path] | None = None) -> dict:
-    """Make this workspace file list exactly these folders, the first (the home) leading (f181).
+              backup_dir: str | Path | None = None, allowed: list[Path] | None = None, home: str = "") -> dict:
+    """Make this workspace file list exactly these folders in this order (f181), its terminal working
+    directory pointing at `home` (f187: the AI tooling folder; the first folder when not given).
 
     {"changed": bool, "backup": path or ""}. Refused - WorkspaceRewriteError, the file untouched -
     when it is outside the allowed folders, read-only, not readable as a workspace file, or changed
@@ -835,8 +887,9 @@ def lead_with(path: str | Path, folders: list[str], *, expect: str = "",
         text = raw[3 if bom else 0:].decode("utf-8")
     except UnicodeDecodeError as exc:
         raise WorkspaceRewriteError("it is not UTF-8 text") from exc
-    new = lead_text(text, p.parent, folders)
-    home = unique_folders(folders)[0]
+    listed = unique_folders(folders)
+    home = next((f for f in listed if str(home).strip() and _same(f, home)), listed[0] if listed else "")
+    new = lead_text(text, p.parent, folders, home)
     if new == text:
         return {"changed": False, "backup": ""}
     if not os.access(p, os.W_OK):

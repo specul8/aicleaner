@@ -327,13 +327,19 @@ STATIC_READ = {"readalltext", "readallbytes", "readalllines", "readlines", "exis
                "getenvironmentvariable", "combine", "getfilename", "getfilenamewithoutextension", "getdirectoryname",
                "getextension", "getfullpath", "gettemppath", "now", "utcnow", "utf8", "ascii", "unicode", "default",
                "newline", "isnullorempty", "isnullorwhitespace", "join", "format", "tobase64string",
-               "frombase64string", "tostring", "parse"}
+               "frombase64string", "tostring", "parse",
+               # D262: [Math]'s, which only compute (a [Math]::Min in a listing of AI Cleaner's logs was blocked)
+               "min", "max", "abs", "round", "floor", "ceiling", "truncate", "pow", "sqrt", "sign"}
 # Anywhere in a command, these make it more than a read: file methods, find's actions, git's output options.
 NOT_READ = re.compile(r"\.(moveto|copyto|delete|replace|create\w*|appendtext|appendall\w*|open\w*|write\w*|encrypt|"
                       r"decrypt|setattributes|setaccesscontrol|invoke\w*|start|save|rename)\s*\(|"
                       r"\s-(?:exec|execdir|ok|okdir|delete|fprint\w*|fls)\b|--output|\s-O\b|"
                       r"--open-files-in-pager|-membername\b", re.I)
 REDIRECT = re.compile(r"(?<![<>=-])>(?!=)")
+# A .NET format item: index, width, and a format of the characters formats use (N2, yyyy-MM-dd HH:mm, #,##0.0%).
+# Never $ ( ) or a backtick: "{0:$(Remove-Item x)}" runs the Remove-Item, and blanking it hid it (security review of
+# 1.3.12, 2026-11-21).
+FORMAT_ITEM = re.compile(r"\{\d+(?:,-?\d+)?(?::[\w.#,%+\-: /]*)?\}")
 
 
 def _single_quoted_out(command: str) -> str:
@@ -350,6 +356,11 @@ def _segment_reads(segment: str, tool: str) -> bool:
         assigned = re.match(r"^\$[\w:]+\s*=(?!=)\s*(.*)$", segment, re.S)
         if assigned:
             return _segment_reads(assigned.group(1), tool)
+        # D252: `$x = if (...) { ... } else { ... }` - the keyword alone; its condition and blocks are their own
+        # segments, each checked.
+        keyword = segment.split(None, 1)
+        if keyword[0].lower() in PS_KEYWORDS:
+            return len(keyword) == 1 or _segment_reads(keyword[1], tool)
         if re.match(r"^\$[^\s=]*\.[^\s=]*\s*=(?!=)", segment):
             return False                               # a property set on an object: not a read
         if segment[0] in "$'\"-+0123456789@," or re.match(r"^\.\w", segment):
@@ -362,7 +373,11 @@ def _segment_reads(segment: str, tool: str) -> bool:
     head = words[0].strip("'\"").replace("\\", "/").split("/")[-1].lower()
     head = head[:-4] if head.endswith(".exe") else head
     rest = words[1:]
+    if rest == ["--version"] and re.fullmatch(r"[\w.+-]+", head):
+        return True                                    # D262: `claude --version` beside a read of AI Cleaner's logs
     if head in ("python", "python3", "py"):
+        if rest[:2] == ["-c", PY_READ_ONLY]:
+            return True                                # D252: a -c body `_python_reads_out` found read-only
         positional = [w for w in rest[2:] if not w.startswith("-")]
         return rest[:2] == ["-m", "json.tool"] and len(positional) <= 1
     if head == "git":
@@ -371,6 +386,8 @@ def _segment_reads(segment: str, tool: str) -> bool:
         if head in PS_FOREACH:
             return not rest                            # only with a script block (checked as its own segments)
         return head in PS_READ or bool(PS_READ_VERB.match(head))
+    if head == "curl":                                 # D252: a GET that writes no file
+        return not any(CURL_WRITES.match(w) or CURL_SENDS.match(w) for w in rest)
     return head in BASH_READ
 
 
@@ -382,7 +399,7 @@ def _read_only(command: str, tool: str, segment_ok=None, mask=None, not_read=Non
     mask = mask or _single_quoted_out
     text = DISCARDED.sub(" ", command)
     text = re.sub(r"\$\{((?:env:)?\w+)\}", r"$\1", text, flags=re.I)     # ${HOME}, ${env:X}: a variable, not a block
-    if REDIRECT.search(mask(text)) or (not_read or NOT_READ).search(text):
+    if REDIRECT.search(mask(text)) or (not_read or NOT_READ).search(_grep_flags_out(text)):
         return False
     if re.search(r"(?<![&>])&(?!&)", mask(text).replace("&&", "")):
         return False                                   # PowerShell's call operator; Bash's background job
@@ -391,6 +408,10 @@ def _read_only(command: str, tool: str, segment_ok=None, mask=None, not_read=Non
     statics = [name.lower() for name in re.findall(r"::\s*(\w+)", text)]
     if any(name not in STATIC_READ for name in statics):
         return False
+    if tool == "PowerShell":
+        # D262: a -f format's placeholders ({0}, {1,5}, {0:N2}) are not script blocks; split at their braces, "{0}: {1}"
+        # left ": " as a command no list knows.
+        text = FORMAT_ITEM.sub(" ", text)
     return all(segment_ok(segment, tool) for segment in re.split(r"\$\(|&&|\|\||[;|\n(){}`]", mask(text)))
 
 
@@ -905,6 +926,250 @@ def _program_why(core: str, spelled: str, where: tuple[str | None, bool], instal
     return PROGRAM_WHY + ", this guard among it (its code or its Python environment)"
 
 
+# ---- D252: plain reads are not refused --------------------------------------------------------------------------------
+#
+# Brad authorised narrowing the rules above (2026-11-18) after they refused three reads: a repository Python's
+# `-c` reading a JSON file in the program folder, a PowerShell `$x = if (...) {...} else {...}`, and curl on AI
+# Cleaner's own API (`grep -o` read as wget's -O; curl not a reading command). Now a Python `-c` (or `python -`
+# here-document) body is read as Python: one that imports only json, os, sys and pathlib, opens files only to read
+# and calls only reading functions counts as a read (`_python_reads`); anything it does not recognise is not. A URL
+# (scheme://...) is never a path to the registry or the program. The checks before these rules (an API key read, the
+# settings file) still see the command as written.
+
+PY_READ_ONLY = "__d252_read_only__"            # stands in for a -c body found read-only; as Python, a NameError
+CURL_SENDS = re.compile(r"^-(?:-(?:data[\w-]*|form[\w-]*|json|request|upload-file|url-query|post[\w-]*)\b|"
+                        r"[a-zA-Z]*[dFXT])")
+PY_MODULES = {"json", "os", "os.path", "sys", "pathlib"}
+PY_NAMES = {"json.load", "json.loads", "json.dumps", "json.JSONDecodeError", "os.path", "os.environ", "os.getenv",
+            "os.getcwd", "os.listdir", "os.scandir", "os.walk", "os.stat", "os.lstat", "os.sep", "os.linesep",
+            "os.pathsep", "os.name", "os.curdir", "os.fspath", "sys.argv", "sys.stdout", "sys.stderr", "sys.stdin",
+            "sys.exit", "sys.version", "sys.version_info", "sys.platform", "sys.executable", "sys.maxsize",
+            "sys.stdout.write", "sys.stderr.write", "sys.stdout.reconfigure", "sys.stdout.flush", "pathlib.Path",
+            "pathlib.PurePath", "pathlib.PureWindowsPath", "pathlib.PurePosixPath", "pathlib.WindowsPath",
+            "pathlib.PosixPath"}
+PY_BUILTINS = {"print", "len", "open", "sorted", "list", "dict", "str", "int", "float", "bool", "tuple", "set",
+               "frozenset", "enumerate", "zip", "range", "min", "max", "sum", "any", "all", "isinstance", "repr",
+               "round", "abs", "map", "filter", "reversed", "format", "hasattr", "type", "iter", "next", "chr", "ord",
+               "hex", "divmod", "exit", "quit", "bytes", "Exception", "ValueError", "KeyError", "OSError",
+               "TypeError", "IndexError", "FileNotFoundError", "StopIteration"}
+PY_METHODS = {"read", "readline", "readlines", "read_text", "read_bytes", "get", "items", "keys", "values", "exists",
+              "is_file", "is_dir", "is_symlink", "iterdir", "glob", "rglob", "resolve", "absolute", "expanduser",
+              "stat", "lstat", "format", "format_map", "join", "split", "rsplit", "splitlines", "strip", "lstrip",
+              "rstrip", "lower", "upper", "casefold", "title", "capitalize", "startswith", "endswith", "find",
+              "rfind", "index", "rindex", "count", "partition", "rpartition", "encode", "decode", "zfill", "ljust",
+              "rjust", "center", "isdigit", "isalpha", "isalnum", "isspace", "isdecimal", "isnumeric", "islower",
+              "isupper", "append", "extend", "insert", "pop", "sort", "reverse", "clear", "add", "discard",
+              "setdefault", "update", "relative_to", "is_relative_to", "with_name", "with_suffix", "with_stem",
+              "as_posix", "as_uri", "is_absolute", "match", "joinpath", "samefile", "walk", "readlink", "hex",
+              "isoformat", "close", "seek", "tell", "readable", "open", "home", "cwd"}
+# A method named like a writer, taken without calling it (to hand to map, say): not a read.
+PY_WRITER = re.compile(r"write|unlink|remove|rename|replace|mkdir|rmdir|touch|chmod|chown|link|truncate|dump|system|"
+                       r"popen|spawn|exec|kill|startfile|copy|move|delete|save|putenv|unsetenv|^open$", re.I)
+PY_FUNCTION_ARGS = {"key", "default", "object_hook", "object_pairs_hook", "parse_float", "parse_int",
+                    "parse_constant", "cls", "opener"}
+PY_EXE = re.compile(r"^(?:python[\d.]*|py|pythonw)(?:\.exe)?$", re.I)
+
+
+def _py_dotted(node, modules: dict) -> str | None:
+    """`os.path.join` written out through the script's import names; None when not rooted at an imported module."""
+    import ast
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name) and node.id in modules:
+        return ".".join([modules[node.id], *reversed(parts)])
+    return None
+
+
+PY_OS_PATH = {"join", "exists", "lexists", "isfile", "isdir", "islink", "isabs", "expanduser", "expandvars",
+              "abspath", "realpath", "normpath", "normcase", "basename", "dirname", "split", "splitext", "splitdrive",
+              "getsize", "getmtime", "getctime", "getatime", "relpath", "commonpath", "commonprefix", "samefile",
+              "sep"}
+
+
+def _py_name_ok(dotted: str) -> bool:
+    """A module name the script may use: listed, or one of os.path's (pure) functions, or os.environ's reads."""
+    head, _dot, last = dotted.rpartition(".")
+    return dotted in PY_NAMES or dotted in PY_MODULES or (head == "os.path" and last in PY_OS_PATH) \
+        or (head == "os.environ" and last in ("get", "items", "keys", "values"))
+
+
+def _py_open_ok(call, mode_at: int) -> bool:
+    """open(...) / Path.open(...) only to read: a literal mode of r, b and t, and no opener."""
+    import ast
+    mode = call.args[mode_at] if len(call.args) > mode_at else None
+    for keyword in call.keywords:
+        if keyword.arg == "mode":
+            mode = keyword.value
+        elif keyword.arg not in ("encoding", "errors", "newline", "buffering"):
+            return False
+    if mode is None:
+        return True
+    return isinstance(mode, ast.Constant) and isinstance(mode.value, str) and set(mode.value) <= set("rbt")
+
+
+def _py_imports(tree) -> dict | None:
+    """The names the script's imports bind (name -> module or module.name), or None when one is not allowed."""
+    import ast
+    bound: dict = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name not in PY_MODULES:
+                    return None
+                bound[alias.asname or alias.name.split(".")[0]] = alias.name if alias.asname else \
+                    alias.name.split(".")[0]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level or node.module not in PY_MODULES:
+                return None
+            for alias in node.names:
+                if alias.name == "*" or not _py_name_ok(f"{node.module}.{alias.name}"):
+                    return None
+                bound[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return bound
+
+
+def _python_reads(code: str) -> bool:
+    """D252: whether a Python script only reads - fail closed: anything not recognised as reading is not."""
+    import ast
+    try:
+        tree = ast.parse(code)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    bound = _py_imports(tree)
+    if bound is None:
+        return False
+    modules = {name: target for name, target in bound.items() if target in PY_MODULES}
+    defined = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    callable_names = PY_BUILTINS | defined | {name for name, target in bound.items() if _py_name_ok(target)}
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.ClassDef, ast.AsyncFunctionDef, ast.Await, ast.Global, ast.Nonlocal)):
+            return False
+        if isinstance(node, ast.Name):
+            if node.id.startswith("__") and node.id != "__name__":
+                return False
+            if node.id in ("open", "exec", "eval", "compile", "getattr", "setattr", "delattr", "globals", "locals",
+                           "vars", "breakpoint", "input", "help", "memoryview") and id(node) not in called:
+                return False
+        elif isinstance(node, ast.Attribute):
+            if node.attr.startswith("_"):
+                return False
+            dotted = _py_dotted(node, modules)
+            if dotted is not None and not _py_name_ok(dotted):
+                return False                           # os.remove, sys.modules, json.dump, os.path.os, ...
+            if id(node) not in called and PY_WRITER.search(node.attr):
+                return False
+        elif isinstance(node, ast.Call) and not _py_call_ok(node, modules, callable_names):
+            return False
+    return True
+
+
+def _py_call_ok(call, modules: dict, callable_names: set) -> bool:
+    import ast
+    func = call.func
+    for keyword in call.keywords:                      # a function handed over to be called: a lambda or a builtin
+        if keyword.arg in PY_FUNCTION_ARGS and keyword.arg != "opener" and not (
+                isinstance(keyword.value, ast.Lambda)
+                or (isinstance(keyword.value, ast.Name) and keyword.value.id in PY_BUILTINS - {"open"})):
+            return False
+    if isinstance(func, ast.Name):
+        if func.id not in callable_names:
+            return False
+        if func.id == "open":
+            return _py_open_ok(call, 1)
+        if func.id in ("map", "filter", "iter") and call.args and not (
+                isinstance(call.args[0], ast.Lambda)
+                or (isinstance(call.args[0], ast.Name) and call.args[0].id in PY_BUILTINS - {"open"})):
+            return False
+        return True
+    if isinstance(func, ast.Attribute):
+        dotted = _py_dotted(func, modules)
+        if dotted is not None:
+            return _py_name_ok(dotted) and dotted not in PY_MODULES
+        if func.attr not in PY_METHODS:
+            return False
+        return _py_open_ok(call, 0) if func.attr == "open" else True
+    return False
+
+
+def _python_body(quoted: str, tool: str) -> str | None:
+    """A quoted -c argument as Python receives it; None when the shell would expand something in it."""
+    inner = quoted[1:-1]
+    if quoted[0] == "'":
+        return inner.replace("''", "'") if tool == "PowerShell" else inner
+    if "$" in inner or "`" in inner:
+        return None
+    return inner.replace('""', '"') if tool == "PowerShell" else re.sub(r"\\([\"\\$`])", r"\1", inner)
+
+
+PY_C = re.compile(r"(?P<call>&\s*)?(?P<exe>\"[^\"]*\"|'[^']*'|[^\s'\"|;&<>()]+)"
+                  r"(?P<flags>(?:\s+-[IuBEsS]+|\s+-X\s+\S+)*)\s+-c\s+")
+PY_HEREDOC = re.compile(r"^\s*(?P<exe>\"[^\"]*\"|'[^']*'|[^\s'\"|;&<>()]+)(?:\s+-[IuBEsS]+|\s+-X\s+\S+)*\s+"
+                        r"(?:-\s+)?<<(?P<dash>-?)\s*(?P<q>['\"]?)(?P<word>[A-Za-z_][\w-]*)(?P=q)\s*$")
+
+
+def _foreign_python(exe: str, install: Path, state: Path) -> bool:
+    """A Python outside AI Cleaner's folder (its venv's runs only what `_python_sanctioned` allows)."""
+    name = exe.strip("'\"").replace("\\", "/").split("/")[-1]
+    spelled = _spelled(exe)
+    return bool(PY_EXE.match(name)) and not (_names_program(spelled, install, state) or _names_state(spelled, state))
+
+
+def _python_reads_out(command: str, tool: str, install: Path, state: Path) -> str:
+    """D252: each `python -c "<body>"` (and Bash's `python - <<EOF`) whose body only reads, as `python -c
+    __d252_read_only__` - a read to the rules that follow. Any other body is left as written."""
+    out, at = [], 0
+    for found in PY_C.finditer(command):
+        if found.start() < at:
+            continue
+        rest = command[found.end():]
+        quoted = re.match(r"'(?:[^']|'')*'" if tool == "PowerShell" else r"'[^']*'", rest) if rest[:1] == "'" else \
+            re.match(r"\"(?:[^\"]|\"\")*\"" if tool == "PowerShell" else r"\"(?:[^\"\\]|\\.)*\"", rest)
+        if not quoted or not _foreign_python(found.group("exe"), install, state):
+            continue
+        body = _python_body(quoted.group(0), tool)
+        if body is None or not _python_reads(body):
+            continue
+        call = (found.group("call") or "") if tool == "Bash" else ""      # Bash's & ends a statement: kept
+        out.append(command[at:found.start()] + call + "python -c " + PY_READ_ONLY)
+        at = found.end() + quoted.end()
+    command = "".join(out) + command[at:]
+    if tool != "Bash" or "<<" not in command:
+        return command
+    lines, kept, i = command.split("\n"), [], 0
+    while i < len(lines):
+        found = PY_HEREDOC.match(lines[i])
+        if found and _foreign_python(found.group("exe"), install, state):
+            end = i + 1
+            while end < len(lines) and (lines[end].lstrip("\t") if found.group("dash") else lines[end]) \
+                    != found.group("word"):
+                end += 1
+            body = "\n".join(lines[i + 1:end])
+            if end < len(lines) and (found.group("q") or not re.search(r"[$`]", body)) and _python_reads(body):
+                kept.append("python -c " + PY_READ_ONLY)
+                i = end + 1
+                continue
+        kept.append(lines[i])
+        i += 1
+    return "\n".join(kept)
+
+
+URL = re.compile(r"(?<![\w.+-])(?!file:)[a-z][a-z0-9+.-]+://[^\s'\"|;&<>()`]*", re.I)
+
+
+def _urls_out(command: str) -> str:
+    """D252: a URL (not file://) names a place on a server, never a file of AI Cleaner's."""
+    return URL.sub("URL", command)
+
+
+def _grep_flags_out(text: str) -> str:
+    """D252: grep's and rg's short options (-o: only the matching part) are not wget's -O."""
+    return re.sub(r"(?<![\w-])((?:e|f)?grep|rg)((?:\s+-[A-Za-z]+)+)",
+                  lambda m: m.group(1) + re.sub(r"-[A-Za-z]+", "-_", m.group(2)), text)
+
+
 def _shell(command: str, state: Path | None = None, tool: str = "Bash", cwd: str = "",
            install: Path | None = None) -> str:
     command = DISCARDED.sub(" ", command)
@@ -914,10 +1179,12 @@ def _shell(command: str, state: Path | None = None, tool: str = "Bash", cwd: str
     if DPAPI_FILE.search(command) and READS_KEY.search(command):
         return "it would read a secret AI Cleaner or one of its add-ons keeps (DPAPI)"
     if state is not None:
-        program = _program_rules(command, tool, install or state / "app", state, cwd)
+        # D252: read-only Python bodies and URLs taken out first; the checks above and below see the command whole.
+        rules = _urls_out(_python_reads_out(command, tool, install or state / "app", state))
+        program = _program_rules(rules, tool, install or state / "app", state, cwd)
         if program and "aicleaner-config.json" in command.lower():
             program = "it would change AI Cleaner's settings file"     # in the program's folder, but a setting
-        why = _addon_rules(command, tool, state, cwd)
+        why = _addon_rules(rules, tool, state, cwd)
         # `.aicleaner\app` is also a name directly in AI Cleaner's folder, and `aiclea~1` also the registry's short
         # name: D247 refuses those too, but the program's reason is the one that says why.
         if why in (ADDONS_WHY, TOP_OF_STATE_WHY) and program and REGISTRY_STEM not in _spelled(command):

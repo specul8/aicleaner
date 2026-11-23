@@ -145,6 +145,8 @@ class _BrokerStdin:
 # session knows the rest is live (D179): a turn that ended during the replay is history, one that
 # ends after it is now.
 REPLAY_DONE = '{"type":"aicleaner_replay_done"}'
+# A prompt read back from the broker's record, carried through the stdout queue in its place among Claude's lines (D265).
+REPLAYED_INPUT = "aicleaner_replayed_input"
 
 
 class BrokerChild:
@@ -242,7 +244,10 @@ class BrokerChild:
         elif stream == "err":
             self.stderr.feed_data((line + "\n").encode("utf-8"))
         elif stream == "in" and self.on_input is not None and int(record.get("seq", 0)) <= self.replay_upto:
-            self.on_input(line, at)
+            # Through the same queue as Claude's lines, so it is read in the record's order (D265, 2026-11-22: handed
+            # over at once, a prompt reached the transcript ahead of the lines before it still waiting in the queue,
+            # and a 17:42 prompt was drawn inside a 12:42 turn).
+            self.stdout.feed_data((json.dumps({REPLAYED_INPUT: line, "at": at}, ensure_ascii=False) + "\n").encode("utf-8"))
         if int(record.get("seq", 0)) >= self.replay_upto:
             self._mark_replay_done()
         return False
@@ -681,6 +686,9 @@ class Profile:
     brief: str = ""
     # The client's OneDrive share (shares.py), for files crossing to the machine driving this.
     share: Path | None = None
+    # f187: the AI tooling folder (where sessions start; "" = the assets folder) and the client code folders (a label).
+    tooling: str = ""
+    client_code: list[str] = field(default_factory=list)
     # Workspace files, in order (the first sets home), and the user's home override (D99).
     workspaces: list[Path] = field(default_factory=list)
     home_override: str = ""
@@ -700,10 +708,21 @@ class Profile:
         return {"name": self.name, "client": self.client, "label": self.label or self.name,
                 "projects": [str(p) for p in self.projects], "model": self.model, "brief": self.brief,
                 "share": str(self.share) if self.share else "",
+                "tooling": self.tooling, "client_code": list(self.client_code),
                 "workspaces": [str(w) for w in self.workspaces], "home_override": self.home_override,
                 "homes_before": list(self.homes_before), "agent": self.agent,
                 "worktree_of": self.worktree_of, "worktree": dict(self.worktree),
                 "addon": self.addon, "group": self.group}
+
+
+def has_roles(profile: "Profile") -> bool:
+    """f187: the profile's folders have roles - a tooling folder, or a client assets folder that is one of its folders.
+    Its folder order is then the person's everywhere, and the home is the tooling (else assets) folder, never "first"."""
+    from .workspace import _same
+
+    share = getattr(profile, "share", None)
+    return bool(getattr(profile, "tooling", "")) or bool(
+        share and any(_same(share, p) for p in getattr(profile, "projects", []) or []))
 
 
 @dataclass
@@ -1246,7 +1265,8 @@ class Session(_FindsClaude):
         """The folder to run in: one of the configured projects, never anywhere else."""
         wanted = Path(project).expanduser() if project else (self.projects[0] if self.projects else None)
         if wanted is None:
-            raise SessionError("no project folders are configured (session.projects)")
+            raise SessionError("this project session has no folders - add a folder (Edit project sessions), or choose "
+                               "a topic that has a project assets folder")
         if network_path(str(project)):
             raise SessionError("a session cannot run in a network or device path")
         wanted = wanted.resolve()
@@ -1866,6 +1886,20 @@ class Session(_FindsClaude):
         pictures = [p for item in [*items, nxt] for p in item.get("images") or []]
         return len(pictures) <= MAX_COUNT and sum(len(p.get("data", "")) for p in pictures) <= MAX_TOTAL
 
+    def _roles_note(self) -> str:
+        """f187: each folder of the session and its roles, or "" (a profile with no Client Assets folder, an add-on's)."""
+        profile = self.profile
+        if profile is None or getattr(profile, "addon", "") or not getattr(profile, "share", None):
+            return ""
+        from .folderroles import start_note
+
+        try:
+            return start_note([str(p) for p in profile.projects], str(profile.share), str(profile.tooling or ""),
+                              [str(c) for c in profile.client_code or []])
+        except Exception as exc:  # noqa: BLE001 - a hint for Claude, never a reason not to send the prompt
+            log.debug("roles note for %s: %s", profile.name, exc)
+            return ""
+
     async def _send(self, text: str, images: list[dict[str, str]] | None = None,
                     mark: dict[str, Any] | None = None) -> None:
         if not self.running or self._process is None or self._process.stdin is None:
@@ -1873,6 +1907,10 @@ class Session(_FindsClaude):
         sent = text
         self.busy = True
         brief = (self.profile.brief if self.profile else "").strip()
+        # f187: which folder plays which role, told with the first prompt (beside the brief, shown as the brief is).
+        roles = self._roles_note() if not self._briefed else ""
+        if roles:
+            brief = f"{roles}\n\n{brief}" if brief else roles
         if brief and not self._briefed:
             # What this engagement is, and what not to touch. Sent with the first prompt rather
             # than as a turn of its own, so it costs no extra reply, and shown in the transcript,
@@ -2108,6 +2146,10 @@ class Session(_FindsClaude):
                     event = json.loads(text)
                 except json.JSONDecodeError:
                     event = {"type": "text", "text": text}
+                # A replayed prompt, in its place (D265). Before the times below: it is not one of Claude's lines.
+                if isinstance(event, dict) and REPLAYED_INPUT in event:
+                    self._replayed_input(str(event[REPLAYED_INPUT]), float(event.get("at") or 0))
+                    continue
                 # A brokered line knows when it was said, which matters once it is replayed.
                 times = getattr(process, "times", None)
                 if times and isinstance(event, dict):
@@ -2703,7 +2745,7 @@ class SessionHost(_FindsClaude):
         # stand in for every session's.
         host_owned = ("running", "available", "approvals", "permission_mode", "profiles", "sessions")
         clock = time.perf_counter()
-        profiles = [{**p.as_dict(), "tree": self.tree_of(p), "home": self.home_of(p)} for p in self.profiles]
+        profiles = [{**p.as_dict(), "tree": self.tree_of(p), "home": self._shown_home(p)} for p in self.profiles]
         if parts is not None:
             parts.append(("profiles", (time.perf_counter() - clock) * 1000))
         return {
@@ -2777,7 +2819,8 @@ class SessionHost(_FindsClaude):
 
         folders = [str(p) for p in profile.projects]
         try:
-            home = str(self.home_of(profile).get("folder") or "")
+            # f187: with folder roles the order is the person's - the home (the tooling folder) does not lead.
+            home = "" if has_roles(profile) else str(self.home_of(profile).get("folder") or "")
             return profile_tree(self.workspaces_of(profile), folders, self.allowed_roots(), home)
         except Exception as exc:  # noqa: BLE001 - a hint, never a failure
             log.debug("tree roots for %s: %s", profile.name, exc)
@@ -2803,6 +2846,16 @@ class SessionHost(_FindsClaude):
             first = str(profile.projects[0]) if profile.projects else ""
             return {"folder": first, "how": "first folder of the project session", "derived": first, "overridden": False}
 
+    def _shown_home(self, profile: Profile) -> dict[str, Any]:
+        """The home as the Session card shows it: f186's project assets folder for a profile with no folders."""
+        home = self.home_of(profile)
+        if not home.get("folder"):
+            assets = self.assets_start(profile)
+            if assets is not None:
+                return {**home, "folder": str(assets), "how": "the project assets folder (no other folders)",
+                        "assets": True}
+        return home
+
     def run_folders(self, profile: Profile) -> list[Path]:
         """The folders a session may run in: the home folder first (the default), then the rest of
         the tree. Nowhere else."""
@@ -2824,7 +2877,31 @@ class SessionHost(_FindsClaude):
         folders = [Path(f) for f in self.tree_of(profile) if allowed(f)]
         if home and Path(home).is_dir() and allowed(home):
             folders = [Path(home)] + [f for f in folders if not _same(f, home)]
+        if not folders and not profile.projects:
+            # f186: a project session with no folders of its own runs in its topic's project assets folder (design and
+            # documentation work, no repository). One with folders keeps DECISIONS 64: the assets folder is --add-dir.
+            assets = self.assets_start(profile)
+            if assets is not None:
+                return [assets]
         return folders or list(profile.projects)
+
+    def assets_start(self, profile: Profile) -> Path | None:
+        """f186: the project assets folder, when it is where this profile starts - it has no folders of its own (and
+        no workspace file folders on this disk), and the assets folder is a folder inside the allowed roots."""
+        from .folders import is_usable
+
+        share = getattr(profile, "share", None)
+        if not share or profile.projects or getattr(profile, "addon", ""):
+            return None
+        try:
+            if self.tree_of(profile):
+                return None
+            roots = self.allowed_roots()
+            if Path(share).is_dir() and roots and is_usable(Path(share), roots):
+                return Path(share)
+        except Exception as exc:  # noqa: BLE001 - nowhere to start is said by the start itself
+            log.debug("assets folder of %s: %s", profile.name, exc)
+        return None
 
     def conversation_folders(self, profile: Profile | None) -> list[str]:
         """Where this profile's conversations may be filed, home first: the home, its earlier homes,
@@ -3452,6 +3529,36 @@ class SessionHost(_FindsClaude):
 
     def sniff_file(self, name: str, root: str, path: str) -> dict[str, Any]:
         return self._browser(name).sniff_file(root, path)
+
+    def file_refs(self, name: str, refs: list[str], fresh: bool = False) -> dict[str, Any]:
+        """f188: which of the file names and paths a transcript shows are files in this session's folders - through the
+        tree's own allow-list (_browser, _locate), relative ones from the working folder first. `fresh`: the page's
+        Files tree changed, so the name index is walked again."""
+        from .filerefs import RefIndexes, resolve_refs
+
+        if not hasattr(self, "_ref_indexes"):
+            self._ref_indexes = RefIndexes()
+        profile = self.profile(name)
+        browser = self._browser(name)
+        share = profile.share if profile else None
+        if not browser.projects and not share:
+            return {"matches": {}, "complete": True}
+        _roots, allowed = browser._allowed_roots(share)
+        index = self._ref_indexes.get(profile.name, allowed, fresh=fresh)
+        return resolve_refs(browser, allowed, self._working_folder(profile), refs, index)
+
+    def _working_folder(self, profile: Profile) -> Path | None:
+        """Where a relative path in the transcript is read from (f188): the running session's folder, else where it
+        would start. None when neither is known - every folder is then tried alike."""
+        session = self.sessions.get(profile.name)
+        if session is not None and session.running and session.project:
+            return Path(session.project)
+        try:
+            folders = self.run_folders(profile)
+        except Exception as exc:  # noqa: BLE001 - a hint, never a failure
+            log.debug("working folder of %s: %s", profile.name, exc)
+            return None
+        return Path(folders[0]) if folders else None
 
     def search(self, name: str, query: str, limit: int = SEARCH_LIMIT, more: bool = False,
                budget_s: float = SEARCH_BUDGET_S) -> dict[str, Any]:

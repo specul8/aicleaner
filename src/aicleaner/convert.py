@@ -24,7 +24,7 @@ import tempfile
 import xml.etree.ElementTree as ElementTree
 import zipfile
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 PdfToText = Callable[[bytes], "str | None"]
 ImageToText = Callable[[bytes, str], "str | None"]
@@ -246,13 +246,19 @@ class RememberedReader:
     A picture in a conversation's history is sent again with every request, and each time it was read again: a
     PowerShell process and an OCR pass per picture, per request (2026-11-10, the Pictures settings measurements). The
     reading of the same bytes is the same, so it is kept - a successful reading only: a reader that failed (timeout,
-    error) is asked again next time. In memory, bounded, never written anywhere; lost on restart."""
+    error) is asked again next time. In memory, bounded; lost on restart unless a store is given (D261: the real
+    reader's readings, DPAPI-encrypted in the state folder - see picturestore.py)."""
 
-    def __init__(self, read: ImageToText, kept: int = READINGS_KEPT, max_chars: int = READINGS_MAX_CHARS) -> None:
+    def __init__(self, read: ImageToText, kept: int = READINGS_KEPT, max_chars: int = READINGS_MAX_CHARS,
+                 store: Any = None, reader: str = "") -> None:
+        """`store` (picturestore.PictureStore, D261): readings kept on disk as well, across restarts, keyed with
+        `reader` - the reader's fingerprint, so a different reader reads afresh."""
         import threading
         from collections import OrderedDict
 
         self._read = read
+        self.store = store
+        self.reader = reader
         self._kept: "OrderedDict[tuple[str, str], str | None]" = OrderedDict()
         self._chars = 0
         self._limit = (kept, max_chars)
@@ -261,22 +267,43 @@ class RememberedReader:
         self.remembered = 0      # readings answered from memory
 
     def __call__(self, raw: bytes, media: str = "") -> str | None:
+        return self.read(raw, media)[0]
+
+    def read(self, raw: bytes, media: str = "") -> tuple[str | None, bool]:
+        """(the reading, whether it was remembered) - D261: the upstream line says which pictures were read again."""
         key = (hashlib.sha256(raw).hexdigest(), media)
         with self._lock:
             if key in self._kept:
                 self._kept.move_to_end(key)
                 self.remembered += 1
-                return self._kept[key]
+                return self._kept[key], True
+        stored_key = ""
+        if self.store is not None:
+            from .picturestore import key_of
+            stored_key = key_of(raw, media, self.reader)
+            stored = self.store.get("text", stored_key)
+            if isinstance(stored, dict) and "text" in stored:
+                found = stored["text"] if isinstance(stored["text"], str) else None
+                self._keep(key, found)
+                with self._lock:
+                    self.remembered += 1
+                return found, True
         found = self._read(raw, media)           # a ConversionError goes to the caller, and nothing is kept
+        if self.store is not None:
+            self.store.put("text", stored_key, {"text": found})
         with self._lock:
             self.reads += 1
+        self._keep(key, found)
+        return found, False
+
+    def _keep(self, key: tuple[str, str], found: str | None) -> None:
+        with self._lock:
             if key not in self._kept:
                 self._kept[key] = found
                 self._chars += len(found or "")
             while self._kept and (len(self._kept) > self._limit[0] or self._chars > self._limit[1]):
                 _key, old = self._kept.popitem(last=False)
                 self._chars -= len(old or "")
-        return found
 
 
 def ocr_engine_name() -> str:

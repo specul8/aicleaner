@@ -67,7 +67,13 @@ if WINDOWS:
     _psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD]
     _psapi.GetPerformanceInfo.argtypes = [ctypes.c_void_p, wintypes.DWORD]
 
+    _k32.WaitForSingleObject.restype = wintypes.DWORD
+    _k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
     _SNAPPROCESS = 0x2
+    _SYNCHRONIZE = 0x00100000
+    _WAIT_OBJECT_0 = 0
+    _GONE_WAIT_MS = 5000          # kill_tree (D250): how long an ended process may take to be gone
     _QUERY_LIMITED = 0x1000
     _VM_READ = 0x0010
     _INVALID = wintypes.HANDLE(-1).value
@@ -129,17 +135,30 @@ def command_line(pid: int) -> str:
 
 
 def kill_tree(pid: int) -> bool:
-    """Process `pid` and everything under it ended (taskkill /T /F); True when Windows says it was done."""
+    """Process `pid` and everything under it ended (taskkill /T /F); True when `pid` itself has ended.
+
+    D250: judged by the process, not by taskkill's exit code. taskkill ends the children first, and a shell such as
+    `cmd /c` or `bash -c` exits by itself when its command is ended - taskkill then finds it gone, says "There is no
+    running instance of the task" and exits 255 although the whole tree is down, and Send now reported "Windows did not
+    end the command's process" for a command it had ended. A handle opened before taskkill runs is waited on after it,
+    so a process id reused in between cannot answer for it."""
     import subprocess
 
     if not WINDOWS or not pid:
         return False
+    handle = _k32.OpenProcess(_SYNCHRONIZE, False, int(pid))
     try:
-        done = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True, timeout=30,
-                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return done.returncode == 0
+        try:
+            done = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True, timeout=30,
+                                  creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, subprocess.SubprocessError):
+            done = None
+        if not handle:                                   # could not watch it: taskkill's word is all there is
+            return done is not None and done.returncode == 0
+        return _k32.WaitForSingleObject(handle, _GONE_WAIT_MS) == _WAIT_OBJECT_0
+    finally:
+        if handle:
+            _k32.CloseHandle(handle)
 
 
 def _details(proc: Proc) -> None:
